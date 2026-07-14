@@ -1,313 +1,143 @@
 # AI Video Factory / AI 视频工厂
 
-[简体中文](#简体中文) | [English](#english)
+面向自媒体的**批量原创短视频生产流水线**：一条参考内容进，多平台可发布的成片出。
+
+[简体中文](#简体中文) · [English](#english)
+
+---
 
 ## 简体中文
 
-AI Video Factory 是一个本地优先的视频发布增强工作台。它不是“自动搬运工具”，也不是“规避平台检测工具”；它的目标是帮助创作者把自己提供的参考视频、公开视频链接或本地视频，整理成更适合发布的成片包。
+### 这是什么
 
-项目会尽量保持真实原片作为主体，围绕画质、比例、字幕、封面、剪辑节奏、质量检查和原创风险报告做增强。所有产物都保存在本地，方便复查和二次编辑。
+AI Video Factory 把「参考内容 → 原创短视频」这条链路自动化：你提供一段参考素材（视频/音频/字幕/文本）和一个自己的素材库，系统用 LLM 重写文案、合成配音、拼装画面、叠加特效与逐句字幕，产出抖音 / 快手 / 视频号 / 小红书 / B站规格的成片。核心是**批量**（一张任务清单出 N 条）和**原创化**（文案经 LLM 重构、画面来自你的素材、配音重新合成）。
 
-## 项目定位
+**适合**：做多平台自媒体、需要一套系统覆盖多种内容类型（教程 / 影视解说 / 种草 / 情感 / 盘点 / 热点 / 通用）、希望非技术同学也能用浏览器工作台操作。
 
-适合这些场景：
+**不适合**：搬运他人成片、规避平台审核或相似度检测、处理无授权 / 私密 / DRM 视频。素材必须是你有权使用的（自拍 / 授权采购）；参考原片仅作为文案信息点来源。
 
-- 你有一条视频，想做发布前增强、清理、字幕和封面。
-- 你有 YouTube 或抖音公开视频链接，想先下载到本地再处理。
-- 你想保留原片主体，不想让成片变成明显的 AI 图片拼接视频。
-- 你需要输出质量报告、原创风险报告、剪辑计划和素材使用记录。
-- 你希望普通用户通过浏览器工作台使用，而不是直接面对一堆命令行参数。
+### 系统架构：五段链路
 
-不适合这些场景：
+每段一个独立 CLI，产物 JSON 串联，可单段跑、全链跑，或用 `batch` 一张清单批量跑。
 
-- 不适合用来规避版权、平台审核或相似度检测。
-- 不适合处理无授权、私密、登录后可见、DRM 或受限制的视频。
-- 目前不是完整的专业剪辑软件，也不是成熟的全自动原创视频生成系统。
+| 段 | 模块 | 职责 | 关键产物 |
+|---|---|---|---|
+| 1 | `rewrite` | LLM 原创改写文案（7 种内容风格）；视频/音频可直接进（自动 whisper 转写） | `rewrite.json` |
+| 2 | `assemble` | 素材池拼装 + TTS 配音 + 精确时长对齐（4 画幅 / pad·crop·blur 填充 / BGM ducking） | `release.mp4`、`assembly_plan.json` |
+| 3 | `effects` | Remotion 特效（片头 / 章节卡 / 花字 / 要点卡 / 金句 / 数字强调 + 转场音效），可选、优雅降级 | `release_with_effects.mp4` |
+| 4 | `subtitles` | 逐句字幕：whisper 取时间轴 + 原稿取文本，白字描边、中英双语、竖屏单行、libass 烧录 | `release_subtitled.mp4` |
+| 5 | `batch` | 批量驱动器 + 平台预设；单条失败不断批 | `batch_report.json` |
 
-## 核心能力
+> 另有 AI 生图链路：无视频素材时可用豆包 Seedream 为每节生图（`image_gen`），在批量链路里夹在 rewrite 与 assemble 之间。
 
-- 支持粘贴 YouTube / 抖音公开视频链接，并通过 `yt-dlp` 下载到本地任务目录。
-- 支持本地视频路径输入。
-- 默认保持原视频比例，避免把横屏、竖屏或特殊比例强行拉伸。
-- 围绕真实原片做发布增强：剪辑、去重复、修复节奏、音频标准化、字幕和封面。
-- 自动生成字幕，但只有在真实 transcript / OCR / SRT 证据存在时才会进入成片。
-- 自动生成封面，优先使用原片真实画面和视频元信息，避免粗糙模板封面。
-- 阻止 mock / 占位 AI 图片进入最终 `release.mp4`。
-- 输出质量报告、相似度和复用风险估计、联系图、剪辑计划和语义时间线。
-- 提供本地浏览器工作台，方便非技术用户操作。
+### 环境要求
 
-## 当前状态
+- Python 3.9+（本机为 3.14；虚拟环境在 `.venv/`）
+- `ffmpeg` / `ffprobe` 在 PATH（切片、拼接、混音、探测）
+- Node 18+ + npm（可选，Remotion 特效层）
+- `yt-dlp`（可选，公开视频链接下载）
 
-这是早期开源版本。它已经可以作为本地视频增强和发布前 QA 工具使用，但仍然处在快速迭代阶段。
+首次安装：
 
-已重点修正的问题：
-
-- 生成视频被强行压缩得太短。
-- 原视频比例被拉伸。
-- AI 占位图、模板卡、内部章节标签进入成片。
-- 字幕来源不可靠。
-- 封面过于粗糙。
-- README 和启动流程不清楚。
-
-仍然需要继续提升：
-
-- 更强的真实字幕 / ASR / OCR 能力。
-- 更好的 images2 或其他图片生成 provider 接入。
-- 更稳定的视频下载质量控制。
-- 更好的封面审美和多版本候选。
-- 更细的视频质量自检和可视化报告。
-
-## 环境要求
-
-- Python 3.9+
-- `ffmpeg` 和 `ffprobe`
-- macOS 或 Linux
-- 可选：`yt-dlp`，用于下载公开视频
-- 可选：`edge-tts`，用于草稿配音流程
-- 可选：OCR / ASR provider，用于更强字幕识别
-
-macOS 安装 ffmpeg：
-
-```bash
-brew install ffmpeg
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,tts]"   # 可选再加 asr：".[dev,tts,asr]"
+cd remotion; npm install; cd ..                              # 需要特效层时
 ```
 
-## 快速启动
+凭据只从环境变量读、不硬编码（工作台会持久化到已 gitignore 的 `credentials.yaml`）：
 
-进入项目目录：
-
-```bash
-cd /path/to/video_factory_project
+```powershell
+$env:OPENAI_API_KEY="sk-..."      # 或 ANTHROPIC_API_KEY / DEEPSEEK_API_KEY（改写，--provider 默认 auto 按序自动选）
+$env:VOLC_TTS_APPID="..."         # 豆包 TTS（旧版）
+$env:VOLC_TTS_TOKEN="..."
+# 或 $env:VOLC_TTS_APIKEY="..."    # 豆包 TTS（新版快捷 API，单 key）
+$env:ARK_API_KEY="..."            # 可选：AI 生图（方舟 Seedream）
 ```
 
-创建虚拟环境并安装依赖：
+### 怎么用
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -U pip
-python3 -m pip install -e ".[dev,tts]"
+**① 创作工作台（推荐，图形化）**
+
+双击项目根目录的 **`启动创作工作台.bat`**（自动开浏览器，关窗口即停服）。等价命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m video_factory.studio --port 56090
 ```
 
-启动本地工作台：
+只绑 `127.0.0.1`，本机访问。可填表单选平台 / 风格 / 配音、上传素材、配置凭据与生图风格，一键出片。
 
-```bash
-python3 -m video_factory.workbench --port 56080
+**② 批量出片（一张清单出 N 条）**
+
+```powershell
+.\.venv\Scripts\python.exe -m video_factory.batch --jobs jobs.json --dry-run   # 先校验参数展开
+.\.venv\Scripts\python.exe -m video_factory.batch --jobs jobs.json             # 正式跑
+.\.venv\Scripts\python.exe -m video_factory.batch --jobs jobs.json --only douyin_recap_01
 ```
 
-浏览器打开：
+job 里写 `"platform": "douyin"` 即自动套用下表预设，任何字段可显式覆盖。参考 [`jobs.example.json`](jobs.example.json)。
 
-```text
-http://127.0.0.1:56080/
+| platform | 画幅 | fit | 时长 | 字幕 | 特效 |
+|---|---|---|---|---|---|
+| douyin | 9:16 | blur | 60s | ✅ | ✅ |
+| kuaishou | 9:16 | blur | 90s | ✅ | ✅ |
+| shipinhao | 9:16 | blur | 120s | ✅ | ✅ |
+| xiaohongshu | 3:4 | blur | 60s | ✅ | ✅ |
+| bilibili | 16:9 | pad | 180s | ✅ | ✅ |
+
+**③ 单段手工跑（调试 / 精修）**
+
+```powershell
+$out = "video_factory/output/demo"
+.\.venv\Scripts\python.exe -m video_factory.rewrite   --source 原片.mp4 --duration 60 --style film_recap --output $out
+.\.venv\Scripts\python.exe -m video_factory.assemble  --rewrite $out/rewrite.json --assets D:\素材库 --tts doubao --aspect 9:16 --fit blur --output $out
+.\.venv\Scripts\python.exe -m video_factory.effects   --video $out/release.mp4 --plan $out/assembly_plan.json --rewrite $out/rewrite.json --output $out
+.\.venv\Scripts\python.exe -m video_factory.subtitles --video $out/release_with_effects.mp4 --rewrite $out/rewrite.json --audio $out/voiceover.wav --output $out
 ```
 
-推荐使用浏览器工作台。你可以粘贴 YouTube / 抖音公开视频链接，也可以填写本地视频路径，然后点击生成按钮。
+推荐顺序 `rewrite → assemble → effects → subtitles`（字幕最后烧，不被特效遮挡）。
 
-任务输出目录：
+### 主要产物
 
-```text
-video_factory/output/workbench/<job_id>/
+每个任务目录下可能生成：`rewrite.json`（文案）、`release.mp4`（拼装成片）、`assembly_plan.json`（分配明细）、`release_with_effects.mp4`（带特效）、`release_subtitled.mp4`（带字幕，最终成片）、`voiceover.wav`（配音）、`batch_report.json`（批量报告）。产物默认不入库（见 `.gitignore`）。
+
+### 测试
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## 命令行用法
+### 更多文档
 
-增强本地视频：
+- [`BATCH_PRODUCTION_GUIDE.md`](BATCH_PRODUCTION_GUIDE.md) —— 五段链路完整参数与排障
+- [`VIDEO_QUALITY_STANDARD.md`](VIDEO_QUALITY_STANDARD.md) —— 成片质量红线
+- [`HUMAN_EDITING_PLAYBOOK.md`](HUMAN_EDITING_PLAYBOOK.md) —— 人工精修参考
 
-```bash
-python3 -m video_factory.replicate \
-  --input "/absolute/path/to/source.mp4" \
-  --mode creative-edit
-```
+### 合规
 
-更保守的真人剪辑模式：
+只处理你拥有版权、获授权、或有权参考改编的内容。链接下载能力只面向公开可访问视频，不绕过登录 / 私密 / DRM / 平台限制。原创性只是工程约束（LLM 重构文案、自有素材、新合成配音），不构成对任何平台审核结果的保证。
 
-```bash
-python3 -m video_factory.replicate \
-  --input "/absolute/path/to/source.mp4" \
-  --mode human-edit
-```
+### License
 
-只生成脚本包：
-
-```bash
-python3 -m video_factory --script-only --output video_factory/output/script-pack
-```
-
-运行测试：
-
-```bash
-python3 -m pytest
-```
-
-## 主要产物
-
-每个任务可能生成：
-
-- `release.mp4`：最终成片
-- `cover.png`：封面图
-- `contact_sheet.jpg`：质检联系图
-- `quality_report.json`：质量检查报告
-- `originality_report.json`：原创风险和复用估计
-- `creative_plan.json`：剪辑策略和片段选择
-- `semantic_timeline.json`：内容结构和语义时间线
-- `transcript_analysis.json`：字幕、OCR、SRT 等证据分析
-- `caption_timeline.json` / `subtitles.srt`：字幕产物
-- `source_download.json`：下载来源、平台、标题、缓存路径和下载状态
-
-生成产物默认不会提交到 Git，见 `.gitignore`。
-
-## 项目结构
-
-```text
-video_factory/
-  workbench.py                 本地浏览器工作台
-  replicate.py                 视频发布增强主流程
-  source_download.py           YouTube / 抖音公开视频下载层
-  creative.py                  基于原片的剪辑和片段规划
-  originality.py               相似度和复用风险估计
-  content.py                   视频帧和内容分析
-  audio.py                     音频分析
-  semantic.py                  语义时间线
-  transcript.py                字幕 / SRT / OCR 证据层
-  analysis/                    参考视频分析工具
-
-tests/                         回归测试
-tools/                         手动渲染和实验脚本
-docs/superpowers/              设计记录和实施计划
-references/                    小型参考材料
-```
-
-## 质量原则
-
-当前产品方向会刻意收窄：
-
-1. 用户提供或下载的真实视频是主体。
-2. 系统负责修复、重排、剪辑、字幕、封面和质检。
-3. AI 视觉素材必须是真正可发布的资产，不能是占位图。
-4. mock 图片、模板卡和内部标签不能进入 `release.mp4`。
-5. 字幕必须来自可靠证据，不能把章节角色或内部说明烧进视频。
-6. 成片必须保持原视频比例，避免拉伸和假包装。
-7. 长视频默认不能被无理由压缩成短摘要。
-
-更多说明：
-
-- [`VIDEO_QUALITY_STANDARD.md`](VIDEO_QUALITY_STANDARD.md)
-- [`HUMAN_EDITING_PLAYBOOK.md`](HUMAN_EDITING_PLAYBOOK.md)
-- [`VIDEO_FACTORY_WORKFLOW.md`](VIDEO_FACTORY_WORKFLOW.md)
-
-## 合规说明
-
-请只处理你拥有版权、获得授权、或有权参考和改编的视频。本项目的视频下载能力只面向公开可访问视频，不绕过登录、私密访问、DRM、地区限制或平台限制。
-
-原创风险和相似度报告只是本地工程估计，目的是帮助你减少明显复用风险、提高内容质量，不保证任何平台一定通过审核。
-
-## 开发
-
-安装开发依赖：
-
-```bash
-python3 -m pip install -e ".[dev,tts]"
-```
-
-运行完整测试：
-
-```bash
-python3 -m pytest
-```
-
-发布改动前建议确认：
-
-- 生成文件都在 `video_factory/output/` 下。
-- 没有提交私密视频、Cookie、API Key 或账号数据。
-- 没有提交大型源视频文件。
-- 测试仍然通过。
-
-## License
-
-MIT License. See [`LICENSE`](LICENSE).
+MIT License，见 [`LICENSE`](LICENSE)。
 
 ---
 
 ## English
 
-AI Video Factory is a local-first video publishing enhancement workbench. It helps creators turn a reference video, public video URL, or local media file into a cleaner release package: edited video, cover image, subtitles, quality report, originality risk report, and review artifacts.
+AI Video Factory is a **batch original short-video production pipeline** for creators. Feed it one reference input plus your own asset library; it rewrites the script with an LLM, synthesizes voiceover, assembles footage, and overlays effects and per-line subtitles — producing platform-ready clips for Douyin / Kuaishou / Bilibili / Xiaohongshu / Shipinhao.
 
-This project does **not** try to bypass platform detection. The goal is to improve video quality, preserve aspect ratio, document sources, avoid fake AI-looking inserts, and make release decisions more auditable.
+It does **not** try to bypass platform review or similarity detection. Use only content you own or are licensed to adapt; your footage must be yours to use, and the reference clip serves only as an information-point source for the rewritten script.
 
-## What It Does
+**Five-stage pipeline** (each an independent CLI, chained via JSON): `rewrite` (LLM script) → `assemble` (footage + TTS + exact duration) → `effects` (Remotion, optional) → `subtitles` (per-line, bilingual) → `batch` (platform presets, one job list → N clips).
 
-- Downloads public reference videos from YouTube or Douyin with `yt-dlp`.
-- Keeps the source aspect ratio instead of stretching every video into one fixed canvas.
-- Builds source-guided edits for publishing enhancement.
-- Normalizes audio and keeps the real source video as the main visual body.
-- Generates subtitles only when real transcript/OCR/SRT evidence exists.
-- Generates a simple cover from real frames and source metadata.
-- Blocks mock or placeholder AI visuals from entering `release.mp4`.
-- Produces quality reports, contact sheets, EDL notes, creative plans, and originality risk reports.
-- Provides a local browser workbench for non-technical users.
+**Quick start** (Windows, Python 3.9+):
 
-## Quick Start
-
-Install requirements:
-
-```bash
-brew install ffmpeg
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,tts]"
+.\.venv\Scripts\python.exe -m video_factory.studio --port 56090   # local workbench (127.0.0.1)
 ```
 
-Create a virtual environment and install the project:
-
-```bash
-cd /path/to/video_factory_project
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -U pip
-python3 -m pip install -e ".[dev,tts]"
-```
-
-Start the local workbench:
-
-```bash
-python3 -m video_factory.workbench --port 56080
-```
-
-Open:
-
-```text
-http://127.0.0.1:56080/
-```
-
-The workbench is the recommended interface. Paste a YouTube/Douyin public video link or provide a local video path, then click the production button. Output files are written under:
-
-```text
-video_factory/output/workbench/<job_id>/
-```
-
-## Command Line Usage
-
-Enhance a local video:
-
-```bash
-python3 -m video_factory.replicate \
-  --input "/absolute/path/to/source.mp4" \
-  --mode creative-edit
-```
-
-Use a more conservative edit:
-
-```bash
-python3 -m video_factory.replicate \
-  --input "/absolute/path/to/source.mp4" \
-  --mode human-edit
-```
-
-Run tests:
-
-```bash
-python3 -m pytest
-```
-
-## Legal Notes
-
-Use this project only with content you own, licensed content, or content you have permission to reference or transform. The URL downloader only targets public videos and does not bypass login, private access, DRM, or platform restrictions.
-
-The originality and similarity reports are engineering heuristics. They are meant to help creators reduce obvious reuse risk and improve quality, not to guarantee approval by any platform.
+Requires `ffmpeg`/`ffprobe` on PATH; Node 18+ for the optional effects layer. Credentials are read from environment variables only. See [`BATCH_PRODUCTION_GUIDE.md`](BATCH_PRODUCTION_GUIDE.md) for full CLI usage. MIT licensed.
