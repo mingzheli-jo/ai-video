@@ -32,6 +32,8 @@ DEFAULT_FPS = 30
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_ACCENT = "#e8b84b"
+# ffmpeg 全局静默参数（与 assemble 一致）：去横幅、只留真错误，放在 `ffmpeg -y` 之后。
+_FF_QUIET = ("-hide_banner", "-loglevel", "error")
 
 # 派生规则常量（见设计文档 P3 更新）。
 INTRO_MAX_DURATION = 2.5
@@ -495,6 +497,7 @@ def overlay_effects(
     command = [
         "ffmpeg",
         "-y",
+        *_FF_QUIET,
         *inputs,
         "-filter_complex",
         full_filter,
@@ -742,6 +745,15 @@ def _probe_resolution(path: Path, runner: Runner) -> tuple[int, int]:
         return (0, 0)
 
 
+def _tail_stderr(text: str, max_lines: int = 12, max_chars: int = 300) -> str:
+    """取 ffmpeg stderr 末尾若干非空行：真正的失败原因在结尾，取开头只会拿到噪声。
+    再截断到 max_chars，避免个别无换行的超长行把错误信息撑爆。"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:])[-max_chars:]
+
+
 def _run(command: list[str], runner: Runner, context: str) -> None:
     try:
         completed = runner(
@@ -755,7 +767,7 @@ def _run(command: list[str], runner: Runner, context: str) -> None:
     except OSError as exc:
         raise EffectsError(f"{context}失败：无法启动 ffmpeg（{exc}）。") from exc
     if getattr(completed, "returncode", 0) != 0:
-        stderr = (getattr(completed, "stderr", "") or "")[:300]
+        stderr = _tail_stderr(getattr(completed, "stderr", "") or "")
         raise EffectsError(f"{context}失败（ffmpeg 退出码 {completed.returncode}）：{stderr}")
 
 

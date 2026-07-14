@@ -318,6 +318,35 @@ def test_subtitles_audio_added_only_when_voiceover_exists(tmp_path):
     assert argv_yes[argv_yes.index("--audio") + 1].endswith("voiceover.wav")
 
 
+def test_subtitles_audio_prefers_plan_recorded_fitted_audio(tmp_path):
+    """字幕时间轴必须用实际混入成片的音频。assemble 触发 atempo 变速微调后，成片用的是
+    voiceover_fitted.wav；build_subtitles_argv 应读 assembly_plan.json 的 audio_path 指向
+    fitted 版，而不是硬猜 voiceover.wav（否则字幕与配音系统性错位）。"""
+    job = resolve_job({"name": "j", "source": "s", "assets": "a"}, 0)
+    job_dir = tmp_path / "jobout"
+    job_dir.mkdir()
+    # 两份都在磁盘：原始 voiceover.wav（变速前）与真正混入成片的 fitted 版。
+    (job_dir / "voiceover.wav").write_text("raw", encoding="utf-8")
+    fitted = job_dir / "voiceover_fitted.wav"
+    fitted.write_text("fitted", encoding="utf-8")
+    (job_dir / "assembly_plan.json").write_text(
+        json.dumps({"audio_path": str(fitted)}, ensure_ascii=False), encoding="utf-8"
+    )
+    argv = build_subtitles_argv(job, job_dir)
+    picked = argv[argv.index("--audio") + 1]
+    assert picked.endswith("voiceover_fitted.wav")  # 取到 fitted 而非裸 voiceover.wav
+
+
+def test_subtitles_audio_falls_back_when_plan_missing(tmp_path):
+    """无 assembly_plan.json（如只跑到 rewrite 就中断重跑）时，回落到 voiceover.wav 不炸。"""
+    job = resolve_job({"name": "j", "source": "s", "assets": "a"}, 0)
+    job_dir = tmp_path / "jobout"
+    job_dir.mkdir()
+    (job_dir / "voiceover.wav").write_text("raw", encoding="utf-8")
+    argv = build_subtitles_argv(job, job_dir)
+    assert argv[argv.index("--audio") + 1].endswith("voiceover.wav")
+
+
 # ---------- dry-run 不调 runner ----------
 
 def test_dry_run_does_not_invoke_runners(tmp_path, patch_runners, capsys):

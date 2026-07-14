@@ -275,14 +275,39 @@ def _subtitles_input_video(job: ResolvedJob, job_dir: Path) -> Path:
     return job_dir / "release.mp4"
 
 
+def _subtitles_audio_path(job: ResolvedJob, job_dir: Path) -> Path | None:
+    """字幕时间轴的参照音频：必须与实际混入成片的那份配音一致。
+
+    assemble 现场 TTS 后可能触发 atempo 变速微调（字数偏差 >5% 就触发，很常见），真正混进
+    release.mp4 的是 voiceover_fitted.wav 而非 voiceover.wav——两者节奏不同。若字幕阶段仍读
+    原始 voiceover.wav 取时间轴，逐句字幕会与成片配音系统性错位且不报错。assembly_plan.json
+    的 audio_path 字段记录了本次实际使用的音频（fitted 与否都对），故优先读它；读不到再回落
+    job 显式 --audio / voiceover.wav。
+    """
+    plan_path = job_dir / "assembly_plan.json"
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if isinstance(plan, dict):
+            recorded = str(plan.get("audio_path") or "").strip()
+            if recorded:
+                candidate = Path(recorded)
+                if candidate.exists():
+                    return candidate
+    except (OSError, json.JSONDecodeError):
+        pass
+    fallback = Path(job.audio) if job.audio else job_dir / "voiceover.wav"
+    return fallback if fallback.exists() else None
+
+
 def build_subtitles_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
     argv = [
         "--video", str(_subtitles_input_video(job, job_dir)),
         "--rewrite", str(job_dir / "rewrite.json"),
     ]
-    # 时间轴来源：job 显式给的现成配音优先，否则用 assemble --tts 产出的 voiceover.wav。
-    voiceover = Path(job.audio) if job.audio else job_dir / "voiceover.wav"
-    if voiceover.exists():
+    # 时间轴来源：优先用 assembly_plan.json 记录的真实音频（含变速后的 fitted 版），
+    # 否则回落 job 显式 --audio / assemble --tts 产出的 voiceover.wav。
+    voiceover = _subtitles_audio_path(job, job_dir)
+    if voiceover is not None:
         argv += ["--audio", str(voiceover)]
     argv += ["--output", str(job_dir)]
     return argv

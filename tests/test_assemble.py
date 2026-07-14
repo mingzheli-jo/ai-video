@@ -324,6 +324,7 @@ def test_mux_command_byte_identical_when_no_bgm(tmp_path):
     release = str(tmp_path / "release.mp4")
     assert mux_cmd == [
         "ffmpeg", "-y",
+        "-hide_banner", "-loglevel", "error",
         "-i", silent,
         "-i", str(audio),
         "-filter_complex", "[0:v]tpad=stop_mode=clone:stop_duration=3600[vpad]",

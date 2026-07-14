@@ -58,6 +58,10 @@ BGM_DUCK_RELEASE_MS = 400
 # BGM 默认音量与淡入淡出秒数（CLI 可覆盖）。
 DEFAULT_BGM_VOLUME = 0.2
 DEFAULT_BGM_FADE = 2.0
+# ffmpeg 全局静默参数：-hide_banner 去掉版本/编译配置横幅，-loglevel error 只留真正的错误。
+# 放在 `ffmpeg -y` 之后、输入之前。不加时 ffmpeg 会先打几百字符版本 banner，_run 取到的
+# 报错基本是无用的版本信息而非真实失败原因，严重拖慢排障。
+_FF_QUIET = ("-hide_banner", "-loglevel", "error")
 
 
 class AssemblyError(RuntimeError):
@@ -278,6 +282,7 @@ def _build_image_segment_command(
     return [
         "ffmpeg",
         "-y",
+        *_FF_QUIET,
         "-i",
         str(clip_slice.path),
         "-vf",
@@ -309,6 +314,7 @@ def _build_segment_command(
     return [
         "ffmpeg",
         "-y",
+        *_FF_QUIET,
         "-ss",
         _format_time(clip_slice.start),
         "-t",
@@ -349,6 +355,7 @@ def _concat_segments(
         [
             "ffmpeg",
             "-y",
+            *_FF_QUIET,
             "-f",
             "concat",
             "-safe",
@@ -374,7 +381,7 @@ def _concat_segments(
 def _finalize_silent(silent_video: Path, release_path: Path, runner: Runner) -> None:
     # 无音频：直接把合并结果拷成 release（copy 保持无损、无重编码）。
     _run(
-        ["ffmpeg", "-y", "-i", str(silent_video), "-c", "copy", str(release_path)],
+        ["ffmpeg", "-y", *_FF_QUIET, "-i", str(silent_video), "-c", "copy", str(release_path)],
         runner,
         context="成片封装",
     )
@@ -423,6 +430,7 @@ def _mux_voiceover_command(
     return [
         "ffmpeg",
         "-y",
+        *_FF_QUIET,
         "-i",
         str(silent_video),
         "-i",
@@ -486,6 +494,7 @@ def _mux_with_bgm_command(
     return [
         "ffmpeg",
         "-y",
+        *_FF_QUIET,
         "-i",
         str(silent_video),
         "-i",
@@ -603,6 +612,16 @@ def _write_plan_json(
     plan_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _tail_stderr(text: str, max_lines: int = 12, max_chars: int = 300) -> str:
+    """取 ffmpeg stderr 的末尾若干非空行：真正的失败原因在结尾，取开头只会拿到
+    进度/横幅噪声。配合命令里的 -hide_banner -loglevel error，能让报错直指根因。
+    再对末尾内容截断到 max_chars，避免个别无换行的超长行把错误信息撑爆。"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:])[-max_chars:]
+
+
 def _run(command: list[str], runner: Runner, context: str) -> None:
     try:
         completed = runner(
@@ -616,7 +635,7 @@ def _run(command: list[str], runner: Runner, context: str) -> None:
     except OSError as exc:
         raise AssemblyError(f"{context}失败：无法启动 ffmpeg（{exc}）。") from exc
     if getattr(completed, "returncode", 0) != 0:
-        stderr = (getattr(completed, "stderr", "") or "")[:300]
+        stderr = _tail_stderr(getattr(completed, "stderr", "") or "")
         raise AssemblyError(f"{context}失败（ffmpeg 退出码 {completed.returncode}）：{stderr}")
 
 
@@ -684,7 +703,7 @@ def _fit_audio_to_target(
     # atempo>1 加速变短、<1 放慢变长：ratio=实际/目标 恰好是把实际拉到目标所需的倍速。
     tempo = max(_ATEMPO_MIN, min(_ATEMPO_MAX, actual / target_seconds))
     fitted = output_dir / "voiceover_fitted.wav"
-    command = ["ffmpeg", "-y", "-i", str(audio_path), "-af", f"atempo={tempo:.4f}", str(fitted)]
+    command = ["ffmpeg", "-y", *_FF_QUIET, "-i", str(audio_path), "-af", f"atempo={tempo:.4f}", str(fitted)]
     try:
         completed = runner(command, check=False, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
