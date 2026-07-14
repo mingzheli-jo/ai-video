@@ -74,12 +74,29 @@ def load_into_env(allowed: frozenset[str], path: Path | None = None) -> list[str
     return loaded
 
 
+def _sanitize_credential_value(value: str) -> str:
+    """净化凭据值，防注入。
+
+    save_credential 把值拼进单行 `KEY: "value"`。若值里含换行，就能凭空造出额外的
+    `OTHER_KEY: "..."` 行——下次启动被 load_into_env 当作合法凭据加载，从而**绕过调用方
+    （studio/settings）对键名的白名单校验**、篡改任意其它凭据；含双引号则能提前闭合引号。
+    这里逐字符重建：凡会被 str.splitlines() 当作换行的字符（\\n\\r\\v\\f\\x1c-\\x1e\\x85
+    \\u2028\\u2029 全集，用 splitlines 判定而非硬编码那串不可见字符）一律丢弃，双引号也丢弃，
+    再去两端空白。API Key/Token 本就是单行可见字符串，净化不会破坏任何合法值。
+    """
+    cleaned = "".join(
+        ch for ch in str(value)
+        if ch != '"' and len((ch + "x").splitlines()) == 1
+    )
+    return cleaned.strip()
+
+
 def save_credential(name: str, value: str, path: Path | None = None) -> None:
     """按行更新/插入一个凭据到 YAML，保留其余行与注释。文件缺失则先写模板。"""
     path = Path(path) if path is not None else CREDENTIALS_PATH
     if not path.exists():
         path.write_text(_HEADER, encoding="utf-8")
-    new_line = f'{name}: "{value}"'
+    new_line = f'{name}: "{_sanitize_credential_value(value)}"'
     out: list[str] = []
     replaced = False
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():

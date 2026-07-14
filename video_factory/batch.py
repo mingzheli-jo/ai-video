@@ -449,6 +449,25 @@ class JobReport:
         return payload
 
 
+# _collect_outputs 汇报的关键产物名——(重)跑前先清掉上一轮遗留，避免本轮在早期阶段就
+# 失败时，_collect_outputs 把上次遗留的旧成片当成本次 final 汇报，误导只看 final 的下游。
+_OUTPUT_ARTIFACTS = (
+    "rewrite.json",
+    "release.mp4",
+    "assembly_plan.json",
+    "release_with_effects.mp4",
+    "release_subtitled.mp4",
+)
+
+
+def _clear_stale_outputs(job_dir: Path) -> None:
+    for name in _OUTPUT_ARTIFACTS:
+        try:
+            (job_dir / name).unlink()
+        except OSError:  # 含 FileNotFoundError：不存在即无需清
+            pass
+
+
 def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> JobReport:
     """串行执行一个 job 的各阶段；任一阶段返回非 0 或抛异常即记 failed 并停止后续阶段。
 
@@ -458,6 +477,7 @@ def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> 
     started = time.monotonic()
     job_dir = Path(job.output)
     job_dir.mkdir(parents=True, exist_ok=True)
+    _clear_stale_outputs(job_dir)  # 清上一轮遗留，防早期失败误报旧成片为本次 final
     for stage in _stages_for(job):
         if on_stage is not None:
             try:
@@ -613,6 +633,12 @@ def write_report(report: dict, output_dir: Path | str) -> Path:
     return report_path
 
 
+def _image_gen_dry_note(job: ResolvedJob, job_dir: Path) -> list[str]:
+    """dry-run 展示 image_gen 阶段（它不走 argv 而是直接调 image_gen，故给一行说明）。"""
+    size = _GEN_SIZE_BY_ASPECT.get(job.aspect, "默认尺寸")
+    return [f"(豆包 Seedream 生图 size={size} → {job_dir / 'gen_assets'})"]
+
+
 def _dry_run_argv(job: ResolvedJob) -> dict[str, list[str]]:
     """dry-run：展开每阶段的最终参数（不执行），按 job 开关裁掉未启用阶段。"""
     job_dir = Path(job.output)
@@ -622,7 +648,12 @@ def _dry_run_argv(job: ResolvedJob) -> dict[str, list[str]]:
         "effects": build_effects_argv,
         "subtitles": build_subtitles_argv,
     }
-    return {stage: builders[stage](job, job_dir) for stage in _stages_for(job)}
+    # image_gen 阶段没有 CLI argv（batch 直接调 image_gen），给一行说明避免 KeyError。
+    return {
+        stage: builders[stage](job, job_dir) if stage in builders
+        else _image_gen_dry_note(job, job_dir)
+        for stage in _stages_for(job)
+    }
 
 
 def _print_dry_run(jobs: list[ResolvedJob], only: str) -> None:

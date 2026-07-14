@@ -771,3 +771,29 @@ def test_gen_sizes_within_seedream_bounds():
         w, h = (int(x) for x in s.split("x"))
         assert 1280 <= w <= 4096, f"{s} 宽越界"
         assert 1280 <= h <= 4096, f"{s} 高越界"
+
+
+def test_dry_run_handles_ai_image_stage(tmp_path):
+    """回归：ai_image 任务 dry-run 不再 KeyError（_dry_run_argv 的 builders 原本缺 image_gen 键）。"""
+    job = resolve_job(
+        {"name": "g", "source": "s", "assets": "a", "visual_source": "ai_image",
+         "output": str(tmp_path / "o")},
+        0,
+    )
+    argv_by_stage = batch._dry_run_argv(job)  # 原会抛 KeyError
+    assert "image_gen" in argv_by_stage
+    assert "gen_assets" in " ".join(argv_by_stage["image_gen"])
+
+
+def test_run_job_clears_stale_final_before_running(tmp_path, patch_runners):
+    """回归：(重)跑前清掉上一轮遗留成片。本轮在 rewrite 阶段就失败时，final 不应指向旧 release。"""
+    patch_runners(RunnerRecorder(fail_stage="rewrite"))
+    out = tmp_path / "job"
+    out.mkdir()
+    (out / "release_subtitled.mp4").write_text("stale", encoding="utf-8")  # 上一轮遗留成片
+    job = resolve_job({"name": "j", "source": "s", "assets": "a", "output": str(out)}, 0)
+    report = run_job(job)
+    assert report.status == "failed" and report.stage_failed == "rewrite"
+    assert "subtitled" not in report.outputs  # 旧成片已清
+    assert report.to_dict()["final"] == ""  # final 不再指向陈旧文件
+    assert not (out / "release_subtitled.mp4").exists()

@@ -428,3 +428,33 @@ def test_page_contains_style_prompt_card():
 
     html = studio_ui.render_page()
     assert 'id="stylePrompt"' in html and 'id="stylePromptSave"' in html
+
+
+# ---------- CSRF / Origin 防护 ----------
+
+def test_post_rejects_foreign_origin(server):
+    """安全回归：跨站 Origin 的 POST 被 403 拒绝（防恶意网页 CSRF 打本地工作台）。"""
+    status, _, _ = _request(
+        server["port"], "POST", "/api/credentials",
+        {"name": "OPENAI_API_KEY", "value": "x"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert status == 403
+
+
+def test_post_allows_same_origin(server):
+    """同源 Origin（本机）的 POST 正常放行。"""
+    port = server["port"]
+    status, _, _ = _request(
+        port, "POST", "/api/batch/validate", {"jobs": [{"name": "j"}]},
+        headers={"Origin": f"http://127.0.0.1:{port}"},
+    )
+    assert status == 200
+
+
+def test_post_without_origin_allowed(server):
+    """无 Origin 头（curl/本地脚本）放行，不破坏本地工具既有用法。"""
+    status, _, _ = _request(
+        server["port"], "POST", "/api/batch/validate", {"jobs": [{"name": "j"}]},
+    )
+    assert status == 200

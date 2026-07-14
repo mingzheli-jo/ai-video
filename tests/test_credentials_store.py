@@ -1,4 +1,4 @@
-"""credentials_store 纯函数单测：扁平 YAML 解析 / 保存 / 加载。"""
+"""credentials_store 纯函数单测：扁平 YAML 解析 / 保存 / 加载 / 值净化。"""
 
 import os
 
@@ -89,3 +89,24 @@ def test_save_then_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.delenv("VOLC_TTS_APIKEY", raising=False)
     cs.load_into_env(ALLOWED, path=path)
     assert os.environ["VOLC_TTS_APIKEY"] == "vk-round"
+
+
+def test_save_credential_blocks_newline_injection(tmp_path):
+    """安全回归：凭据值里的换行/引号不得注入出额外的白名单键行，绕过键名白名单。"""
+    path = tmp_path / "credentials.yaml"
+    # 攻击载荷：借写 DEEPSEEK 之机，试图凭空注入一行 OPENAI_API_KEY。
+    payload = "x" + chr(34) + chr(10) + 'OPENAI_API_KEY: "sk-attacker'
+    cs.save_credential("DEEPSEEK_API_KEY", payload, path=path)
+    result = cs._parse_flat_yaml(path.read_text(encoding="utf-8"), ALLOWED)
+    assert "OPENAI_API_KEY" not in result             # 绝不能凭空多出别的键
+    assert chr(10) not in result["DEEPSEEK_API_KEY"]  # 换行已被剥离，值收在单行内
+
+
+def test_sanitize_credential_value_strips_line_breaks_and_quotes():
+    """净化只剥会被 splitlines() 当换行的字符（含 Unicode 行分隔符 U+2028/U+2029）与双引号，
+    不动普通可见字符。用 chr() 构造输入以避开源码转义歧义。"""
+    crlf = chr(13) + chr(10)  # \r\n
+    assert cs._sanitize_credential_value("key" + crlf + "INJECT") == "keyINJECT"
+    assert cs._sanitize_credential_value("a" + chr(0x2028) + "b") == "ab"   # Unicode 行分隔符也剥
+    assert cs._sanitize_credential_value("a" + chr(34) + "b" + chr(34) + "c") == "abc"  # 双引号剥除
+    assert cs._sanitize_credential_value("sk-live_AB.cd-12") == "sk-live_AB.cd-12"  # 合法 key 不动

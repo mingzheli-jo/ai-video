@@ -7,7 +7,8 @@ run_job），本模块只负责 HTTP 服务、上传落盘、任务登记与产�
 设计约束：
 - 纯标准库 http.server；只绑 127.0.0.1（本机个人工具）；上传走 raw-body POST（非
   multipart，不用已废弃的 cgi）。
-- 凭据只存进程内存（os.environ），绝不写盘、绝不在响应/日志回显 value。
+- 凭据即时写进 os.environ 生效，并持久化到项目根 credentials.yaml（已 gitignore）；
+  响应与日志绝不回显 value。
 - /media 只服务 output/ 目录树内文件（防路径穿越），mp4 支持单段 Range 便于播放拖动。
 - 任务表内存存储 + threading.Lock；进程重启任务清空（产物在盘上，可接受）。
 """
@@ -70,6 +71,11 @@ _SAFE_EXTS = frozenset({
 UPLOAD_KINDS = frozenset({"source", "bgm", "asset"})
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024  # 4GB
 _UPLOAD_CHUNK = 1024 * 1024  # 1MB
+# JSON 请求体上限（批量任务清单也远够）；防止谎报超大 Content-Length 撑爆内存。
+MAX_JSON_BYTES = 8 * 1024 * 1024  # 8MB
+# CSRF 防护：本工作台自身的合法来源主机。浏览器发起的跨站 POST 必带 Origin，据此拦截。
+# 绝不能为消 CORS 报错而下发 Access-Control-Allow-Origin，那会让这道防线失效。
+_ALLOWED_ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
 
 # ---------- 依赖 / 凭据探测 ----------
@@ -359,6 +365,8 @@ _MEDIA_TYPES = {
 def make_handler(store: TaskStore):
     class StudioHandler(BaseHTTPRequestHandler):
         server_version = "VideoFactoryStudio/1.0"
+        # 每连接 socket 读超时：防慢速请求（谎报大 Content-Length 后龟速发送）长期占用线程。
+        timeout = 60
 
         def log_message(self, fmt: str, *args) -> None:
             print(f"[studio] {self.address_string()} - {fmt % args}")
@@ -385,6 +393,8 @@ def make_handler(store: TaskStore):
             length = int(self.headers.get("Content-Length", "0") or "0")
             if length <= 0:
                 return {}
+            if length > MAX_JSON_BYTES:
+                return None  # 过大请求体直接拒，不读进内存（防资源耗尽）
             raw = self.rfile.read(length)
             try:
                 body = json.loads(raw.decode("utf-8", errors="replace").lstrip("﻿"))
@@ -511,9 +521,30 @@ def make_handler(store: TaskStore):
 
         # ----- POST -----
 
+        def _origin_allowed(self) -> bool:
+            """CSRF 防护：状态变更(POST)只接受来自本工作台自身的请求。
+
+            浏览器发起的跨站 POST（恶意网页的表单/fetch，如打 /api/upload 写文件、
+            /api/credentials 篡改凭据）必带 Origin 头，其 host 非本机即拒。无 Origin 的
+            请求（curl / 本地脚本）放行，保留本地工具既有用法。
+            """
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            try:
+                host = urlparse(origin).hostname
+            except ValueError:
+                return False
+            return host in _ALLOWED_ORIGIN_HOSTS
+
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
+            if not self._origin_allowed():
+                self._send_json(
+                    {"error": "跨站请求被拒绝（Origin 校验未通过）。"}, HTTPStatus.FORBIDDEN
+                )
+                return
             try:
                 if path == "/api/credentials":
                     self._handle_credentials()
