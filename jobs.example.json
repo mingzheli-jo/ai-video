@@ -1,0 +1,40 @@
+{
+  "_comment": "批量任务清单示例（P9）。python -m video_factory.batch --jobs jobs.example.json 驱动 N 条成片。路径为占位符，请替换成真实路径后再跑；先用 --dry-run 校验参数展开。参数优先级：job 显式字段 > platform 预设 > 全局默认（16:9/pad/90s/无字幕/带特效）。",
+  "jobs": [
+    {
+      "_comment": "抖音影视解说：竖屏 9:16 + blur 填充 + 60s + 带字幕带特效（douyin 预设）；style=film_recap 走悬念叙事模板。",
+      "name": "douyin_recap_01",
+      "platform": "douyin",
+      "style": "film_recap",
+      "source": "path/to/原片字幕.srt",
+      "assets": "path/to/影视素材目录",
+      "brief": "面向下班通勤人群，30 秒内制造第一个反转",
+      "tts": "doubao",
+      "lower_thirds": true
+    },
+    {
+      "_comment": "小红书带货种草：3:4 + blur + 60s + 带字幕带特效（xiaohongshu 预设）；style=seeding，配 BGM 压低到 0.12。",
+      "name": "xhs_seeding_01",
+      "platform": "xiaohongshu",
+      "style": "seeding",
+      "source": "path/to/产品口播文案.txt",
+      "assets": "path/to/产品素材目录",
+      "brief": "第一人称真实体验，规避绝对化用语，落到价格锚点",
+      "voice": "亲切女声",
+      "bgm": "path/to/轻快bgm.mp3",
+      "bgm_volume": 0.12
+    },
+    {
+      "_comment": "B 站教程：横屏 16:9 + pad + 180s + 带字幕带特效（bilibili 预设）；显式关特效改走纯净讲解，output 自定义到独立目录。",
+      "name": "bili_tutorial_01",
+      "platform": "bilibili",
+      "style": "tutorial",
+      "source": "path/to/教程转写.json",
+      "assets": "path/to/录屏素材目录",
+      "brief": "面向零基础新手，每节一个可执行步骤，结尾引导收藏",
+      "effects": false,
+      "subtitles": true,
+      "output": "video_factory/output/batch/bili_tutorial_01"
+    }
+  ]
+}

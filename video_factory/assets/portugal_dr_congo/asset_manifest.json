@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "overlay_style": "cinematic_broll",
+  "license_policy": "No official FIFA, broadcaster, federation, or match-highlight footage.",
+  "assets": [
+    {
+      "key": "broll_dribble",
+      "kind": "video",
+      "segment_role": "portugal_advantage",
+      "local_path": "video_factory/assets/portugal_dr_congo/broll/mixkit-player-dribbling-43484.mp4",
+      "source_url": "https://assets.mixkit.co/videos/43484/43484-1080.mp4",
+      "page_url": "https://mixkit.co/free-stock-video/player-dribbling-in-a-one-on-one-in-a-soccer-43484/",
+      "license_url": "https://mixkit.co/license/#videoFree",
+      "notes": "Generic semi-professional soccer action, no team branding or broadcast graphics."
+    },
+    {
+      "key": "broll_semi_pro_game",
+      "kind": "video",
+      "segment_role": "dr_congo_risk",
+      "local_path": "video_factory/assets/portugal_dr_congo/broll/mixkit-semi-pro-soccer-game-43485.mp4",
+      "source_url": "https://assets.mixkit.co/videos/43485/43485-1080.mp4",
+      "page_url": "https://mixkit.co/free-stock-video/semi-pro-soccer-game-43485/",
+      "license_url": "https://mixkit.co/license/#videoFree",
+      "notes": "Generic night soccer match footage, no scorebug or federation logo."
+    },
+    {
+      "key": "broll_penalty",
+      "kind": "video",
+      "segment_role": "final_prediction",
+      "local_path": "video_factory/assets/portugal_dr_congo/broll/mixkit-penalty-goal-43495.mp4",
+      "source_url": "https://assets.mixkit.co/videos/43495/43495-1080.mp4",
+      "page_url": "https://mixkit.co/free-stock-video/penalty-kick-seen-from-behind-the-goal-nets-43495/",
+      "license_url": "https://mixkit.co/license/#videoFree",
+      "notes": "Generic penalty scene for prediction tension, no competition media."
+    },
+    {
+      "key": "broll_fans",
+      "kind": "video",
+      "segment_role": "match_setup",
+      "local_path": "video_factory/assets/portugal_dr_congo/broll/mixkit-fans-celebrating-44602.mp4",
+      "source_url": "https://assets.mixkit.co/videos/44602/44602-1080.mp4",
+      "page_url": "https://mixkit.co/free-stock-video/friends-from-different-countries-celebrating-a-goal-44602/",
+      "license_url": "https://mixkit.co/license/#videoFree",
+      "notes": "Generic World Cup viewing party atmosphere, no broadcast footage."
+    },
+    {
+      "key": "keyframe_hook",
+      "kind": "generated_image",
+      "segment_role": "hook",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/hook_presenter.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Generic AI sports commentator in a dark studio, not modeled after a real person."
+    },
+    {
+      "key": "keyframe_studio",
+      "kind": "generated_image",
+      "segment_role": "match_setup",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/studio_wide.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Wide sports-tech studio still with empty space for overlays."
+    },
+    {
+      "key": "keyframe_advantage",
+      "kind": "generated_image",
+      "segment_role": "portugal_advantage",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/advantage_monitor.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Presenter viewing a football attack-analysis monitor wall; readable text is added by code."
+    },
+    {
+      "key": "keyframe_risk",
+      "kind": "generated_image",
+      "segment_role": "dr_congo_risk",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/risk_monitor.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Tense football risk-analysis studio still with yellow and red lighting accents."
+    },
+    {
+      "key": "keyframe_monitor_wall",
+      "kind": "generated_image",
+      "segment_role": "ai_skill_simulation",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/monitor_wall.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Screen-focused studio image; all readable text is added by code."
+    },
+    {
+      "key": "keyframe_final",
+      "kind": "generated_image",
+      "segment_role": "final_prediction",
+      "local_path": "video_factory/assets/portugal_dr_congo/keyframes/final_presenter.png",
+      "source_url": "generated locally with the built-in image generation tool",
+      "page_url": "",
+      "license_url": "project-generated",
+      "notes": "Final presenter still for stable end frame, no real-player likeness."
+    }
+  ],
+  "segment_asset_order": {
+    "hook": ["broll_penalty", "broll_dribble"],
+    "match_setup": ["broll_semi_pro_game", "broll_dribble", "broll_penalty"],
+    "portugal_advantage": ["broll_dribble", "broll_semi_pro_game", "broll_penalty"],
+    "dr_congo_risk": ["broll_semi_pro_game", "broll_penalty", "broll_dribble"],
+    "ai_skill_simulation": ["broll_dribble", "broll_semi_pro_game"],
+    "final_prediction": ["broll_penalty", "broll_semi_pro_game"]
+  }
+}

@@ -1,0 +1,925 @@
+"""逐句动态字幕（P7）：把原稿文本按配音时间轴烧成硬字幕。
+
+推荐流水线顺序：rewrite → assemble → effects → subtitles。字幕放最后一步烧录，
+确保它盖在特效之上、不被章节卡/片头等遮挡。
+
+核心思路是**时间轴与文本分离**：
+- 时间轴来自对**配音音频**的 ASR（faster-whisper，只取 start/end/text，不信任其文字）；
+- 显示文本来自 rewrite.json 的 full_voiceover 原稿（零错别字）。
+把原稿分句后，按字符占比映射到 ASR 给出的时间线，TTS 把 "30%" 念成 "百分之三十"
+这类局部字符数不一致按比例分摊、漂移限制在单句内。
+
+两种模式：
+- align（默认优先）：用 ASR 时间轴对齐原稿句子；
+- ratio（降级）：faster-whisper 不可用时，按字符占比把音频总时长分摊成时间轴，
+  产物 JSON 里留痕 mode=ratio。
+mode 参数 auto（默认，align 失败降 ratio）| align | ratio。
+
+烧录用 ffmpeg libass subtitles 滤镜。为规避 Windows 路径转义坑，
+烧录时 cwd=输出目录、滤镜参数写裸文件名 subtitles=subtitles.ass（文件名固定纯 ASCII）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+Runner = Callable[..., subprocess.CompletedProcess]
+
+DEFAULT_WIDTH = 1920
+DEFAULT_HEIGHT = 1080
+
+# .ass 文件名固定纯 ASCII，不给用户自定义——libass 滤镜参数写裸文件名才不踩 Windows 路径坑。
+ASS_FILENAME = "subtitles.ass"
+RELEASE_FILENAME = "release_subtitled.mp4"
+REPORT_FILENAME = "subtitles_report.json"
+
+# 单条字幕最长字数，超过按逗号二切、再不行硬切。
+MAX_CUE_CHARS = 25
+# 每条字幕最短显示时长（秒），太短会一闪而过看不清。
+MIN_CUE_DURATION = 0.8
+# 分句主分隔符（句末标点 + 换行）。
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？…；\n]+")
+# 二切用逗号类分隔符。
+# 在逗号「后面」零宽切分，逗号留在前半句——重拼碎片时内部逗号不丢（可读性）。
+_COMMA_KEEP_RE = re.compile(r"(?<=[，、,])")
+# 按逗号切分并丢弃逗号（字幕单行切割用；也规避 libass 全角逗号渲染残留 bug）。
+_COMMA_SPLIT_RE = re.compile(r"[，、,]")
+# 归一化 ASR 文本时剥离的标点（对齐只看字符占比，标点不计入时间权重）。
+_PUNCT_RE = re.compile(r"[^\w一-鿿]+")
+
+# 字号自适应：同时受高度(h*0.05)和宽度约束，封顶 96。竖屏(宽小)必须按宽度收字号，
+# 否则一行放不下会溢出屏幕两侧（WrapStyle=0 会换行，但字号过大仍难看）。
+_FONT_RATIO = 0.05
+_FONT_SIZE_CAP = 96
+# 左右安全边距占宽比例；配合按 _CHARS_PER_LINE_BUDGET 收字号，保证 MAX_CUE_CHARS 最多折 2 行。
+_SIDE_MARGIN_RATIO = 0.06
+_CHARS_PER_LINE_BUDGET = 13  # ceil(MAX_CUE_CHARS/2)，令满长字幕最多折成 2 行都在可用宽度内
+# 底部安全边距：h*0.08 取整。
+_MARGIN_RATIO = 0.08
+
+# 英文副字幕（中上英下）：字号相对中文的比例、再缩一档的比例、以及拉丁字符平均宽度
+# 相对字号的经验系数（proportional 字体约 0.5~0.6em，取 0.55 估算每行可容字符数）。
+_EN_FONT_RATIO = 0.55
+_EN_FONT_RATIO_SHRUNK = 0.45
+_EN_CHAR_WIDTH_EM = 0.55
+_EN_FONT_MIN = 12
+
+
+class SubtitlesError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Cue:
+    """一条字幕：显示区间 [start, end] 与文本。"""
+
+    start: float
+    end: float
+    text: str
+
+
+# --- 分句 ----------------------------------------------------------------
+
+
+def split_sentences(text: str) -> list[str]:
+    """把原稿切成适合单条字幕的短句。
+
+    规则：先按句末标点/换行切；超过 MAX_CUE_CHARS 的长句按逗号二切；
+    仍超长的按 MAX_CUE_CHARS 硬切。空文本报中文错误。
+    """
+    if not text or not text.strip():
+        raise SubtitlesError("字幕文本为空，无法分句。请提供 rewrite 的 full_voiceover 或 --text。")
+    sentences: list[str] = []
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        sentences.extend(_split_long(chunk))
+    if not sentences:
+        raise SubtitlesError("字幕文本只含标点或空白，无法分句。")
+    return sentences
+
+
+def _split_long(chunk: str) -> list[str]:
+    """长句二切：先按逗号（逗号保留在前半，重拼时不丢内部标点），仍超长再按字数硬切。"""
+    if len(chunk) <= MAX_CUE_CHARS:
+        return [chunk]
+    pieces: list[str] = []
+    buffer = ""
+    for part in _COMMA_KEEP_RE.split(chunk):
+        if not part.strip():
+            continue
+        candidate = f"{buffer}{part}"
+        if len(candidate) <= MAX_CUE_CHARS:
+            buffer = candidate
+        else:
+            if buffer:
+                pieces.append(buffer)
+            buffer = part
+    if buffer:
+        pieces.append(buffer)
+    # 每片去掉边界悬挂的逗号（分句末尾不需要）；无逗号仍超长的按字数硬切。
+    result: list[str] = []
+    for piece in pieces:
+        piece = piece.strip().rstrip("，、,").strip()
+        if piece:
+            result.extend(_hard_wrap(piece))
+    return result
+
+
+def _hard_wrap(piece: str) -> list[str]:
+    if len(piece) <= MAX_CUE_CHARS:
+        return [piece]
+    return [piece[i : i + MAX_CUE_CHARS] for i in range(0, len(piece), MAX_CUE_CHARS)]
+
+
+# --- 时间轴：ratio 降级模式 ---------------------------------------------
+
+
+def build_cue_timeline_ratio(sentences: list[str], total_duration: float) -> list[Cue]:
+    """按字符占比把音频总时长分摊成时间轴（faster-whisper 不可用时的降级路径）。
+
+    每句时长 = 总时长 * 本句字符数 / 全部字符数；单条不短于 MIN_CUE_DURATION。
+    """
+    if not sentences:
+        raise SubtitlesError("没有句子可分配时间轴。")
+    if total_duration <= 0:
+        raise SubtitlesError(f"音频总时长非法（{total_duration}），无法分摊字幕时间轴。")
+    lengths = [max(1, len(s)) for s in sentences]
+    total_chars = sum(lengths)
+    cues: list[Cue] = []
+    cursor = 0.0
+    for sentence, length in zip(sentences, lengths):
+        span = total_duration * length / total_chars
+        start = cursor
+        end = min(total_duration, start + span)
+        cues.append(Cue(start, end, sentence))
+        cursor = end
+    return _enforce_min_duration(cues, total_duration)
+
+
+def _enforce_min_duration(cues: list[Cue], hard_cap: float) -> list[Cue]:
+    """保证每条不短于 MIN_CUE_DURATION：太短就借用下一条起点后延；末条封在 hard_cap。"""
+    fixed: list[Cue] = []
+    for i, cue in enumerate(cues):
+        start = cue.start
+        end = cue.end
+        if end - start < MIN_CUE_DURATION:
+            end = start + MIN_CUE_DURATION
+        # 不越过下一条起点（保持时间轴单调不重叠）；末条封在 hard_cap。
+        if i + 1 < len(cues):
+            end = min(end, cues[i + 1].start) if cues[i + 1].start > start else end
+        else:
+            end = min(end, hard_cap) if hard_cap > start else end
+        fixed.append(Cue(round(start, 3), round(end, 3), cue.text))
+    return fixed
+
+
+# --- 时间轴：align 对齐模式 ---------------------------------------------
+
+
+def build_cue_timeline_align(
+    sentences: list[str],
+    asr_segments: tuple[tuple[float, float, str], ...] | list[tuple[float, float, str]],
+) -> list[Cue]:
+    """用 ASR 分段的字符时间线对齐原稿句子。
+
+    把每个 ASR 分段按归一化字符数展开成一条"字符时间线"（每个字符占一段等长时间），
+    再把原稿句子按累计字符占比映射到这条时间线上取 start/end。原稿与 ASR 字符数
+    局部不一致（TTS 把 "30%" 念成 "百分之三十"）时按比例分摊，漂移天然限制在单句内。
+    ASR 空结果时抛错，交由上层降级到 ratio。
+    """
+    if not sentences:
+        raise SubtitlesError("没有句子可对齐。")
+    timeline = _char_timeline(asr_segments)
+    if not timeline:
+        raise SubtitlesError("ASR 未返回任何有效时间分段，无法 align 对齐。")
+    total_asr_chars = len(timeline)
+    total_src_chars = sum(max(1, len(s)) for s in sentences)
+    cues: list[Cue] = []
+    src_cursor = 0
+    for sentence in sentences:
+        length = max(1, len(sentence))
+        start_ratio = src_cursor / total_src_chars
+        end_ratio = (src_cursor + length) / total_src_chars
+        start_idx = min(total_asr_chars - 1, int(start_ratio * total_asr_chars))
+        end_idx = min(total_asr_chars - 1, max(start_idx, int(end_ratio * total_asr_chars) - 1))
+        start = timeline[start_idx][0]
+        end = timeline[end_idx][1]
+        cues.append(Cue(start, end if end > start else start + MIN_CUE_DURATION, sentence))
+        src_cursor += length
+    total_duration = timeline[-1][1]
+    return _enforce_min_duration(_redistribute_collided_cues(cues), total_duration)
+
+
+def _redistribute_collided_cues(cues: list[Cue]) -> list[Cue]:
+    """修复时间窗塌缩：ASR 字符数远少于原稿句数时，多句会映射到同一 (start, end)
+    完全重叠（多条字幕同屏同窗）。把连续同窗的句子按字符占比在窗内均摊，恢复单调时间轴。"""
+    fixed: list[Cue] = []
+    i = 0
+    while i < len(cues):
+        j = i
+        while (
+            j + 1 < len(cues)
+            and cues[j + 1].start == cues[i].start
+            and cues[j + 1].end == cues[i].end
+        ):
+            j += 1
+        if j == i:
+            fixed.append(cues[i])
+        else:
+            group = cues[i : j + 1]
+            span_start, span_end = group[0].start, group[0].end
+            span = span_end - span_start
+            total_chars = sum(max(1, len(cue.text)) for cue in group)
+            cursor = span_start
+            for cue in group:
+                share = span * (max(1, len(cue.text)) / total_chars)
+                fixed.append(Cue(round(cursor, 3), round(cursor + share, 3), cue.text))
+                cursor += share
+        i = j + 1
+    return fixed
+
+
+def _char_timeline(
+    asr_segments: tuple[tuple[float, float, str], ...] | list[tuple[float, float, str]],
+) -> list[tuple[float, float]]:
+    """把 ASR 分段展开成逐字符时间区间列表（标点归一化后按字符数均分段内时长）。"""
+    timeline: list[tuple[float, float]] = []
+    for start, end, text in asr_segments:
+        normalized = _PUNCT_RE.sub("", str(text))
+        if not normalized:
+            continue
+        span = float(end) - float(start)
+        if span <= 0:
+            continue
+        step = span / len(normalized)
+        for i in range(len(normalized)):
+            c_start = float(start) + step * i
+            c_end = c_start + step
+            timeline.append((c_start, c_end))
+    return timeline
+
+
+# --- ASS 渲染 ------------------------------------------------------------
+
+
+def _compute_layout(width: int, height: int) -> dict:
+    """按分辨率计算字幕排版参数（中文主字幕 + 英文副字幕共用）。"""
+    side_margin = max(0, round(width * _SIDE_MARGIN_RATIO))
+    usable_width = max(1, width - 2 * side_margin)
+    # 字号取三者最小：高度自适应、宽度可容 _CHARS_PER_LINE_BUDGET 个字、绝对上限。
+    width_font = usable_width // _CHARS_PER_LINE_BUDGET
+    font_size = max(1, min(_FONT_SIZE_CAP, round(height * _FONT_RATIO), width_font))
+    margin_v = max(0, round(height * _MARGIN_RATIO))
+    return {
+        "side_margin": side_margin,
+        "usable_width": usable_width,
+        "font_size": font_size,
+        "margin_v": margin_v,
+        # 竖屏窄、字大：一行能放的字数 = 可用宽度 // 字号。
+        "chars_per_line": max(1, usable_width // font_size),
+    }
+
+
+def prepare_single_line_cues(cues: list[Cue], width: int, height: int) -> list[Cue]:
+    """把 cues 预切成单行（不换行、不溢出）。切割幂等：已达标的 cue 原样返回，
+    因此对同一批 cues 重复调用结果一致——翻译流程依赖这一点对齐中英条目。"""
+    layout = _compute_layout(width, height)
+    single: list[Cue] = []
+    for cue in cues:
+        single.extend(_split_cue_single_line(cue, layout["chars_per_line"]))
+    return single
+
+
+def render_ass(
+    cues: list[Cue],
+    width: int,
+    height: int,
+    english: list[str] | None = None,
+) -> str:
+    """把 cues 渲染成完整 .ass 文件文本（Microsoft YaHei、白字细黑描边、底部居中）。
+
+    english 非空时输出双语：中文在上（主字号）、英文在下（小字号），逐条同时间窗。
+    english 必须与**切成单行后**的 cues 一一对应（长度一致），否则抛错——调用方应先
+    prepare_single_line_cues 再翻译再传入。
+    """
+    if not cues:
+        raise SubtitlesError("没有字幕条目可渲染 ASS。")
+    layout = _compute_layout(width, height)
+    single: list[Cue] = []
+    for cue in cues:
+        single.extend(_split_cue_single_line(cue, layout["chars_per_line"]))
+    if english is not None and len(english) != len(single):
+        raise SubtitlesError(
+            f"英文字幕条数（{len(english)}）与切行后的中文条数（{len(single)}）不一致。"
+        )
+
+    font_size = layout["font_size"]
+    en_font, en_lines = (0, [])
+    if english is not None:
+        en_font, en_lines = _fit_english_lines(english, layout["usable_width"], font_size)
+    # 垂直排布（Alignment=2，MarginV=距底边距离）：英文贴近底边，中文抬高让出英文行高。
+    en_margin_v = layout["margin_v"] - max(0, round(en_font * 1.4)) if en_font else 0
+    en_margin_v = max(8, en_margin_v)
+    zh_margin_v = layout["margin_v"] if not en_font else en_margin_v + round(en_font * 1.6)
+
+    header = _ass_header(
+        width, height, font_size, zh_margin_v, layout["side_margin"], en_font, en_margin_v
+    )
+    events: list[str] = []
+    for i, cue in enumerate(single):
+        events.append(_ass_dialogue(cue))
+        if en_lines and en_lines[i]:
+            events.append(_ass_dialogue_en(cue, en_lines[i]))
+    return header + "\n".join(events) + "\n"
+
+
+def _fit_english_lines(texts: list[str], usable_width: int, zh_font: int) -> tuple[int, list[str]]:
+    """英文行适配：先按 0.55 倍中文字号排；最长行超出预算就整体缩一档字号；
+    仍超长的行省略号截断（翻译提示词已要求精简，截断是最后防线）。"""
+    en_font = max(_EN_FONT_MIN, round(zh_font * _EN_FONT_RATIO))
+    budget = max(8, int(usable_width / (en_font * _EN_CHAR_WIDTH_EM)))
+    longest = max((len(t) for t in texts), default=0)
+    if longest > budget:
+        shrunk = max(_EN_FONT_MIN, round(zh_font * _EN_FONT_RATIO_SHRUNK))
+        if shrunk < en_font:
+            en_font = shrunk
+            budget = max(8, int(usable_width / (en_font * _EN_CHAR_WIDTH_EM)))
+    fitted = [
+        t if len(t) <= budget else (t[: max(1, budget - 1)].rstrip() + "…")
+        for t in (s.strip() for s in texts)
+    ]
+    return en_font, fitted
+
+
+def _edge_punct_stripped(text: str) -> str:
+    """剥掉一段字幕首尾的标点与空白，避免行首/行尾悬挂逗号句号。"""
+    return text.strip().strip("，、,。！？；;：: ")
+
+
+def _chunk_text(text: str, limit: int) -> list[str]:
+    """切成若干短语，每条都不含逗号：先按逗号切开（丢弃逗号），仍超 limit 的短语按字数
+    均分硬切。**必须去掉内部逗号**——libass 对全角逗号「，」有渲染残留 bug：含逗号的 cue
+    会让后续 cue 冒出前导逗号（已实测复现）。同时短语切分也更适合竖屏单行观看。"""
+    if limit <= 0:
+        return [text]
+    pieces: list[str] = []
+    for phrase in _COMMA_SPLIT_RE.split(text):
+        phrase = phrase.strip()
+        if not phrase:
+            continue
+        if len(phrase) <= limit:
+            pieces.append(phrase)
+            continue
+        n = -(-len(phrase) // limit)  # 需要切成几片（向上取整）
+        size = -(-len(phrase) // n)   # 每片大小（尽量均匀，避免留下 1~2 字的碎片）
+        pieces.extend(phrase[i : i + size] for i in range(0, len(phrase), size))
+    return pieces or [text.strip()]
+
+
+def _split_cue_single_line(cue: Cue, limit: int) -> list[Cue]:
+    """把一条 cue 切成若干单行 cue：文本按 limit 字切，时间轴按字符占比分摊，
+    每段剥掉边缘标点。切完的每条都能在一行内显示（竖屏不换行）。"""
+    chunks = _chunk_text(cue.text.strip(), limit)
+    if len(chunks) <= 1:
+        cleaned = _edge_punct_stripped(cue.text)
+        return [Cue(cue.start, cue.end, cleaned)] if cleaned else []
+    total = sum(len(c) for c in chunks) or 1
+    span = cue.end - cue.start
+    result: list[Cue] = []
+    cursor = cue.start
+    for i, chunk in enumerate(chunks):
+        end = cue.end if i == len(chunks) - 1 else cursor + span * (len(chunk) / total)
+        cleaned = _edge_punct_stripped(chunk)
+        if cleaned:
+            result.append(Cue(round(cursor, 3), round(end, 3), cleaned))
+        cursor = end
+    return result
+
+
+def _ass_header(
+    width: int,
+    height: int,
+    font_size: int,
+    margin_v: int,
+    side_margin: int,
+    en_font: int = 0,
+    en_margin_v: int = 0,
+) -> str:
+    # Alignment=2 底部居中。BorderStyle=1=白字+细黑描边+轻阴影（用户点名去掉黑色底板；
+    # 纯白无描边在亮背景会看不清，细描边是可读性的最后防线）。OutlineColour 是描边色
+    # （不透明黑），BackColour 是阴影色（半透明黑）。描边/阴影随字号缩放。
+    outline = max(2, round(font_size * 0.05))
+    shadow = max(1, round(font_size * 0.03))
+    styles = (
+        f"Style: Default,Microsoft YaHei,{font_size},&H00FFFFFF,&H000000FF,"
+        f"&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
+        f"{side_margin},{side_margin},{margin_v},1\n"
+    )
+    if en_font > 0:
+        en_outline = max(1, round(en_font * 0.05))
+        en_shadow = max(1, round(en_font * 0.03))
+        styles += (
+            f"Style: EN,Arial,{en_font},&H00FFFFFF,&H000000FF,"
+            f"&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{en_outline},{en_shadow},2,"
+            f"{side_margin},{side_margin},{en_margin_v},1\n"
+        )
+    return (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {width}\n"
+        f"PlayResY: {height}\n"
+        "WrapStyle: 0\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        + styles +
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "Effect, Text\n"
+    )
+
+
+def _ass_dialogue(cue: Cue) -> str:
+    # cue 已在 render_ass 里预切成单行，这里只做 ASS 转义。
+    text = _escape_ass_text(cue.text)
+    # 字段严格对齐 Format（Layer,Start,End,Style,Name,MarginL,MarginR,Effect,Text）：
+    # Style 与 Text 之间只有 Name/MarginL/MarginR/Effect 四段 → ",,0,0,"。
+    # 曾多写一个 margin 字段（",,0,0,0,,"），libass 把越界的逗号并入 Text，
+    # 渲染出行首幻影逗号「,不关掉手机永远慢」。少一个都不行。
+    return (
+        f"Dialogue: 0,{_format_ass_timestamp(cue.start)},"
+        f"{_format_ass_timestamp(cue.end)},Default,,0,0,,{text}"
+    )
+
+
+def _ass_dialogue_en(cue: Cue, english: str) -> str:
+    """英文副字幕事件：与对应中文 cue 同时间窗，走 EN 样式（小字号、更贴底边）。"""
+    text = _escape_ass_text(english)
+    return (
+        f"Dialogue: 0,{_format_ass_timestamp(cue.start)},"
+        f"{_format_ass_timestamp(cue.end)},EN,,0,0,,{text}"
+    )
+
+
+def _escape_ass_text(text: str) -> str:
+    """转义会破坏 ASS 语法的字符：{} 是 override 块、反斜杠是转义引导、换行折成 \\N。"""
+    text = text.replace("\\", "\\\\")
+    text = text.replace("{", "\\{").replace("}", "\\}")
+    text = text.replace("\r\n", "\\N").replace("\n", "\\N").replace("\r", "\\N")
+    return text
+
+
+def _format_ass_timestamp(seconds: float) -> str:
+    """秒 → ASS 时间戳 H:MM:SS.cc（厘秒，两位）。"""
+    if seconds < 0:
+        seconds = 0.0
+    centis = int(round(seconds * 100))
+    hours, centis = divmod(centis, 360000)
+    minutes, centis = divmod(centis, 6000)
+    secs, centis = divmod(centis, 100)
+    return f"{hours:d}:{minutes:02d}:{secs:02d}.{centis:02d}"
+
+
+# --- ffprobe / libass 探测 ----------------------------------------------
+
+
+def _probe_resolution(path: Path, runner: Runner) -> tuple[int, int]:
+    """ffprobe 读 v:0 宽高。探测失败（无流/无 ffprobe/解析失败）返回 (0,0)。"""
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-print_format", "json", str(path),
+    ]
+    try:
+        completed = runner(
+            command, check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return (0, 0)
+    if getattr(completed, "returncode", 0) != 0:
+        return (0, 0)
+    try:
+        payload = json.loads(getattr(completed, "stdout", "") or "{}")
+        streams = payload.get("streams") or []
+        if not streams:
+            return (0, 0)
+        stream = streams[0]
+        return (int(stream.get("width") or 0), int(stream.get("height") or 0))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return (0, 0)
+
+
+def resolve_video_dimensions(video: Path, runner: Runner = subprocess.run) -> tuple[int, int, list[str]]:
+    """探测底片宽高定字号；探测失败回落 1920x1080 并留痕。"""
+    if not video.exists():
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT, [f"底片不存在，字号按 {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} 回落：{video}"])
+    width, height = _probe_resolution(video, runner)
+    if width <= 0 or height <= 0:
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT, [f"底片分辨率探测失败，字号按 {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} 回落：{video}"])
+    return width, height, []
+
+
+def ensure_libass(runner: Runner = subprocess.run) -> None:
+    """探测 ffmpeg 是否带 libass 的 subtitles 滤镜，缺失抛中文 SubtitlesError。"""
+    try:
+        completed = runner(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError as exc:
+        raise SubtitlesError(f"无法运行 ffmpeg 探测滤镜：{exc}。请确认 ffmpeg 已安装并在 PATH 中。") from exc
+    output = getattr(completed, "stdout", "") or ""
+    if " subtitles " not in output:
+        raise SubtitlesError(
+            "当前 ffmpeg 不含 libass 的 subtitles 滤镜，无法烧录字幕。"
+            "请换用带 libass 的 ffmpeg 构建（如 gyan.dev essentials/full 版）。"
+        )
+
+
+# --- 烧录 ----------------------------------------------------------------
+
+
+def _build_burn_command() -> list[str]:
+    """libass 烧录命令：滤镜参数写裸文件名（配合 cwd=输出目录规避 Windows 路径坑）。"""
+    return [
+        "ffmpeg", "-y",
+        "-i", RELEASE_FILENAME,
+        "-vf", f"subtitles={ASS_FILENAME}",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-c:a", "copy",
+        RELEASE_FILENAME + ".sub.tmp.mp4",
+    ]
+
+
+def burn_subtitles(
+    video: Path | str,
+    ass_path: Path | str,
+    output: Path | str,
+    runner: Runner = subprocess.run,
+) -> Path:
+    """把 .ass 硬烧进视频。视频重编 libx264 crf 18，音轨 -c:a copy 直通。
+
+    为规避 Windows 路径转义坑：cwd=输出目录、滤镜参数写裸文件名 subtitles=subtitles.ass。
+    因此把输入视频与 .ass 先备到输出目录里以固定名参与命令，产物再改名到 output。
+    """
+    video = Path(video)
+    ass_path = Path(ass_path)
+    output = Path(output)
+    if not video.exists():
+        raise SubtitlesError(f"待烧录视频不存在：{video}")
+    if not ass_path.exists():
+        raise SubtitlesError(f"字幕文件不存在：{ass_path}")
+
+    work_dir = output.parent
+    work_dir.mkdir(parents=True, exist_ok=True)
+    staged_video = work_dir / RELEASE_FILENAME
+    staged_ass = work_dir / ASS_FILENAME
+    _stage_copy(video, staged_video)
+    _stage_copy(ass_path, staged_ass)
+
+    command = _build_burn_command()
+    tmp_output = work_dir / (RELEASE_FILENAME + ".sub.tmp.mp4")
+    try:
+        completed = runner(
+            command, check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            cwd=str(work_dir),
+        )
+    except OSError as exc:
+        raise SubtitlesError(f"字幕烧录失败：无法启动 ffmpeg（{exc}）。") from exc
+    if getattr(completed, "returncode", 0) != 0:
+        stderr = (getattr(completed, "stderr", "") or "")[:300]
+        raise SubtitlesError(f"字幕烧录失败（ffmpeg 退出码 {completed.returncode}）：{stderr}")
+    if tmp_output.resolve() != output.resolve():
+        tmp_output.replace(output)
+    return output
+
+
+def _stage_copy(src: Path, dst: Path) -> None:
+    """把源文件内容备到目标固定名（同路径则跳过），供烧录命令以裸文件名引用。"""
+    if src.resolve() == dst.resolve():
+        return
+    dst.write_bytes(src.read_bytes())
+
+
+# --- 编排 ----------------------------------------------------------------
+
+
+def _load_voiceover_text(rewrite_path: Path) -> str:
+    try:
+        body = json.loads(rewrite_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SubtitlesError(f"rewrite.json 不存在：{rewrite_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SubtitlesError(f"rewrite.json 无法解析：{rewrite_path}") from exc
+    if not isinstance(body, dict):
+        raise SubtitlesError(f"rewrite.json 内容不是 JSON 对象：{rewrite_path}")
+    text = str(body.get("full_voiceover") or "").strip()
+    if not text:
+        raise SubtitlesError("rewrite.json 缺少 full_voiceover 文本，无法生成字幕。")
+    return text
+
+
+def _transcribe_for_timeline(
+    audio: Path, runner: Runner
+) -> tuple[tuple[float, float, str], ...]:
+    """强制 faster_whisper 转写配音，只取时间轴分段。失败抛异常交由上层降级。"""
+    from video_factory import asr  # 惰性导入：与 rewrite.py 一致，避免顶层耦合 ASR 依赖
+
+    config = asr.ASRConfig(provider="faster_whisper")
+    result = asr.transcribe_media(audio, config, runner)
+    return result.segments
+
+
+def _extract_audio(video: Path, wav_path: Path, runner: Runner) -> None:
+    """从视频抽 16kHz 单声道 wav 供 ASR（视频已混 BGM 时时间轴会含背景音，建议显式传 --audio）。"""
+    command = [
+        "ffmpeg", "-i", str(video),
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-f", "wav", "-y", str(wav_path),
+    ]
+    try:
+        completed = runner(
+            command, check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError as exc:
+        raise SubtitlesError(f"从视频抽取音轨失败：无法启动 ffmpeg（{exc}）。") from exc
+    if getattr(completed, "returncode", 0) != 0:
+        stderr = (getattr(completed, "stderr", "") or "")[:300]
+        raise SubtitlesError(f"从视频抽取音轨失败（ffmpeg 退出码 {completed.returncode}）：{stderr}")
+
+
+def _probe_duration(path: Path, runner: Runner) -> float:
+    command = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-print_format", "json", str(path),
+    ]
+    try:
+        completed = runner(
+            command, check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return 0.0
+    if getattr(completed, "returncode", 0) != 0:
+        return 0.0
+    try:
+        payload = json.loads(getattr(completed, "stdout", "") or "{}")
+        return float((payload.get("format") or {}).get("duration") or 0.0)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 0.0
+
+
+def build_cues(
+    sentences: list[str],
+    mode: str,
+    audio: Path | None,
+    runner: Runner,
+) -> tuple[list[Cue], str, list[str]]:
+    """按 mode 生成 cues，返回 (cues, 实际使用的 mode, 警告列表)。
+
+    auto：优先 align，任何失败降级 ratio 并留痕；align：失败即抛错；ratio：直接分摊。
+    """
+    warnings: list[str] = []
+    normalized = (mode or "auto").strip().lower()
+    if normalized not in ("auto", "align", "ratio"):
+        raise SubtitlesError(f"不支持的 mode：{mode}（可选 auto / align / ratio）。")
+
+    if normalized == "ratio":
+        cues = build_cue_timeline_ratio(sentences, _audio_duration(audio, runner))
+        return cues, "ratio", warnings
+
+    if normalized == "align":
+        segments = _transcribe_for_timeline(_require_audio(audio), runner)
+        cues = build_cue_timeline_align(sentences, segments)
+        return cues, "align", warnings
+
+    # auto：先试 align，失败降 ratio。ASR 可能抛任意异常（缺依赖/模型失败/空结果），
+    # 全部当作"align 不可用"降级；ratio 阶段再失败（无音频/时长为零）才真正报错。
+    try:
+        segments = _transcribe_for_timeline(_require_audio(audio), runner)
+        cues = build_cue_timeline_align(sentences, segments)
+        return cues, "align", warnings
+    except Exception as exc:  # noqa: BLE001 - align 任何失败都要能降级到 ratio
+        warnings.append(f"align 对齐失败，已降级为 ratio 分摊：{exc}")
+        cues = build_cue_timeline_ratio(sentences, _audio_duration(audio, runner))
+        return cues, "ratio", warnings
+
+
+def _require_audio(audio: Path | None) -> Path:
+    if audio is None:
+        raise SubtitlesError("align 模式需要配音音频作时间轴来源，但未提供音频。")
+    if not audio.exists():
+        raise SubtitlesError(f"配音音频不存在：{audio}")
+    return audio
+
+
+def _audio_duration(audio: Path | None, runner: Runner) -> float:
+    if audio is None or not audio.exists():
+        raise SubtitlesError("ratio 模式需要音频总时长，但未提供有效音频。")
+    duration = _probe_duration(audio, runner)
+    if duration <= 0:
+        raise SubtitlesError(f"音频总时长探测失败或为零：{audio}")
+    return duration
+
+
+def translate_texts_to_english(texts: list[str], char_budget: int) -> list[str]:
+    """把切好行的中文字幕批量翻成英文：一次 LLM 调用、JSON 数组保序返回。
+
+    条数不匹配 / 解析失败 / 无凭据都抛异常，由调用方决定降级（生产链路里是
+    降级为纯中文字幕，绝不阻断成片）。惰性导入 llm/rewrite，避免顶层依赖。
+    """
+    if not texts:
+        return []
+    from video_factory.llm import LLMConfig, chat_completion
+    from video_factory.rewrite import resolve_llm_provider
+
+    provider = resolve_llm_provider("auto")
+    system_prompt = (
+        "你是短视频双语字幕翻译。把用户给出的 JSON 数组里的每条中文字幕翻成口语化英文。\n"
+        "硬性要求：\n"
+        "1. 输出一个 JSON 字符串数组，与输入等长、同序、逐条对应；\n"
+        f"2. 每条尽量不超过 {char_budget} 个字符（含空格），宁可意译精简也不要长句；\n"
+        "3. 只输出 JSON 数组本身，不要输出任何其他文字或代码块标记。"
+    )
+    user_prompt = json.dumps(texts, ensure_ascii=False)
+    raw = chat_completion(system_prompt, user_prompt, LLMConfig(provider=provider))
+    translated = _parse_json_string_array(raw)
+    if len(translated) != len(texts):
+        raise SubtitlesError(
+            f"翻译条数不匹配：期望 {len(texts)} 条，LLM 返回 {len(translated)} 条。"
+        )
+    return translated
+
+
+def _parse_json_string_array(raw_text: str) -> list[str]:
+    """从 LLM 回复中提取 JSON 字符串数组，容忍代码块围栏与前后多余文字。"""
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        raise SubtitlesError(f"LLM 翻译回复中找不到 JSON 数组：{raw_text[:200]}")
+    try:
+        body = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise SubtitlesError(f"LLM 翻译回复的 JSON 无法解析：{raw_text[:200]}") from exc
+    if not isinstance(body, list):
+        raise SubtitlesError("LLM 翻译回复不是 JSON 数组。")
+    return [str(item or "").strip() for item in body]
+
+
+def _english_char_budget(width: int, height: int) -> int:
+    """按排版参数估算英文每行字符预算（与 _fit_english_lines 的初始字号一致）。"""
+    layout = _compute_layout(width, height)
+    en_font = max(_EN_FONT_MIN, round(layout["font_size"] * _EN_FONT_RATIO))
+    return max(8, int(layout["usable_width"] / (en_font * _EN_CHAR_WIDTH_EM)))
+
+
+def generate_subtitles(
+    video: Path | str,
+    text: str,
+    output_dir: Path | str,
+    mode: str = "auto",
+    audio: Path | str | None = None,
+    runner: Runner | None = None,
+    english: bool = True,
+) -> dict:
+    """编排：分句 → 定字号 → 生成时间轴 → （可选）翻译英文 → 写 .ass → 烧录 → 落 report。
+
+    english=True 时输出中英双语（中上英下）；翻译任何失败（无 LLM 凭据/超时/条数不齐）
+    都降级为纯中文并在 warnings 留痕，绝不因字幕翻译阻断成片。
+
+    runner 缺省时取 subprocess.run（在函数体内取值，便于 CLI 场景 monkeypatch 顶层
+    subprocess.run 也能生效——默认参数会在定义时绑定旧引用，故不用默认参数写死）。
+    """
+    runner = runner or subprocess.run
+    video = Path(video)
+    output_dir = Path(output_dir)
+    audio_path = Path(audio) if audio else None
+    if not video.exists():
+        raise SubtitlesError(f"待烧录视频不存在：{video}")
+    ensure_libass(runner)
+
+    sentences = split_sentences(text)
+    width, height, dim_warnings = resolve_video_dimensions(video, runner)
+    cues, used_mode, cue_warnings = build_cues(sentences, mode, audio_path, runner)
+    warnings = dim_warnings + cue_warnings
+
+    # 双语：对切成单行后的最终 cue 逐条翻译（切割幂等，render_ass 内重切结果一致）。
+    single = prepare_single_line_cues(cues, width, height)
+    english_lines: list[str] | None = None
+    if english:
+        try:
+            english_lines = translate_texts_to_english(
+                [cue.text for cue in single], _english_char_budget(width, height)
+            )
+        except Exception as exc:  # noqa: BLE001 - 翻译失败必须降级纯中文，不阻断成片
+            warnings.append(f"英文字幕翻译失败，已降级为纯中文：{exc}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ass_path = output_dir / ASS_FILENAME
+    ass_path.write_text(render_ass(single, width, height, english=english_lines), encoding="utf-8")
+
+    release_path = output_dir / RELEASE_FILENAME
+    burn_subtitles(video, ass_path, release_path, runner)
+
+    timeline_source = "配音音频 ASR（faster-whisper）" if used_mode == "align" else "按字符占比分摊音频总时长"
+    report = {
+        "version": "subtitles_report_v1",
+        "mode": used_mode,
+        "requested_mode": (mode or "auto").strip().lower(),
+        "cue_count": len(single),
+        "bilingual": english_lines is not None,
+        "timeline_source": timeline_source,
+        "width": width,
+        "height": height,
+        "warnings": warnings,
+        "ass": str(ass_path),
+        "release": str(release_path),
+    }
+    (output_dir / REPORT_FILENAME).write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return report
+
+
+# --- CLI -----------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m video_factory.subtitles",
+        description="逐句动态字幕（P7）：把 rewrite 原稿按配音时间轴烧成硬字幕",
+    )
+    parser.add_argument("--video", required=True, help="要烧字幕的成片（effects 之后的 release）")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--rewrite", default="", help="rewrite.json 路径（取 full_voiceover 作字幕文本）")
+    source.add_argument("--text", default="", help="直接给定字幕文本（与 --rewrite 二选一）")
+    parser.add_argument(
+        "--audio",
+        default="",
+        help="时间轴来源的纯净配音 wav（推荐 assemble --tts 产出的 voiceover.wav）；"
+        "缺省时从 --video 抽音轨做 ASR——若视频已混 BGM，强烈建议显式传 --audio 用纯配音。",
+    )
+    parser.add_argument("--mode", default="auto", choices=["auto", "align", "ratio"], help="时间轴模式")
+    parser.add_argument(
+        "--no-english",
+        dest="english",
+        action="store_false",
+        help="关闭英文副字幕（默认开：中上英下双语，翻译失败自动降级纯中文）",
+    )
+    parser.set_defaults(english=True)
+    parser.add_argument("--output", default="video_factory/output/subtitles", help="输出目录")
+    args = parser.parse_args(argv)
+
+    try:
+        report = _run_cli(args)
+    except (SubtitlesError, OSError) as exc:
+        print(f"字幕生成失败：{exc}")
+        return 1
+
+    print(f"字幕烧录完成：mode={report['mode']}，{report['cue_count']} 条")
+    print(f"- 字幕:     {report['ass']}")
+    print(f"- 成片:     {report['release']}")
+    print(f"- 报告:     {Path(args.output) / REPORT_FILENAME}")
+    return 0
+
+
+def _run_cli(args: argparse.Namespace) -> dict:
+    """CLI 主体：解析文本源、必要时抽临时音轨（用 with 管临时目录生命周期）。"""
+    text = args.text.strip() if args.text else _load_voiceover_text(Path(args.rewrite))
+    video = Path(args.video)
+    # 显式给了音频，或 ratio 模式且没给音频（会在下游报错）——都无需抽临时音轨。
+    if args.audio or args.mode == "ratio":
+        audio = Path(args.audio) if args.audio else None
+        return generate_subtitles(
+            video, text, Path(args.output), mode=args.mode, audio=audio, english=args.english
+        )
+    # 未显式给音频、又需要 ASR 时间轴（auto/align）：从视频抽临时 wav，用完即删。
+    with tempfile.TemporaryDirectory(prefix="vf_subtitles_") as tmp:
+        wav_path = Path(tmp) / "audio.wav"
+        _extract_audio(video, wav_path, subprocess.run)
+        return generate_subtitles(
+            video, text, Path(args.output), mode=args.mode, audio=wav_path, english=args.english
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

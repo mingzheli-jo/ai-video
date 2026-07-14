@@ -1,0 +1,48 @@
+# macOS / editors
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.yaml
+
+# Codex/local planning scratch
+.superpowers/
+
+# Generated video factory outputs
+video_factory/output/
+
+# Remotion 特效层子工程
+remotion/node_modules/
+remotion/out/
+
+# Large local media and downloaded source files
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.wav
+*.mp3
+*.m4a
+*.aac
+
+# Keep project-generated text, code, docs, tests, and small images in Git.

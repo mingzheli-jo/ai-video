@@ -1,0 +1,28 @@
+[project]
+name = "video-factory-project"
+version = "0.1.0"
+description = "AI video generation pipeline for short-form tutorial videos."
+requires-python = ">=3.9"
+dependencies = [
+    "Pillow>=10.0",
+    "yt-dlp>=2024.6.6",
+    "legacy-cgi>=2.6; python_version >= '3.13'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+tts = [
+    "edge-tts>=7.0.0",
+]
+asr = [
+    "faster-whisper>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["video_factory*"]
