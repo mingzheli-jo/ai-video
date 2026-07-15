@@ -9,7 +9,7 @@
 
 import pytest
 
-from video_factory import credentials_store
+from video_factory import credentials_store, settings_store
 
 
 @pytest.fixture(autouse=True)
@@ -17,3 +17,10 @@ def _isolate_credentials_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(
         credentials_store, "CREDENTIALS_PATH", tmp_path / "credentials.isolated.yaml"
     )
+    # settings.yaml 同样必须隔离：用户在工作台保存的真实偏好（字幕字号/字体等）
+    # 曾把 4 个字幕排版测试打红（2026-07-15 实锤）。环境变量同名覆盖也一并清掉。
+    monkeypatch.setattr(
+        settings_store, "SETTINGS_PATH", tmp_path / "settings.isolated.yaml"
+    )
+    for env in settings_store.SETTING_NAMES:
+        monkeypatch.delenv(env, raising=False)

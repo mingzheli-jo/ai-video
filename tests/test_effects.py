@@ -37,18 +37,17 @@ REWRITE = {
 # --- manifest 派生 ------------------------------------------------------
 
 
-def test_manifest_intro_derived_from_first_section_and_hook():
+def test_manifest_hook_present_derives_opener_with_verbatim_lines():
+    # 2026-07-15 定案：有 hook 即派生 hook_opener，大字=口播原文 1:1（无标点→整句单行）。
     manifest = build_effects_manifest(PLAN, REWRITE)
-    # REWRITE 无 opening_hooks → 开屏动效回落传统 intro，排在最前、start=0（冷开场黑卡已退役）。
-    assert manifest["effects"][0]["type"] == "intro"
-    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
-    assert intro["start"] == 0.0
-    # min(2.5, 6.0*0.8=4.8) = 2.5
-    assert intro["duration"] == 2.5
-    # hook 前 12 字
-    assert intro["title"] == "三秒钩子这是一段很长的开"
-    assert len(intro["title"]) == 12
-    assert intro["subtitle"] == ""
+    opener = manifest["effects"][0]
+    assert opener["type"] == "hook_opener"
+    assert opener["start"] == 0.0
+    # min(5.0, 6.0*0.9=5.4) = 5.0
+    assert opener["duration"] == 5.0
+    assert opener["lines"] == ["三秒钩子这是一段很长的开场白文字"]  # 原文 1:1，不截断
+    assert opener["offsets"] == [0.0]
+    assert all(e["type"] != "intro" for e in manifest["effects"])
 
 
 def test_manifest_intro_falls_back_to_publish_title_without_hook():
@@ -202,19 +201,19 @@ def test_render_effects_builds_correct_remotion_command(tmp_path, monkeypatch):
     first = runner.commands[0]
     assert first[0] == "/usr/bin/npx"
     assert first[1] == "remotion" and first[2] == "render"
-    assert "Intro" in first  # REWRITE 无 opening_hooks → 第一条是 intro（冷开场黑卡已退役）
+    assert "HookOpener" in first  # REWRITE 有 hook → 第一条是 hook_opener（口播 1:1 大字）
     assert any(a == "--codec=prores" for a in first)
     assert any(a == "--prores-profile=4444" for a in first)
     # 默认 manifest 是 1920x1080，render 命令必须带 --width/--height（CLI 覆盖画幅）
     assert "--width=1920" in first
     assert "--height=1080" in first
-    # props 落文件传路径（防 npx.cmd → cmd.exe 重新解释元字符），文件里带 title，
+    # props 落文件传路径（防 npx.cmd → cmd.exe 重新解释元字符），文件里带 lines，
     # 不带 type/start/duration
     props_arg = next(a for a in first if a.startswith("--props="))
     props_path = Path(props_arg[len("--props=") :])
     assert props_path.name == "effect_00.props.json"
     props = json.loads(props_path.read_text(encoding="utf-8"))
-    assert "title" in props
+    assert "lines" in props
     assert "type" not in props and "start" not in props and "duration" not in props
     # 输出文件命名 effect_00.mov
     assert (tmp_path / "effect_00.mov").exists()
@@ -235,7 +234,7 @@ def test_render_effects_props_file_keeps_cmd_metacharacters_safe(tmp_path, monke
     assert "&" not in props_arg and "|" not in props_arg and "{" not in props_arg
     # 元字符原样保存在 props 文件里
     props = json.loads(Path(props_arg[len("--props=") :]).read_text(encoding="utf-8"))
-    assert props["title"] == "A&B联名|复盘要点"[:12]
+    assert props["lines"] == ["A&B联名|复盘要点"]  # 口播 1:1，元字符原样保留
 
 
 def test_render_effects_passes_portrait_width_height_from_manifest(tmp_path, monkeypatch):
@@ -269,8 +268,8 @@ class _FailAtRecorder(_Recorder):
 def test_render_effects_partial_failure_keeps_original_indices(tmp_path, monkeypatch):
     monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
     manifest = build_effects_manifest(PLAN, REWRITE)
-    # intro + 2 章节卡 + 开屏要点卡 + 金句卡 + 2 关键词弹出 = 7（冷开场黑卡已退役）
-    assert len(manifest["effects"]) == 7
+    # hook_opener + 2 章节卡 + 金句卡 + 2 关键词弹出 = 6（要点卡已退役）
+    assert len(manifest["effects"]) == 6
     runner = _FailAtRecorder(fail_name="effect_01.mov")
 
     result = render_effects(manifest, tmp_path, runner=runner)
@@ -739,15 +738,11 @@ def test_cli_missing_video_returns_chinese_error(tmp_path, capsys, monkeypatch):
 
 # ---------- 丰富化特效：开屏要点卡 / 金句卡 / 数字强调 ----------
 
-def test_manifest_key_points_lists_section_titles_after_intro():
+def test_manifest_key_points_retired():
+    """要点卡已退役（2026-07-15 用户定案）：与钩子序列/章节大字功能重叠、内容重复，
+    还与首张章节卡同屏糊成一团。任何输入都不得再派生 key_points。"""
     manifest = build_effects_manifest(PLAN, REWRITE)
-    kp = next(e for e in manifest["effects"] if e["type"] == "key_points")
-    # 第 0 节是 hook（片头已覆盖），要点行从正题标题取起
-    assert kp["lines"] == ["第一节", "第二节"]
-    # 要点卡紧接 intro 结束落点（intro 后移到 1.0 后，要点卡也随之顺延到 intro 终点）。
-    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
-    assert kp["start"] == pytest.approx(intro["start"] + intro["duration"], abs=1 / 30)
-    assert kp["duration"] <= 3.5
+    assert all(e["type"] != "key_points" for e in manifest["effects"])
 
 
 def test_manifest_quote_card_uses_first_publish_title_and_avoids_chapter_cards():
@@ -792,7 +787,7 @@ def test_manifest_number_pop_reads_rewrite_sections_not_plan(monkeypatch):
     types = [e["type"] for e in manifest["effects"]]
     assert "number_pop" not in types
     assert "quote_card" not in types
-    assert "key_points" in types  # 要点卡只依赖 plan 的节标题，仍在
+    assert "key_points" not in types  # 要点卡已退役
 
 
 def test_composition_map_covers_new_types():
@@ -842,27 +837,27 @@ def test_intro_title_uses_clipped_hook():
 
 # ---------- 开屏钩子序列 hook_opener / 关键词弹出（Task C） ----------
 
-def test_manifest_hook_opener_first_when_opening_hooks_present():
-    # rewrite 有 opening_hooks → 派生 hook_opener（透明叠层钩子序列），排在最前、start=0。
-    rewrite = dict(REWRITE, opening_hooks=["3秒看懂", "你亏在哪？"])
+def test_manifest_hook_opener_splits_hook_verbatim_with_speech_offsets():
+    # 2026-07-15 定案：大字=hook 口播原文 1:1 按标点分句，随口播节奏弹出（字符占比估时）。
+    rewrite = dict(REWRITE, hook="3秒看懂，你亏在哪？")
     manifest = build_effects_manifest(PLAN, rewrite)
     opener = manifest["effects"][0]
     assert opener["type"] == "hook_opener"
     assert opener["start"] == 0.0
     # 时长 = min(5.0, 首节 6.0 × 0.9 = 5.4) = 5.0
     assert opener["duration"] == 5.0
-    assert opener["lines"] == ["3秒看懂", "你亏在哪？"]
-    # 不再派生冷开场黑卡 opening_card，也不再另出 intro（hook_opener 取而代之）。
-    assert all(e["type"] != "opening_card" for e in manifest["effects"])
-    assert all(e["type"] != "intro" for e in manifest["effects"])
-    # 要点卡紧接 hook_opener 结束落点。
-    kp = next(e for e in manifest["effects"] if e["type"] == "key_points")
-    assert kp["start"] == pytest.approx(5.0, abs=1 / 30)
+    assert opener["lines"] == ["3秒看懂", "你亏在哪？"]  # 原文分句，末句问号保留
+    # offsets：首句 0；第二句 = 前句字符占比 × 首节时长 = 4/9 × 6.0 ≈ 2.667
+    assert opener["offsets"][0] == 0.0
+    assert opener["offsets"][1] == pytest.approx(4 / 9 * 6.0, abs=0.05)
+    # 不再派生冷开场黑卡/intro/要点卡。
+    for gone in ("opening_card", "intro", "key_points"):
+        assert all(e["type"] != gone for e in manifest["effects"])
 
 
-def test_manifest_hook_opener_falls_back_to_intro_without_opening_hooks():
-    # 无 opening_hooks（旧 rewrite.json）→ 回落传统 intro，start=0；绝不出 opening_card。
-    manifest = build_effects_manifest(PLAN, {"hook": "只有钩子没有钩子序列"})
+def test_manifest_hook_opener_falls_back_to_intro_without_hook():
+    # 无 hook（异常/旧 rewrite.json）→ 回落传统 intro，start=0；绝不出 opening_card。
+    manifest = build_effects_manifest(PLAN, {"publish_titles": ["候选标题一"]})
     assert all(e["type"] != "opening_card" for e in manifest["effects"])
     assert all(e["type"] != "hook_opener" for e in manifest["effects"])
     intro = next(e for e in manifest["effects"] if e["type"] == "intro")
@@ -873,7 +868,7 @@ def test_manifest_hook_opener_duration_capped_by_short_first_section():
     # 首节很短时 hook_opener 时长受 min(5, 首节×0.9) 约束。
     plan = {"sections": [{"title": "hook", "duration_seconds": 2.0},
                          {"title": "正题", "duration_seconds": 10.0}]}
-    rewrite = {"opening_hooks": ["悬念一句", "反问一句"]}
+    rewrite = {"hook": "悬念一句，反问一句"}
     manifest = build_effects_manifest(plan, rewrite)
     opener = manifest["effects"][0]
     assert opener["type"] == "hook_opener"
@@ -940,10 +935,11 @@ def test_composition_map_covers_keyword_hook_opener_and_golden():
 def test_sfx_mapping_covers_keyword_hook_opener_golden():
     from video_factory.sfx import SFX_BY_TYPE
 
-    # keyword_pop、开屏钩子序列、金句卡均有 SFX 映射；hook_opener 用 impact.wav 砸落点。
+    # keyword_pop、开屏钩子序列、金句卡均有 SFX 映射；hook_opener 首声 whoosh 起势
+    # （逐行"刷刷"由 _build_sfx_audio 按 offsets 特判注入，2026-07-15 用户定案）。
     for t in ("keyword_pop", "hook_opener", "golden_card"):
         assert t in SFX_BY_TYPE
-    assert SFX_BY_TYPE["hook_opener"] == "impact.wav"
+    assert SFX_BY_TYPE["hook_opener"] == "whoosh.wav"
     # 转场音效已取消（2026-07-15 用户点名），不再注入。
     assert "transition" not in SFX_BY_TYPE
 
@@ -1240,8 +1236,8 @@ def test_manifest_count_unchanged_without_emphasis():
     kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
     # 2 节内容节（hook 跳过）→ 2 个 keyword_pop
     assert len(kw_pops) == 2
-    # 总条数：冷开场黑卡退役后为 7（旧为 8）
-    assert len(manifest["effects"]) == 7
+    # 总条数：要点卡退役后为 6（hook_opener + 2 章节卡 + 金句卡 + 2 关键词）
+    assert len(manifest["effects"]) == 6
 
 
 def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():

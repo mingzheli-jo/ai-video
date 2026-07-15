@@ -601,11 +601,13 @@ def test_build_rewrite_prompts_emphasis_guidance_requires_atleast_golden():
     assert "宁缺勿滥" not in system_prompt   # 旧的抑制性措辞已移除
 
 
-def test_build_rewrite_prompts_includes_opening_hooks_field():
-    """system_prompt 说明可选的 opening_hooks 开屏钩子序列（≤12字、悬念/反问/数字冲击力）。"""
+def test_build_rewrite_prompts_drops_opening_hooks_and_strengthens_hook():
+    """2026-07-15 定案：LLM 不再另写 opening_hooks（屏幕文字改用 hook 口播原文 1:1），
+    换成强化 hook 本身——强钩子要求 + 子句短促（会拆成开屏大字）。"""
     system_prompt, _ = build_rewrite_prompts("原始文案", target_duration_seconds=90)
-    assert "opening_hooks" in system_prompt
-    assert "开屏" in system_prompt
+    assert "opening_hooks" not in system_prompt
+    assert "强钩子" in system_prompt
+    assert "子句" in system_prompt  # 告知 LLM：hook 子句会拆成开屏大字
 
 
 # ---------- opening_hooks：开屏钩子序列解析兼容性 ----------

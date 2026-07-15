@@ -55,6 +55,9 @@ export const goldenCardSchema = z.object({
 
 export const hookOpenerSchema = z.object({
   lines: z.array(z.string()).min(1),
+  // 各行弹入时刻（秒，相对特效起点）：Python 侧按 hook 口播字符占比估算，
+  // 让大字随口播逐句出现（所见即所听）。缺失时组件回落固定 0.8s 间隔。
+  offsets: z.array(z.number()).default([]),
   accent: z.string().default("#e8b84b"),
 });
 

@@ -14,7 +14,7 @@ import { FONT_STACK, HOOK_LINE_COLORS, HookOpenerProps } from "../schema";
 const LINE_STAGGER_FRAMES = 24; // 每条短句相隔 0.8s（30fps）依次入场
 const STROKE_COLOR = "#141410";
 
-export const HookOpener: React.FC<HookOpenerProps> = ({ lines, accent }) => {
+export const HookOpener: React.FC<HookOpenerProps> = ({ lines, offsets, accent }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames, width, height } = useVideoConfig();
 
@@ -53,8 +53,14 @@ export const HookOpener: React.FC<HookOpenerProps> = ({ lines, accent }) => {
         }}
       >
         {shown.map((line, i) => {
+          // 弹入时刻：优先用 Python 按口播字符占比估算的 offsets（所见即所听），
+          // 缺失时回落固定 0.8s 间隔。
+          const enterFrame =
+            offsets && offsets[i] !== undefined
+              ? Math.round(offsets[i] * fps)
+              : i * LINE_STAGGER_FRAMES;
           const enter = spring({
-            frame: frame - i * LINE_STAGGER_FRAMES,
+            frame: frame - enterFrame,
             fps,
             config: { damping: 13, mass: 0.6 },
           });
@@ -79,6 +85,8 @@ export const HookOpener: React.FC<HookOpenerProps> = ({ lines, accent }) => {
                 whiteSpace: "nowrap",
               }}
             >
+              {/* 丨竖线前缀：对标博主的醒目标识，与本行同色更粗一号 */}
+              <span style={{ opacity: 0.9, marginRight: 10 * s }}>丨</span>
               {line}
             </div>
           );

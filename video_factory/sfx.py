@@ -33,8 +33,10 @@ SFX_BY_TYPE = {
     "keyword_pop": "pop.wav",
     "opening_card": "whoosh.wav",
     "golden_card": "impact.wav",
-    # 开屏钩子序列（替代已退役的冷开场卡）：低频冲击音砸出开场落点。
-    "hook_opener": "impact.wav",
+    # 开屏钩子序列（替代已退役的冷开场卡）：首行 whoosh 起势；逐行"刷刷"由
+    # effects._build_sfx_audio 按 offsets 特判注入（首行 whoosh、后续行 swoosh，
+    # 2026-07-15 用户定案），本映射仅作 offsets 缺失时的兜底首声。
+    "hook_opener": "whoosh.wav",
 }
 
 DEFAULT_SFX_VOLUME = 0.35  # 混音时相对主口播的音量（0~1，宁小勿大，避免盖住人声）
@@ -78,6 +80,15 @@ class SfxError(RuntimeError):
 def resolve_sfx_path(effect_type: str, sfx_dir: Path | str | None = None) -> Path | None:
     """特效类型 → 音效文件路径。目录/文件缺失返回 None（调用方跳过这一声，不阻断）。"""
     filename = SFX_BY_TYPE.get(str(effect_type))
+    if not filename:
+        return None
+    base = Path(sfx_dir) if sfx_dir else DEFAULT_SFX_DIR
+    path = base / filename
+    return path if path.exists() else None
+
+
+def resolve_sfx_file(filename: str, sfx_dir: Path | str | None = None) -> Path | None:
+    """按文件名直接解析音效路径（供逐行注入等绕过类型映射的场景）。缺失返回 None。"""
     if not filename:
         return None
     base = Path(sfx_dir) if sfx_dir else DEFAULT_SFX_DIR

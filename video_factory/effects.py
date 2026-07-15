@@ -24,6 +24,7 @@ from video_factory.sfx import (
     DEFAULT_SFX_VOLUME,
     SfxError,
     ensure_default_pack,
+    resolve_sfx_file,
     resolve_sfx_path,
 )
 
@@ -57,11 +58,6 @@ _COMPOSITION_BY_TYPE = {
     "golden_card": "GoldenCard",
 }
 
-# 开屏要点卡：片头结束后逐行浮现各节标题。
-KEY_POINTS_MAX_LINES = 4
-KEY_POINTS_BASE_SECONDS = 1.2
-KEY_POINTS_PER_LINE_SECONDS = 0.8
-KEY_POINTS_MAX_SECONDS = 3.5
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
 QUOTE_POSITION_RATIO = 0.55
 QUOTE_DURATION = 2.8
@@ -159,7 +155,6 @@ def build_effects_manifest(
                 effects.append(_frame_aligned(lt, fps))
 
     total_duration = sum(_section_duration(s) for s in sections)
-    # 富化特效的开屏要点卡紧接开屏动效结束落点（hook_opener/intro 终点，避免与片头重叠）。
     effects.extend(
         _build_rich_effects(
             sections, rewrite, opener.start + opener.duration, total_duration, fps, accent
@@ -229,35 +224,59 @@ def _build_intro(
     )
 
 
-def _opening_hooks(rewrite: dict | None) -> list[str]:
-    """取 rewrite.opening_hooks：去空、截断到 3 条的短句列表；无/非列表返回空列表。"""
-    if isinstance(rewrite, dict):
-        raw = rewrite.get("opening_hooks")
-        if isinstance(raw, list):
-            lines = [str(x).strip() for x in raw if str(x or "").strip()]
-            return lines[:HOOK_OPENER_MAX_LINES]
-    return []
+# 开屏钩子分句：按子句标点切分（丢标点，问叹号例外见函数内）。
+_HOOK_SPLIT_RE = re.compile(r"[，。！？…；、,!?;]+")
+# 末句至少停留秒数：偏移钳位用，保证最后一句弹出后观众来得及看。
+_HOOK_LAST_LINE_MIN_SHOW = 0.6
+
+
+def _split_hook_lines(rewrite: dict | None) -> list[str]:
+    """把 hook 口播原文按子句 1:1 切成开屏大字行（2026-07-15 用户定案）。
+
+    此前用 LLM 另写的 opening_hooks：屏幕文字与耳朵听到的完全是两套内容（用户
+    直感"字幕和解说没对上"），且 ≤12 字约束还产生截断残句。改为口播原文 1:1，
+    所见即所听，两个问题一起消失。末句保留原文收尾的问/叹号（钩子的悬念感）。
+    """
+    if not isinstance(rewrite, dict):
+        return []
+    hook = str(rewrite.get("hook") or "").strip()
+    if not hook:
+        return []
+    pieces = [p.strip() for p in _HOOK_SPLIT_RE.split(hook) if p.strip()]
+    if pieces and hook[-1] in "？?！!":
+        pieces[-1] += hook[-1]
+    return pieces[:HOOK_OPENER_MAX_LINES]
 
 
 def _build_opener(
     first_section: dict, rewrite: dict | None, fps: int, accent: str
 ) -> EffectSpec:
-    """开屏动效：opening_hooks 非空 → hook_opener（透明叠层钩子序列，start=0，
-    时长 min(5s, 首节×0.9)）；否则回落传统 intro（旧 rewrite.json 兼容）。"""
-    hooks = _opening_hooks(rewrite)
-    if hooks:
+    """开屏动效：hook 可分句 → hook_opener（透明叠层，大字随口播逐句弹出）；
+    否则回落传统 intro（旧/异常 rewrite.json 兼容）。"""
+    lines = _split_hook_lines(rewrite)
+    if lines:
         first_duration = _section_duration(first_section)
         duration = min(
             HOOK_OPENER_MAX_DURATION, first_duration * HOOK_OPENER_FIRST_SECTION_RATIO
         )
         if duration <= 0:
             duration = HOOK_OPENER_MAX_DURATION
+        # 随口播弹出：hook 口播占满首节（拼装计划第 0 节即 hook），按字符占比在首节
+        # 时长上估算各句起点（口播近匀速，误差可忽略）；钳位保证末句至少停留 0.6s。
+        total_chars = sum(len(line) for line in lines) or 1
+        speech_span = first_duration if first_duration > 0 else duration
+        offsets: list[float] = []
+        consumed = 0
+        for line in lines:
+            raw_offset = consumed / total_chars * speech_span
+            offsets.append(round(min(raw_offset, max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
+            consumed += len(line)
         return _frame_aligned(
             EffectSpec(
                 type="hook_opener",
                 start=0.0,
                 duration=duration,
-                props={"lines": hooks, "accent": accent},
+                props={"lines": lines, "offsets": offsets, "accent": accent},
             ),
             fps,
         )
@@ -560,36 +579,19 @@ def _apply_golden_density_control(
 def _build_rich_effects(
     sections: list[dict],
     rewrite: dict | None,
-    key_points_start: float,
+    opener_end: float,
     total_duration: float,
     fps: int,
     accent: str,
 ) -> list[EffectSpec]:
-    """"丰富化"特效派生（默认全开）：开屏要点卡（intro 结束后逐行浮现各节标题）、
-    金句卡（55% 进度、避开章节卡窗口）、数字强调（每节首个关键数字，全片最多 2 个）、
-    关键词弹出（emphasis 均匀分布优先；无 emphasis 回落节内 40% 规则；密度控制+三色轮换）。
+    """"丰富化"特效派生（默认全开）：金句卡（55% 进度、避开章节卡窗口）、
+    数字强调（每节首个关键数字，全片最多 2 个）、关键词弹出（emphasis 均匀分布优先；
+    无 emphasis 回落节内 40% 规则；密度控制+三色轮换）。
+
+    开屏要点卡已退役（2026-07-15 用户定案）：它与钩子序列/章节大字功能重叠、
+    内容重复（要点行=各节标题=章节卡文字），还在开屏后与首张章节卡同屏糊成一团。
     """
     rich: list[EffectSpec] = []
-
-    # 开屏要点卡：至少 2 节才有"要点列表"的意义。第 0 节是开场 hook（片头已覆盖，
-    # 且拼装计划里它的字面标题就是 "hook"），要点行从第 1 节的正题标题取起。
-    if len(sections) >= 2:
-        lines = [
-            _section_title(s, i) for i, s in enumerate(sections) if i >= 1
-        ][:KEY_POINTS_MAX_LINES]
-        duration = min(
-            KEY_POINTS_MAX_SECONDS,
-            KEY_POINTS_BASE_SECONDS + KEY_POINTS_PER_LINE_SECONDS * len(lines),
-        )
-        rich.append(_frame_aligned(
-            EffectSpec(
-                type="key_points",
-                start=key_points_start,
-                duration=duration,
-                props={"lines": lines, "accent": accent},
-            ),
-            fps,
-        ))
 
     # 金句卡：取发布标题候选1（通常最凝练）兜底 hook；撞上章节卡窗口就顺延。
     quote_text = ""
@@ -649,11 +651,11 @@ def _build_rich_effects(
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
     # 金句全屏卡：kind=golden emphasis 单独派生，密度控制 + 保护窗口碰撞检查。
-    # 保护窗口：开屏动效（hook_opener/intro，占 [0, key_points_start]）/ 各章节卡
+    # 保护窗口：开屏动效（hook_opener/intro，占 [0, opener_end]）/ 各章节卡
     # （避免全屏卡与这些固定特效叠加）。
     golden_events = _derive_golden_events(sections, rewrite_sections, starts)
     protected: list[tuple[float, float]] = [
-        (0.0, key_points_start),  # 开屏动效时间窗
+        (0.0, opener_end),  # 开屏动效时间窗
     ]
     for i in range(1, len(sections)):
         protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
@@ -916,9 +918,23 @@ def _build_sfx_audio(
         return "", [], warnings
     items: list[tuple[float, Path]] = []
     for effect in kept:
+        start = float(effect.get("start") or 0.0)
+        offsets = effect.get("offsets")
+        if str(effect.get("type")) == "hook_opener" and isinstance(offsets, list) and offsets:
+            # 钩子序列逐行配音（2026-07-15 用户定案）：首行 whoosh 起势，
+            # 后续每行一声 swoosh"刷"，落点=各行弹入时刻（start+offset）。
+            for i, offset in enumerate(offsets):
+                name = "whoosh.wav" if i == 0 else "swoosh.wav"
+                line_path = resolve_sfx_file(name, sfx_dir)
+                if line_path is not None:
+                    try:
+                        items.append((start + float(offset), line_path))
+                    except (TypeError, ValueError):
+                        continue  # 单个坏 offset 只丢这一声，不拖垮其余
+            continue
         path = resolve_sfx_path(effect.get("type"), sfx_dir)
         if path is not None:
-            items.append((float(effect.get("start") or 0.0), path))
+            items.append((start, path))
     if not items:
         warnings.append("特效音已开启但未找到任何音效文件（assets/sfx/ 缺失或类型无对应），已跳过。")
         return "", [], warnings
@@ -1251,6 +1267,8 @@ def main(argv: list[str] | None = None) -> int:
                     "path": path,
                     "start": manifest["effects"][index]["start"],
                     "type": manifest["effects"][index]["type"],
+                    # 钩子序列逐行音效需要各行弹入时刻（无该字段的类型为 None，自动走单声路径）。
+                    "offsets": manifest["effects"][index].get("offsets"),
                 }
                 for index, path in rendered
             ],

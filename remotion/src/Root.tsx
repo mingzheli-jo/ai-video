@@ -165,6 +165,7 @@ export const RemotionRoot: React.FC = () => {
         schema={hookOpenerSchema}
         defaultProps={{
           lines: ["钩子短句一", "钩子短句二", "钩子短句三"],
+          offsets: [0, 0.8, 1.6],
           accent: "#e8b84b",
         }}
       />
