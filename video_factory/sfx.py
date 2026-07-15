@@ -34,6 +34,9 @@ SFX_BY_TYPE = {
     "keyword_pop": "pop.wav",
     "opening_card": "whoosh.wav",
     "golden_card": "impact.wav",
+    # 金句开屏三行式（黑卡退役后的形态）：起点一声低频冲击（不逐行——逐行"刷刷"
+    # 只认 hook_opener，见 effects._build_sfx_audio 特判）。
+    "golden_lines": "impact.wav",
     # 开屏钩子序列（替代已退役的冷开场卡）：首行 whoosh 起势；逐行"刷刷"由
     # effects._build_sfx_audio 按 offsets 特判注入（首行 whoosh、后续行 swoosh，
     # 2026-07-15 用户定案），本映射仅作 offsets 缺失时的兜底首声。

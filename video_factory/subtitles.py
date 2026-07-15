@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from video_factory import credentials_store, stage_report
+from video_factory import credentials_store, stage_report, timeline as timeline_mod
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -895,6 +895,7 @@ def generate_subtitles(
     audio: Path | str | None = None,
     runner: Runner | None = None,
     english: bool = False,
+    timeline: list[dict] | None = None,
 ) -> dict:
     """编排：分句 → 定字号 → 生成时间轴 → （可选）翻译英文 → 写 .ass → 烧录 → 落 report。
 
@@ -912,10 +913,20 @@ def generate_subtitles(
         raise SubtitlesError(f"待烧录视频不存在：{video}")
     ensure_libass(runner)
 
-    sentences = split_sentences(text)
     width, height, dim_warnings = resolve_video_dimensions(video, runner)
-    cues, used_mode, cue_warnings = build_cues(sentences, mode, audio_path, runner)
-    warnings = dim_warnings + cue_warnings
+    warnings = list(dim_warnings)
+    if timeline:
+        # P16 主时间轴：直接由逐句真实起止构造 cues，跳过分句 + ASR（净成本为零——对齐
+        # 已在 assemble 阶段做过，这里不再自跑 whisper）。后续单行切割/渲染/烧录管线不变。
+        cues = [
+            Cue(float(s.get("start") or 0.0), float(s.get("end") or 0.0), str(s.get("text") or ""))
+            for s in timeline
+        ]
+        used_mode = "timeline"
+    else:
+        sentences = split_sentences(text)
+        cues, used_mode, cue_warnings = build_cues(sentences, mode, audio_path, runner)
+        warnings += cue_warnings
 
     # 双语：对切成单行后的最终 cue 逐条翻译（切割幂等，render_ass 内重切结果一致）。
     single = prepare_single_line_cues(cues, width, height)
@@ -939,7 +950,12 @@ def generate_subtitles(
     release_path = output_dir / RELEASE_FILENAME
     burn_subtitles(video, ass_path, release_path, runner)
 
-    timeline_source = "配音音频 ASR（faster-whisper）" if used_mode == "align" else "按字符占比分摊音频总时长"
+    if used_mode == "timeline":
+        timeline_source = "主时间轴 timeline.json（P16，逐句真实起止，已跳过 ASR）"
+    elif used_mode == "align":
+        timeline_source = "配音音频 ASR（faster-whisper）"
+    else:
+        timeline_source = "按字符占比分摊音频总时长"
     report = {
         "version": "subtitles_report_v1",
         "mode": used_mode,
@@ -976,6 +992,12 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="时间轴来源的纯净配音 wav（推荐 assemble --tts 产出的 voiceover.wav）；"
         "缺省时从 --video 抽音轨做 ASR——若视频已混 BGM，强烈建议显式传 --audio 用纯配音。",
+    )
+    parser.add_argument(
+        "--timeline",
+        default="",
+        help="timeline.json 路径（P16 主时间轴，可选）：存在且可加载则字幕直接由逐句真实起止"
+        "构造、跳过分句与 ASR；文件不存在/损坏时回落现有 --mode 全流程。",
     )
     parser.add_argument("--mode", default="auto", choices=["auto", "align", "ratio"], help="时间轴模式")
     parser.add_argument(
@@ -1015,6 +1037,14 @@ def _run_cli(args: argparse.Namespace) -> dict:
     """CLI 主体：解析文本源、必要时抽临时音轨（用 with 管临时目录生命周期）。"""
     text = args.text.strip() if args.text else _load_voiceover_text(Path(args.rewrite))
     video = Path(args.video)
+    # P16 主时间轴：存在且可加载则字幕直接消费它（跳过分句/ASR，也无需抽临时音轨）；
+    # load 失败（None）自然回落下面的现有全流程。
+    timeline = timeline_mod.load_timeline(args.timeline) if args.timeline else None
+    if timeline:
+        return generate_subtitles(
+            video, text, Path(args.output), mode=args.mode, audio=None,
+            english=args.english, timeline=timeline,
+        )
     # 显式给了音频，或 ratio 模式且没给音频（会在下游报错）——都无需抽临时音轨。
     if args.audio or args.mode == "ratio":
         audio = Path(args.audio) if args.audio else None

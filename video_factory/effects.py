@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from video_factory import stage_report
+from video_factory import stage_report, timeline as timeline_mod
 from video_factory.sfx import (
     DEFAULT_SFX_VOLUME,
     SfxError,
@@ -55,7 +55,10 @@ _COMPOSITION_BY_TYPE = {
     "quote_card": "QuoteCard",
     "number_pop": "NumberPop",
     "keyword_pop": "KeywordPop",
+    # golden_card 全屏黑卡已退役（2026-07-15 用户拍板）：映射保留，仅为旧 manifest 重渲兼容。
     "golden_card": "GoldenCard",
+    # 金句开屏三行式（黑卡退役后的形态）：复用 HookOpener 组件，不新建 TSX。
+    "golden_lines": "HookOpener",
 }
 
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
@@ -88,9 +91,13 @@ HOOK_OPENER_MAX_DURATION = 5.0
 HOOK_OPENER_FIRST_SECTION_RATIO = 0.9
 HOOK_OPENER_MAX_LINES = 3        # 最多 3 行钩子短句
 
-# 金句全屏卡（kind=golden emphasis 升级形态）：时长与密度控制。
-GOLDEN_CARD_DURATION = 2.4       # 全屏卡时长（秒，比开场卡更充裕，金句要读完）
-GOLDEN_CARD_MIN_GAP_S = 20.0     # 相邻 golden_card 最小间隔（秒）
+# 金句全屏卡（kind=golden emphasis）：时长与密度控制。GOLDEN_CARD_* 仍用于 golden_lines
+# 无 timeline 时的回落时长与密度间隔（黑卡退役但密度规则沿用）。
+GOLDEN_CARD_DURATION = 2.4       # 无 timeline 回落时的 golden_lines 时长（秒）
+GOLDEN_CARD_MIN_GAP_S = 20.0     # 相邻金句最小间隔（秒）
+# 金句开屏三行式（有 timeline 时）：时长 = 该句时长 + 尾留白，封顶 4.5s（金句要读完）。
+GOLDEN_LINES_TAIL = 1.2          # 金句读完后的尾部留白（秒）
+GOLDEN_LINES_MAX_DURATION = 4.5  # 金句开屏卡最长时长（秒）
 
 
 class EffectsError(RuntimeError):
@@ -115,10 +122,13 @@ def build_effects_manifest(
     height: int = DEFAULT_HEIGHT,
     accent: str = DEFAULT_ACCENT,
     include_lower_thirds: bool = False,
+    timeline: list[dict] | None = None,
 ) -> dict:
     """从 assembly_plan.json（可选叠加 rewrite）派生 effects_manifest_v1。
 
     纯函数，不触碰文件系统。时间一律取整到帧（round(t*fps)/fps），避免 overlay 时间轴漂移。
+    timeline（P16 主时间轴逐句真实起止）可选：给了则 hook offsets/金句落点用真时间，
+    没给则所有行为与现状完全一致（回落字符占比估算）。
     """
     sections = _sections_from_plan(assembly_plan)
     if not sections:
@@ -130,7 +140,7 @@ def build_effects_manifest(
     # 开屏动效放最前（start=0）：rewrite 有 opening_hooks 时派生透明叠层的 hook_opener
     # （5 秒钩子序列），否则回落传统 intro（兼容旧 rewrite.json）。二者均占 [0, opener 时长]，
     # 不改底片时长。
-    opener = _build_opener(sections[0], rewrite, fps, accent)
+    opener = _build_opener(sections[0], rewrite, fps, accent, timeline)
     effects.append(opener)
 
     for i, section in enumerate(sections):
@@ -157,7 +167,8 @@ def build_effects_manifest(
     total_duration = sum(_section_duration(s) for s in sections)
     effects.extend(
         _build_rich_effects(
-            sections, rewrite, opener.start + opener.duration, total_duration, fps, accent
+            sections, rewrite, opener.start + opener.duration, total_duration, fps, accent,
+            timeline,
         )
     )
 
@@ -230,26 +241,102 @@ _HOOK_SPLIT_RE = re.compile(r"[，。！？…；、,!?;]+")
 _HOOK_LAST_LINE_MIN_SHOW = 0.6
 
 
+def _split_clause_lines(text: str, max_lines: int = HOOK_OPENER_MAX_LINES) -> list[str]:
+    """把一段文本按子句标点切成 1~max_lines 行大字（开屏钩子/金句共用切法）。
+
+    末句保留原文收尾的问/叹号（悬念/强调的语气）。空文本返回空列表。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    pieces = [p.strip() for p in _HOOK_SPLIT_RE.split(text) if p.strip()]
+    if pieces and text[-1] in "？?！!":
+        pieces[-1] += text[-1]
+    return pieces[:max_lines]
+
+
 def _split_hook_lines(rewrite: dict | None) -> list[str]:
     """把 hook 口播原文按子句 1:1 切成开屏大字行（2026-07-15 用户定案）。
 
     此前用 LLM 另写的 opening_hooks：屏幕文字与耳朵听到的完全是两套内容（用户
     直感"字幕和解说没对上"），且 ≤12 字约束还产生截断残句。改为口播原文 1:1，
-    所见即所听，两个问题一起消失。末句保留原文收尾的问/叹号（钩子的悬念感）。
+    所见即所听，两个问题一起消失。切法复用 _split_clause_lines（金句开屏卡同款）。
     """
     if not isinstance(rewrite, dict):
         return []
-    hook = str(rewrite.get("hook") or "").strip()
-    if not hook:
-        return []
-    pieces = [p.strip() for p in _HOOK_SPLIT_RE.split(hook) if p.strip()]
-    if pieces and hook[-1] in "？?！!":
-        pieces[-1] += hook[-1]
-    return pieces[:HOOK_OPENER_MAX_LINES]
+    return _split_clause_lines(str(rewrite.get("hook") or "").strip())
+
+
+# 归一化匹配：剥离空白与标点后比对，容忍 ASR 断句与 emphasis/hook 文案的标点差异。
+_NORMALIZE_RE = re.compile(r"[\s，。！？…；、,.!?;:：\"'“”‘’「」『』（）()【】\[\]\-—~·]+")
+
+
+def _normalize_for_match(text: str) -> str:
+    """归一化文本用于时间轴匹配：去空白与标点，只留实词字符。"""
+    return _NORMALIZE_RE.sub("", str(text or ""))
+
+
+def _char_ratio_offsets(lines: list[str], span: float, duration: float) -> list[float]:
+    """按字符占比把各行弹入时刻分摊到 span 上（钳位保证末行至少停留 _HOOK_LAST_LINE_MIN_SHOW）。"""
+    total_chars = sum(len(line) for line in lines) or 1
+    span = span if span > 0 else duration
+    offsets: list[float] = []
+    consumed = 0
+    for line in lines:
+        raw_offset = consumed / total_chars * span
+        offsets.append(round(min(raw_offset, max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
+        consumed += len(line)
+    return offsets
+
+
+def _find_timeline_sentence(timeline: list[dict] | None, text: str) -> dict | None:
+    """在 timeline 里找第一条（归一化后）包含 text 的句子；找不到返回 None。"""
+    if not timeline:
+        return None
+    norm_text = _normalize_for_match(text)
+    if not norm_text:
+        return None
+    for sentence in timeline:
+        norm_sent = _normalize_for_match(sentence.get("text"))
+        if norm_text in norm_sent:
+            return sentence
+    return None
+
+
+def _hook_offsets_from_timeline(
+    lines: list[str], timeline: list[dict] | None, duration: float
+) -> list[float] | None:
+    """逐行在 timeline 顺序匹配句子（从头消费防重复），命中取句 start 作 offset。
+
+    任一行找不到匹配返回 None（调用方整体回落字符占比估算）。offset 相对开屏（start=0），
+    钳位到 [0, duration - 末行最短停留]。
+    """
+    if not timeline:
+        return None
+    offsets: list[float] = []
+    cursor = 0
+    for line in lines:
+        norm_line = _normalize_for_match(line)
+        matched: dict | None = None
+        for j in range(cursor, len(timeline)):
+            norm_sent = _normalize_for_match(timeline[j].get("text"))
+            if norm_line and (norm_line in norm_sent or norm_sent in norm_line):
+                matched = timeline[j]
+                cursor = j + 1
+                break
+        if matched is None:
+            return None
+        start = float(matched.get("start") or 0.0)
+        offsets.append(round(min(max(0.0, start), max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
+    return offsets
 
 
 def _build_opener(
-    first_section: dict, rewrite: dict | None, fps: int, accent: str
+    first_section: dict,
+    rewrite: dict | None,
+    fps: int,
+    accent: str,
+    timeline: list[dict] | None = None,
 ) -> EffectSpec:
     """开屏动效：hook 可分句 → hook_opener（透明叠层，大字随口播逐句弹出）；
     否则回落传统 intro（旧/异常 rewrite.json 兼容）。"""
@@ -261,16 +348,12 @@ def _build_opener(
         )
         if duration <= 0:
             duration = HOOK_OPENER_MAX_DURATION
-        # 随口播弹出：hook 口播占满首节（拼装计划第 0 节即 hook），按字符占比在首节
-        # 时长上估算各句起点（口播近匀速，误差可忽略）；钳位保证末句至少停留 0.6s。
-        total_chars = sum(len(line) for line in lines) or 1
-        speech_span = first_duration if first_duration > 0 else duration
-        offsets: list[float] = []
-        consumed = 0
-        for line in lines:
-            raw_offset = consumed / total_chars * speech_span
-            offsets.append(round(min(raw_offset, max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
-            consumed += len(line)
+        # 有 timeline：逐行在真实句子起止时间上取 offset（本期核心——不再靠字符占比估算）。
+        # 任一行没匹配上 → 整体回落字符占比估算（口播占满首节，近匀速，误差可忽略）。
+        offsets = _hook_offsets_from_timeline(lines, timeline, duration)
+        if offsets is None:
+            speech_span = first_duration if first_duration > 0 else duration
+            offsets = _char_ratio_offsets(lines, speech_span, duration)
         return _frame_aligned(
             EffectSpec(
                 type="hook_opener",
@@ -496,9 +579,11 @@ def _derive_golden_events(
     sections: list[dict],
     rewrite_sections: list,
     starts: list[float],
+    timeline: list[dict] | None = None,
 ) -> list[tuple[float, str]]:
-    """派生 golden_card 落点：仅收集 kind=golden 的 emphasis 条目，均匀分布到节内时刻。
+    """派生金句落点：仅收集 kind=golden 的 emphasis 条目，取时刻。
 
+    有 timeline：命中含该金句的句子 → 用句子真实 start；否则回落节内均匀分布估算。
     与 _derive_keyword_events 镜像逻辑，但只处理 kind=golden；第 0 节（hook）始终跳过。
     """
     events: list[tuple[float, str]] = []
@@ -526,9 +611,47 @@ def _derive_golden_events(
         golden_texts = golden_texts[:3]
         n = len(golden_texts)
         for idx, text in enumerate(golden_texts):
-            offset = (idx + 1) / (n + 1) * sec_dur
-            events.append((sec_start + offset, text))
+            sentence = _find_timeline_sentence(timeline, text)
+            if sentence is not None:
+                events.append((float(sentence.get("start") or 0.0), text))
+            else:
+                offset = (idx + 1) / (n + 1) * sec_dur
+                events.append((sec_start + offset, text))
     return events
+
+
+def _build_golden_lines(
+    text: str,
+    start: float,
+    timeline: list[dict] | None,
+    fps: int,
+    accent: str,
+) -> EffectSpec:
+    """金句开屏三行式（golden_card 黑卡退役后的形态，复用 HookOpener 组件渲染）。
+
+    有 timeline 命中：duration = min(该句时长 + 尾留白, 4.5)，行内 offsets 按字符占比
+    分摊到句时长；无 timeline：回落 GOLDEN_CARD_DURATION 时长与同款分摊。
+    """
+    sentence = _find_timeline_sentence(timeline, text)
+    if sentence is not None:
+        span = max(0.0, float(sentence.get("end") or 0.0) - float(sentence.get("start") or 0.0))
+        duration = min(span + GOLDEN_LINES_TAIL, GOLDEN_LINES_MAX_DURATION)
+        if duration <= 0:
+            duration = GOLDEN_CARD_DURATION
+    else:
+        span = GOLDEN_CARD_DURATION
+        duration = GOLDEN_CARD_DURATION
+    lines = _split_clause_lines(text) or [str(text).strip()]
+    offsets = _char_ratio_offsets(lines, span, duration)
+    return _frame_aligned(
+        EffectSpec(
+            type="golden_lines",
+            start=start,
+            duration=duration,
+            props={"lines": lines, "offsets": offsets, "accent": accent},
+        ),
+        fps,
+    )
 
 
 def _apply_golden_density_control(
@@ -583,6 +706,7 @@ def _build_rich_effects(
     total_duration: float,
     fps: int,
     accent: str,
+    timeline: list[dict] | None = None,
 ) -> list[EffectSpec]:
     """"丰富化"特效派生（默认全开）：金句卡（55% 进度、避开章节卡窗口）、
     数字强调（每节首个关键数字，全片最多 2 个）、关键词弹出（emphasis 均匀分布优先；
@@ -650,32 +774,25 @@ def _build_rich_effects(
     keyword_events = _derive_keyword_events(sections, rewrite_sections, starts)
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
-    # 金句全屏卡：kind=golden emphasis 单独派生，密度控制 + 保护窗口碰撞检查。
+    # 金句开屏三行式（golden_lines，黑卡退役后的形态）：kind=golden emphasis 单独派生，
+    # 密度控制 + 保护窗口碰撞检查（沿用原 golden 的 20s 间隔/撞窗规则）。
     # 保护窗口：开屏动效（hook_opener/intro，占 [0, opener_end]）/ 各章节卡
-    # （避免全屏卡与这些固定特效叠加）。
-    golden_events = _derive_golden_events(sections, rewrite_sections, starts)
+    # （避免金句卡与这些固定特效叠加）。
+    golden_events = _derive_golden_events(sections, rewrite_sections, starts, timeline)
     protected: list[tuple[float, float]] = [
         (0.0, opener_end),  # 开屏动效时间窗
     ]
     for i in range(1, len(sections)):
         protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
     golden_events = _apply_golden_density_control(golden_events, protected, total_duration)
-    # 收集最终 golden_card 时间窗，用于后续过滤 keyword_pop
+    # 收集最终金句卡时间窗，用于后续过滤 keyword_pop
     golden_windows: list[tuple[float, float]] = []
     for gtime, gtext in golden_events:
-        spec = _frame_aligned(
-            EffectSpec(
-                type="golden_card",
-                start=gtime,
-                duration=GOLDEN_CARD_DURATION,
-                props={"text": gtext, "accent": accent},
-            ),
-            fps,
-        )
+        spec = _build_golden_lines(gtext, gtime, timeline, fps, accent)
         rich.append(spec)
         golden_windows.append((spec.start, spec.start + spec.duration))
 
-    # keyword_pop 三色轮换；过滤掉落在 golden_card 时间窗 ±1s 内的弹词（全屏卡前后弹小词很怪）。
+    # keyword_pop 三色轮换；过滤掉落在金句卡时间窗 ±1s 内的弹词（全屏卡前后弹小词很怪）。
     kw_color_idx = 0
     for kw_start, keyword in keyword_events:
         if any(gs - 1.0 <= kw_start <= ge + 1.0 for gs, ge in golden_windows):
@@ -1208,6 +1325,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--video", required=True, help="原片 release.mp4 路径")
     parser.add_argument("--plan", required=True, help="assembly_plan.json 路径（P2 产出）")
     parser.add_argument("--rewrite", default="", help="rewrite.json 路径（可选，用于片头标题）")
+    parser.add_argument(
+        "--timeline",
+        default="",
+        help="timeline.json 路径（P16 主时间轴，可选）：给了则 hook offsets/金句落点用真实句子"
+        "起止时间；文件不存在或损坏自然回落字符占比估算。",
+    )
     parser.add_argument("--output", default="video_factory/output/effects", help="输出目录")
     parser.add_argument("--lower-thirds", action="store_true", help="附加每节字幕条（lower_third）")
     parser.add_argument("--no-sfx", dest="sfx", action="store_false", help="关闭特效音（默认开：为片头/章节卡/花字条配音效）")
@@ -1223,12 +1346,15 @@ def main(argv: list[str] | None = None) -> int:
         # 先探测底片分辨率喂给 manifest：特效片段必须与底片同尺寸，overlay 才不会静默
         # 错位/裁剪。探测失败回落 1920x1080 并留痕（不阻断）。
         width, height, dim_warnings = _resolve_video_dimensions(Path(args.video))
+        # 主时间轴（P16）：给了 --timeline 且能加载则 hook/金句用真实句子时间；否则 None 回落估算。
+        timeline = timeline_mod.load_timeline(args.timeline) if args.timeline else None
         manifest = build_effects_manifest(
             plan,
             rewrite,
             width=width,
             height=height,
             include_lower_thirds=args.lower_thirds,
+            timeline=timeline,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = output_dir / "effects_manifest.json"

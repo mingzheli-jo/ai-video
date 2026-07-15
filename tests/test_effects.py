@@ -935,6 +935,9 @@ def test_composition_map_covers_keyword_hook_opener_and_golden():
 
     assert _COMPOSITION_BY_TYPE["keyword_pop"] == "KeywordPop"
     assert _COMPOSITION_BY_TYPE["hook_opener"] == "HookOpener"
+    # 金句黑卡退役：golden_lines 复用 HookOpener 组件（不新建 TSX）；
+    # golden_card 映射保留仅为旧 manifest 重渲兼容。
+    assert _COMPOSITION_BY_TYPE["golden_lines"] == "HookOpener"
     assert _COMPOSITION_BY_TYPE["golden_card"] == "GoldenCard"
     # 冷开场黑卡已退役：opening_card 不再登记渲染映射。
     assert "opening_card" not in _COMPOSITION_BY_TYPE
@@ -943,11 +946,13 @@ def test_composition_map_covers_keyword_hook_opener_and_golden():
 def test_sfx_mapping_covers_keyword_hook_opener_golden():
     from video_factory.sfx import SFX_BY_TYPE
 
-    # keyword_pop、开屏钩子序列、金句卡均有 SFX 映射；hook_opener 首声 whoosh 起势
+    # keyword_pop、开屏钩子序列、金句开屏卡均有 SFX 映射；hook_opener 首声 whoosh 起势
     # （逐行"刷刷"由 _build_sfx_audio 按 offsets 特判注入，2026-07-15 用户定案）。
-    for t in ("keyword_pop", "hook_opener", "golden_card"):
+    for t in ("keyword_pop", "hook_opener", "golden_lines"):
         assert t in SFX_BY_TYPE
     assert SFX_BY_TYPE["hook_opener"] == "whoosh.wav"
+    # 金句开屏卡：起点一声低频冲击（impact.wav），不逐行。
+    assert SFX_BY_TYPE["golden_lines"] == "impact.wav"
     # 转场音效已取消（2026-07-15 用户点名），不再注入。
     assert "transition" not in SFX_BY_TYPE
 
@@ -1284,14 +1289,15 @@ def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
     }
     manifest = build_effects_manifest(plan, rewrite_with_emphasis)
     kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    golden_cards = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    golden_lines = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
 
-    # keyword 类（节一）应存在；golden_card 由节二的 "关键词Y" 派生
+    # keyword 类（节一）应存在；金句开屏卡（golden_lines）由节二的 "关键词Y" 派生
     assert len(kw_pops) >= 1
     assert any(k["keyword"] == "关键词X" for k in kw_pops)
-    # golden_card 包含 "关键词Y"
-    assert len(golden_cards) == 1
-    assert golden_cards[0]["text"] == "关键词Y"
+    # 黑卡退役：不再派生 golden_card，改为 golden_lines（无标点 → 单行）
+    assert all(e["type"] != "golden_card" for e in manifest["effects"])
+    assert len(golden_lines) == 1
+    assert golden_lines[0]["lines"] == ["关键词Y"]
 
 
 # ============================================================
@@ -1416,8 +1422,8 @@ def test_apply_golden_density_empty_input():
 
 # ---- build_effects_manifest golden_card 集成 ----
 
-def test_build_manifest_golden_goes_to_golden_card_not_keyword_pop():
-    """build_effects_manifest：golden emphasis 生成 golden_card，不进 keyword_pop。"""
+def test_build_manifest_golden_goes_to_golden_lines_not_keyword_pop():
+    """build_effects_manifest：golden emphasis 生成 golden_lines（黑卡退役），不进 keyword_pop。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 10.0},
@@ -1436,9 +1442,13 @@ def test_build_manifest_golden_goes_to_golden_card_not_keyword_pop():
     }
     manifest = build_effects_manifest(plan, rewrite)
     types = [e["type"] for e in manifest["effects"]]
-    assert "golden_card" in types
-    golden = [e for e in manifest["effects"] if e["type"] == "golden_card"]
-    assert golden[0]["text"] == "要抓住机会"
+    assert "golden_lines" in types
+    assert "golden_card" not in types  # 黑卡不再派生
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    assert golden[0]["lines"] == ["要抓住机会"]
+    # golden_lines 复用 HookOpener 的三行式 props：lines/offsets/accent，无 text
+    assert "text" not in golden[0]
+    assert golden[0]["offsets"] == [0.0]
     # keyword_pop 里不含 golden 文字
     kw_keywords = [e.get("keyword", "") for e in manifest["effects"] if e["type"] == "keyword_pop"]
     assert "要抓住机会" not in kw_keywords
@@ -1465,21 +1475,21 @@ def test_keyword_pop_filtered_near_golden_window():
         }]
     }
     manifest = build_effects_manifest(plan, rewrite)
-    golden_specs = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    golden_specs = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
     kw_specs = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
 
     assert len(golden_specs) >= 1
     golden_start = golden_specs[0]["start"]
-    golden_end = golden_start + GOLDEN_CARD_DURATION
-    # 所有 keyword_pop 都不应落在 golden_card 的 +-1s 窗口内
+    golden_end = golden_start + golden_specs[0]["duration"]
+    # 所有 keyword_pop 都不应落在金句卡的 +-1s 窗口内
     for ks in [e["start"] for e in kw_specs]:
         assert not (golden_start - 1.0 <= ks <= golden_end + 1.0), (
-            f"keyword_pop at {ks}s 未被 golden_card [{golden_start}, {golden_end}] 过滤"
+            f"keyword_pop at {ks}s 未被 golden_lines [{golden_start}, {golden_end}] 过滤"
         )
 
 
-def test_golden_card_duration_from_manifest():
-    """manifest 中 golden_card 的 duration 近似等于 GOLDEN_CARD_DURATION（帧对齐误差 < 1帧）。"""
+def test_golden_lines_fallback_duration_without_timeline():
+    """无 timeline 时 golden_lines 回落 GOLDEN_CARD_DURATION（帧对齐误差 < 1帧）。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0},
@@ -1490,14 +1500,14 @@ def test_golden_card_duration_from_manifest():
         "hook": "开场",
         "sections": [{"narration": "", "emphasis": [{"text": "金句A", "kind": "golden"}]}]
     }
-    manifest = build_effects_manifest(plan, rewrite)
-    golden = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    manifest = build_effects_manifest(plan, rewrite)  # 不传 timeline
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
     assert len(golden) == 1
     assert abs(golden[0]["duration"] - GOLDEN_CARD_DURATION) < 0.1
 
 
-def test_golden_card_min_gap_in_full_manifest():
-    """全片多节均含 golden emphasis 时，golden_card 间距 >= GOLDEN_CARD_MIN_GAP_S。"""
+def test_golden_lines_min_gap_in_full_manifest():
+    """全片多节均含 golden emphasis 时，golden_lines 间距 >= GOLDEN_CARD_MIN_GAP_S（密度规则沿用）。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0},
@@ -1516,11 +1526,114 @@ def test_golden_card_min_gap_in_full_manifest():
     }
     manifest = build_effects_manifest(plan, rewrite)
     golden = sorted(
-        [e for e in manifest["effects"] if e["type"] == "golden_card"],
+        [e for e in manifest["effects"] if e["type"] == "golden_lines"],
         key=lambda e: e["start"],
     )
+    assert len(golden) >= 2  # 密度控制后至少留下 2 条才有间距可验
     for i in range(1, len(golden)):
         gap = golden[i]["start"] - golden[i - 1]["start"]
         assert gap >= GOLDEN_CARD_MIN_GAP_S - 0.1, (
-            f"golden_card 间隔 {gap:.1f}s 小于 {GOLDEN_CARD_MIN_GAP_S}s"
+            f"golden_lines 间隔 {gap:.1f}s 小于 {GOLDEN_CARD_MIN_GAP_S}s"
         )
+
+
+# ============================================================
+# P16 主时间轴消费：hook offsets 用真时间 + golden_lines 真句时长
+# ============================================================
+
+def test_hook_opener_offsets_use_timeline_real_times():
+    """有 timeline：hook 各行 offset = 匹配句子的真实 start（不再字符占比估算）。"""
+    rewrite = dict(REWRITE, hook="3秒看懂，你亏在哪？")
+    timeline = [
+        {"text": "3秒看懂", "start": 0.4, "end": 1.5},
+        {"text": "你亏在哪？", "start": 1.5, "end": 3.0},
+    ]
+    manifest = build_effects_manifest(PLAN, rewrite, timeline=timeline)
+    opener = manifest["effects"][0]
+    assert opener["type"] == "hook_opener"
+    assert opener["lines"] == ["3秒看懂", "你亏在哪？"]
+    # offset 直取句子真实 start（0.4 / 1.5），而非 0 / 4/9*6≈2.667
+    assert opener["offsets"] == [0.4, 1.5]
+
+
+def test_hook_opener_offsets_fallback_when_any_line_unmatched():
+    """timeline 缺任一行匹配 → 整体回落字符占比估算（与无 timeline 一致）。"""
+    rewrite = dict(REWRITE, hook="3秒看懂，你亏在哪？")
+    timeline = [
+        {"text": "3秒看懂", "start": 0.4, "end": 1.5},
+        {"text": "完全无关的句子内容", "start": 1.5, "end": 3.0},  # 第二行匹配不上
+    ]
+    manifest = build_effects_manifest(PLAN, rewrite, timeline=timeline)
+    opener = manifest["effects"][0]
+    # 回落字符占比：首句 0、第二句 4/9×6.0≈2.667（不是 timeline 的 1.5）
+    assert opener["offsets"][0] == 0.0
+    assert opener["offsets"][1] == pytest.approx(4 / 9 * 6.0, abs=0.05)
+
+
+def test_hook_opener_offsets_fallback_without_timeline_unchanged():
+    """无 timeline：行为与现状完全一致（字符占比估算）。"""
+    rewrite = dict(REWRITE, hook="3秒看懂，你亏在哪？")
+    manifest = build_effects_manifest(PLAN, rewrite)  # 不传 timeline
+    opener = manifest["effects"][0]
+    assert opener["offsets"][0] == 0.0
+    assert opener["offsets"][1] == pytest.approx(4 / 9 * 6.0, abs=0.05)
+
+
+def test_golden_lines_uses_timeline_sentence_start_and_duration():
+    """有 timeline：golden_lines start=句 start，duration=min(句时长+1.2, 4.5)，多行按标点拆。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0},
+            {"index": 1, "title": "节1", "duration_seconds": 60.0},
+        ]
+    }
+    rewrite = {
+        "hook": "开场白",
+        "sections": [{
+            "narration": "这节口播",
+            "emphasis": [{"text": "持续做正确的事，时间会回报你", "kind": "golden"}],
+        }],
+    }
+    timeline = [
+        # 句子含金句文本（归一化后包含），起 30.0 止 34.0（时长 4.0s）
+        {"text": "我始终相信持续做正确的事，时间会回报你。", "start": 30.0, "end": 34.0},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    assert len(golden) == 1
+    g = golden[0]
+    assert g["start"] == pytest.approx(30.0, abs=1 / 30)
+    # duration = min(4.0 + 1.2, 4.5) = 4.5
+    assert g["duration"] == pytest.approx(4.5, abs=1 / 30)
+    # 按子句标点拆成两行
+    assert g["lines"] == ["持续做正确的事", "时间会回报你"]
+    # 行内 offsets 按字符占比在句时长(4.0)上分摊：首行 0，次行 7/13×4.0≈2.15
+    assert g["offsets"][0] == 0.0
+    assert g["offsets"][1] == pytest.approx(7 / 13 * 4.0, abs=0.05)
+
+
+def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
+    """golden_lines 起点一声 impact（不逐行）：逐行"刷刷"特判只认 hook_opener。"""
+    base = tmp_path / "release.mp4"
+    base.write_bytes(b"base")
+    e0 = tmp_path / "effect_00.mov"
+    e0.write_bytes(b"g")
+    sfx_dir = _make_sfx_dir(tmp_path)
+    runner = _OverlayRecorder(probe_duration=2.0, channels=2)
+
+    overlay_effects(
+        base,
+        [{"path": e0, "start": 30.0, "type": "golden_lines", "offsets": [0.0, 2.15]}],
+        tmp_path / "out.mp4",
+        runner=runner,
+        sfx_enabled=True,
+        sfx_volume=0.4,
+        sfx_dir=sfx_dir,
+    )
+    cmd = next(c for c in runner.commands if "-filter_complex" in c)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    # 只有一声 impact 落在起点 30s；不因 offsets 逐行注入 swoosh
+    assert str(sfx_dir / "impact.wav") in cmd
+    assert str(sfx_dir / "swoosh.wav") not in cmd
+    assert "adelay=30000:all=1" in fc
+    assert "amix=inputs=2:duration=first:normalize=0" in fc  # 底片音轨 + 1 声 impact

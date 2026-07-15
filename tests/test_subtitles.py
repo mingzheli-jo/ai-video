@@ -782,6 +782,93 @@ def test_generate_subtitles_align_records_source(tmp_path, monkeypatch):
     assert "faster-whisper" in report["timeline_source"]
 
 
+def test_generate_subtitles_timeline_mode_skips_asr(tmp_path, monkeypatch):
+    """P16：给了 timeline → cues 直接由 sentences 构造，跳过 split+ASR，mode 记 timeline。"""
+    video = tmp_path / "release.mp4"
+    video.write_bytes(b"v")
+    out_dir = tmp_path / "out"
+    runner = _AllRunner(width=1080, height=1920, duration=10.0)
+
+    # build_cues 一旦被调用就炸——证明 timeline 模式彻底跳过 ASR/分摊。
+    def _must_not_run(*a, **k):
+        raise AssertionError("timeline 模式不该调用 build_cues（应跳过 ASR）")
+
+    monkeypatch.setattr("video_factory.subtitles.build_cues", _must_not_run)
+
+    timeline = [
+        {"text": "第一句", "start": 0.0, "end": 2.0},
+        {"text": "第二句", "start": 2.0, "end": 5.0},
+        {"text": "第三句", "start": 5.0, "end": 8.0},
+    ]
+    report = generate_subtitles(
+        video, "随便的文本（timeline 模式下不用于分句）", out_dir,
+        mode="auto", audio=None, runner=runner, timeline=timeline,
+    )
+
+    assert report["mode"] == "timeline"
+    assert report["cue_count"] == 3  # 三句直接来自 timeline
+    assert "主时间轴" in report["timeline_source"]
+    assert (out_dir / RELEASE_FILENAME).exists()
+    saved = json.loads((out_dir / "subtitles_report.json").read_text(encoding="utf-8"))
+    assert saved["mode"] == "timeline"
+
+
+def test_cli_timeline_flag_skips_asr(tmp_path, monkeypatch):
+    """CLI --timeline 存在且可加载 → 走 timeline 模式，不抽临时音轨、不跑 ASR。"""
+    video = tmp_path / "release.mp4"
+    video.write_bytes(b"v")
+    rewrite = tmp_path / "rewrite.json"
+    rewrite.write_text(json.dumps({"full_voiceover": "甲。乙。"}, ensure_ascii=False), encoding="utf-8")
+    tl = tmp_path / "timeline.json"
+    tl.write_text(
+        json.dumps({"version": "timeline_v1", "sentences": [
+            {"text": "甲句", "start": 0.0, "end": 1.5},
+            {"text": "乙句", "start": 1.5, "end": 3.0},
+        ]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    runner = _AllRunner(duration=10.0)
+    monkeypatch.setattr("video_factory.subtitles.subprocess.run", runner)
+    # 若误走 ASR 路径会调 build_cues；炸掉以坐实跳过。
+    monkeypatch.setattr(
+        "video_factory.subtitles.build_cues",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该跑 ASR")),
+    )
+
+    code = main([
+        "--video", str(video),
+        "--rewrite", str(rewrite),
+        "--timeline", str(tl),
+        "--output", str(tmp_path / "out"),
+    ])
+    assert code == 0
+    report = json.loads((tmp_path / "out" / "subtitles_report.json").read_text(encoding="utf-8"))
+    assert report["mode"] == "timeline"
+    assert report["cue_count"] == 2
+
+
+def test_cli_timeline_missing_file_falls_back_to_normal_flow(tmp_path, monkeypatch):
+    """--timeline 指向不存在的文件 → load 返回 None → 回落现有 ratio 全流程。"""
+    video = tmp_path / "release.mp4"
+    video.write_bytes(b"v")
+    audio = tmp_path / "voiceover.wav"
+    audio.write_bytes(b"wav")
+    runner = _AllRunner(duration=10.0)
+    monkeypatch.setattr("video_factory.subtitles.subprocess.run", runner)
+
+    code = main([
+        "--video", str(video),
+        "--text", "第一句。第二句。",
+        "--audio", str(audio),
+        "--timeline", str(tmp_path / "absent.json"),  # 不存在 → 回落
+        "--mode", "ratio",
+        "--output", str(tmp_path / "out"),
+    ])
+    assert code == 0
+    report = json.loads((tmp_path / "out" / "subtitles_report.json").read_text(encoding="utf-8"))
+    assert report["mode"] == "ratio"  # 回落，不是 timeline
+
+
 def test_generate_subtitles_raises_when_libass_missing(tmp_path):
     video = tmp_path / "release.mp4"
     video.write_bytes(b"v")

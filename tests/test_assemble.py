@@ -1148,6 +1148,107 @@ def test_cli_voice_speed_routes_to_tts_and_follows_audio(tmp_path, monkeypatch):
     assert not (out / "voiceover_fitted.wav").exists()    # atempo 微调已让位
 
 
+# ---------- 主时间轴（P16）：assemble 产出时机 = _fit_audio_to_target 之后 ----------
+
+def test_cli_produces_timeline_after_fit(tmp_path, monkeypatch):
+    """现场 TTS + atempo 微调后，produce_timeline 收到的是 fitted 音轨（对齐最终那条）。"""
+    from video_factory import assemble as assemble_mod
+    from video_factory import asset_pool as asset_pool_mod
+    from video_factory import timeline as timeline_mod
+
+    rewrite_path = tmp_path / "rewrite.json"
+    rewrite_path.write_text(json.dumps(REWRITE, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    out = tmp_path / "out"
+
+    def fake_synth(narration, path, config):
+        Path(path).write_bytes(b"wav")
+
+        class _R:
+            pass
+
+        result = _R()
+        result.path = Path(path)
+        return result
+
+    captured = {}
+
+    def fake_produce(audio_path, full_text, output_dir, runner=None):
+        captured["audio_path"] = Path(audio_path)
+        captured["full_text"] = full_text
+        return Path(output_dir) / "timeline.json"
+
+    def fake_fit(audio_path, target, output_dir, runner):
+        # 模拟 atempo 微调：产出 fitted 音轨并返回它（真实 subprocess.run 在假 wav 上会失败）。
+        fitted = Path(output_dir) / "voiceover_fitted.wav"
+        fitted.write_bytes(b"fitted")
+        return fitted, "已微调"
+
+    runner = _Recorder(probe_duration=50.0)
+    real_scan = asset_pool_mod.scan_asset_pool
+    real_render = assemble_mod.render_assembly
+    monkeypatch.setattr(assemble_mod, "synthesize_voiceover_text", fake_synth)
+    monkeypatch.setattr(assemble_mod, "_probe_duration", lambda p, r: 50.0)
+    monkeypatch.setattr(assemble_mod, "_fit_audio_to_target", fake_fit)
+    monkeypatch.setattr(timeline_mod, "produce_timeline", fake_produce)
+    monkeypatch.setattr(
+        assemble_mod, "scan_asset_pool", lambda directory: real_scan(directory, runner=runner)
+    )
+    monkeypatch.setattr(
+        assemble_mod, "render_assembly",
+        lambda plan, output_dir, **kwargs: real_render(plan, output_dir, runner=runner, **kwargs),
+    )
+
+    code = main([
+        "--rewrite", str(rewrite_path), "--assets", str(tmp_path),
+        "--tts", "doubao", "--duration", "90", "--output", str(out),
+    ])
+    assert code == 0
+    # 关键：对齐的是变速后的 voiceover_fitted.wav，而非原始 voiceover.wav。
+    assert captured["audio_path"] == out / "voiceover_fitted.wav"
+    assert (out / "voiceover_fitted.wav").exists()
+    assert captured["full_text"] == REWRITE["full_voiceover"]
+
+
+def test_cli_produces_timeline_for_user_audio(tmp_path, monkeypatch):
+    """用户自带 --audio 分支同样产出时间轴（收到用户那条音轨，不变速）。"""
+    from video_factory import assemble as assemble_mod
+    from video_factory import asset_pool as asset_pool_mod
+    from video_factory import timeline as timeline_mod
+
+    rewrite_path = tmp_path / "rewrite.json"
+    rewrite_path.write_text(json.dumps(REWRITE, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    user_audio = tmp_path / "my_voice.wav"
+    user_audio.write_bytes(b"wav")
+    out = tmp_path / "out"
+
+    captured = {}
+
+    def fake_produce(audio_path, full_text, output_dir, runner=None):
+        captured["audio_path"] = Path(audio_path)
+        return Path(output_dir) / "timeline.json"
+
+    runner = _Recorder(probe_duration=90.0)
+    real_scan = asset_pool_mod.scan_asset_pool
+    real_render = assemble_mod.render_assembly
+    monkeypatch.setattr(timeline_mod, "produce_timeline", fake_produce)
+    monkeypatch.setattr(
+        assemble_mod, "scan_asset_pool", lambda directory: real_scan(directory, runner=runner)
+    )
+    monkeypatch.setattr(
+        assemble_mod, "render_assembly",
+        lambda plan, output_dir, **kwargs: real_render(plan, output_dir, runner=runner, **kwargs),
+    )
+
+    code = main([
+        "--rewrite", str(rewrite_path), "--assets", str(tmp_path),
+        "--audio", str(user_audio), "--duration", "90", "--output", str(out),
+    ])
+    assert code == 0
+    assert captured["audio_path"] == user_audio  # 用户自带音轨原样传入，不变速
+
+
 # ---------- 拍级配图：--ordered-assets 顺序分配（P13 任务B） ----------
 
 def test_build_ordered_assembly_plan_uses_images_in_beat_order(tmp_path):

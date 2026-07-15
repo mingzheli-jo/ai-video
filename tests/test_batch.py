@@ -280,6 +280,25 @@ def test_build_effects_argv_passes_sfx_volume():
     assert argv[argv.index("--sfx-volume") + 1] == "0.5"
 
 
+def test_build_effects_argv_passes_timeline_unconditionally(tmp_path):
+    """P16：effects argv 无条件带 --timeline 指向 job_dir/timeline.json（不存在时消费方自然回落）。"""
+    job = resolve_job({"name": "j", "source": "s", "assets": "a"}, 0)
+    job_dir = tmp_path / "jobout"
+    argv = build_effects_argv(job, job_dir)
+    assert "--timeline" in argv
+    assert argv[argv.index("--timeline") + 1] == str(job_dir / "timeline.json")
+
+
+def test_build_subtitles_argv_passes_timeline_unconditionally(tmp_path):
+    """P16：subtitles argv 无条件带 --timeline 指向 job_dir/timeline.json。"""
+    job = resolve_job({"name": "j", "source": "s", "assets": "a"}, 0)
+    job_dir = tmp_path / "jobout"
+    job_dir.mkdir()
+    argv = build_subtitles_argv(job, job_dir)
+    assert "--timeline" in argv
+    assert argv[argv.index("--timeline") + 1] == str(job_dir / "timeline.json")
+
+
 # ---------- 字幕 --video 指向：有/无特效 ----------
 
 def test_subtitles_video_points_to_effects_output_when_effects_on(tmp_path):

@@ -274,6 +274,8 @@ def build_effects_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
         "--plan", str(job_dir / "assembly_plan.json"),
         "--rewrite", str(job_dir / "rewrite.json"),
     ]
+    # 主时间轴（P16）无条件透传：文件不存在/损坏时消费方（effects）自然回落字符占比估算。
+    argv += ["--timeline", str(job_dir / "timeline.json")]
     if job.lower_thirds:
         argv += ["--lower-thirds"]
     if not job.sfx:
@@ -325,6 +327,9 @@ def build_subtitles_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
     voiceover = _subtitles_audio_path(job, job_dir)
     if voiceover is not None:
         argv += ["--audio", str(voiceover)]
+    # 主时间轴（P16）无条件透传：存在且可加载则字幕直接由 sentences 构造、跳过 ASR；
+    # 文件不存在/损坏时消费方（subtitles）自然回落现有全流程。
+    argv += ["--timeline", str(job_dir / "timeline.json")]
     argv += ["--output", str(job_dir)]
     return argv
 

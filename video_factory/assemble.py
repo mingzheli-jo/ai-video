@@ -18,7 +18,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Callable, Sequence
 
-from video_factory import credentials_store, stage_report
+from video_factory import credentials_store, stage_report, timeline
 from video_factory.asset_pool import (
     IMAGE_SUFFIXES,
     IMAGE_VIRTUAL_DURATION,
@@ -1248,6 +1248,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if fit_note:
                     print(f"时长微调：{fit_note}")
+        # 主时间轴（P16）：配音定稿后立刻对齐产出 timeline.json，作 effects/subtitles 唯一时钟。
+        # 必须在 _fit_audio_to_target 微调之后——对齐的是最终混进成片的那条音轨（fitted 与否都对）；
+        # --audio 用户自带配音同样产出。失败只告警不阻断（时间轴是增强件）。
+        if audio_path is not None:
+            full_voiceover = str(rewrite.get("full_voiceover") or "").strip()
+            if full_voiceover:
+                if timeline.produce_timeline(audio_path, full_voiceover, output_dir) is None:
+                    print("主时间轴未生成（对齐失败或依赖缺失），特效/字幕将回落估算。")
+            else:
+                print("主时间轴跳过：rewrite 缺 full_voiceover，无法对齐。")
         width, height = ASPECT_PRESETS[args.aspect]
         if args.ordered_assets:
             # 拍级配图模式：按 gen_assets/img_NN 顺序逐拍分配，跳过素材池扫描。
