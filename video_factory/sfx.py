@@ -29,10 +29,10 @@ SFX_BY_TYPE = {
     "key_points": "whoosh.wav",
     "quote_card": "pop.wav",
     "number_pop": "pop.wav",
-    # 关键词弹出复用"啵"的 pop；冷开场卡用 whoosh 起势；转场用独立的低频 whoosh。
+    # 关键词弹出复用"啵"的 pop；冷开场卡用 whoosh 起势；金句全屏卡用低频冲击音。
     "keyword_pop": "pop.wav",
     "opening_card": "whoosh.wav",
-    "transition": "transition.wav",
+    "golden_card": "impact.wav",
 }
 
 DEFAULT_SFX_VOLUME = 0.35  # 混音时相对主口播的音量（0~1，宁小勿大，避免盖住人声）
@@ -59,14 +59,12 @@ _SYNTH_SPECS = {
         "afade=t=out:st=0.16:d=0.15,volume=1.8,"
         "aformat=sample_fmts=s16:channel_layouts=mono",
     ),
-    "transition.wav": (
-        # 转场 whoosh：0.3s 白噪声经 80~200Hz 带通塑成低频"扫过"声（bandpass 频率固定，
-        # 靠快起快落的淡入淡出造出气流掠过的落点感），比片头 whoosh 更低沉、更短促，
-        # 专给 xfade 翻页/滑动转场配一声。
-        "anoisesrc=d=0.3:c=white:r=44100:a=0.6",
-        "bandpass=f=140:width_type=h:w=120,afade=t=in:d=0.08,"
-        "afade=t=out:st=0.18:d=0.12,volume=2.2,"
-        "aformat=sample_fmts=s16:channel_layouts=mono",
+    "impact.wav": (
+        # 金句卡冲击音：低频 boom —— 80Hz 正弦 0.28s，快起慢落，
+        # 造出鼓锤落地的冲击感，给全屏金句卡"砸"出一个落点。
+        "sine=frequency=80:duration=0.28:r=44100",
+        "afade=t=in:d=0.008,afade=t=out:st=0.10:d=0.17,"
+        "volume=3.0,aformat=sample_fmts=s16:channel_layouts=mono",
     ),
 }
 

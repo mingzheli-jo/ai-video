@@ -52,8 +52,8 @@ def test_ensure_default_pack_skips_existing_generates_missing(tmp_path, monkeypa
     monkeypatch.setattr("video_factory.sfx.shutil.which", lambda name: "/usr/bin/ffmpeg")
     generated = ensure_default_pack(d, runner=fake_run)
 
-    # 只补缺失：whoosh 已存在不动，pop/swoosh/transition 三个缺失的都补上。
-    assert {p.name for p in generated} == {"pop.wav", "swoosh.wav", "transition.wav"}
+    # 只补缺失：whoosh 已存在不动，pop/swoosh/impact 三个缺失的都补上（transition 已移除）。
+    assert {p.name for p in generated} == {"pop.wav", "swoosh.wav", "impact.wav"}
     assert (d / "whoosh.wav").read_bytes() == b"already"  # 尊重用户替换，不覆盖
 
 
@@ -63,21 +63,25 @@ def test_ensure_default_pack_raises_without_ffmpeg(tmp_path, monkeypatch):
         ensure_default_pack(tmp_path / "sfx")
 
 
-def test_transition_type_maps_to_transition_wav(tmp_path):
-    # 转场 whoosh：新增的 transition 类型映射到独立的 transition.wav。
-    assert SFX_BY_TYPE["transition"] == "transition.wav"
+def test_transition_type_removed_from_sfx_mapping(tmp_path):
+    # 转场音效已取消（2026-07-15 用户点名）：transition 不再映射任何音效文件。
+    assert "transition" not in SFX_BY_TYPE
+    # resolve_sfx_path 对 transition 类型应返回 None（不再注入）。
     d = tmp_path / "sfx"
     d.mkdir()
-    (d / "transition.wav").write_bytes(b"x")
-    assert resolve_sfx_path("transition", d) == d / "transition.wav"
+    (d / "transition.wav").write_bytes(b"x")  # 即使文件存在，也不应被引用
+    assert resolve_sfx_path("transition", d) is None
 
 
-def test_ensure_default_pack_synthesizes_transition(tmp_path, monkeypatch):
-    # 空目录 → 应把 transition.wav 也合成出来（转场特效音开箱即用）。
+def test_ensure_default_pack_does_not_synthesize_transition(tmp_path, monkeypatch):
+    # 转场音效已取消：ensure_default_pack 不再合成 transition.wav；
+    # 新增 impact.wav（金句卡冲击音）应在空目录下被合成。
     def fake_run(command, **kwargs):
         Path(command[-1]).write_bytes(b"generated")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr("video_factory.sfx.shutil.which", lambda name: "/usr/bin/ffmpeg")
     generated = ensure_default_pack(tmp_path / "sfx", runner=fake_run)
-    assert "transition.wav" in {p.name for p in generated}
+    names = {p.name for p in generated}
+    assert "transition.wav" not in names  # 不再注入转场音
+    assert "impact.wav" in names          # 金句卡冲击音应生成

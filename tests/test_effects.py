@@ -472,7 +472,7 @@ def test_overlay_keeps_effect_when_resolution_probe_fails(tmp_path):
 def _make_sfx_dir(tmp_path):
     d = tmp_path / "sfx"
     d.mkdir()
-    for f in ("whoosh.wav", "pop.wav", "swoosh.wav", "transition.wav"):
+    for f in ("whoosh.wav", "pop.wav", "swoosh.wav", "impact.wav"):  # transition 已移除
         (d / f).write_bytes(b"RIFFxxxxWAVE")
     return d
 
@@ -916,23 +916,33 @@ def test_extract_keyword_priority():
     assert _extract_keyword("", "") == ""                                       # 全空 → 空串（跳过）
 
 
-def test_composition_map_covers_keyword_and_opening():
+def test_composition_map_covers_keyword_opening_and_golden():
     from video_factory.effects import _COMPOSITION_BY_TYPE
 
     assert _COMPOSITION_BY_TYPE["keyword_pop"] == "KeywordPop"
     assert _COMPOSITION_BY_TYPE["opening_card"] == "OpeningCard"
+    assert _COMPOSITION_BY_TYPE["golden_card"] == "GoldenCard"
 
 
-def test_sfx_mapping_covers_keyword_opening_transition():
+def test_sfx_mapping_covers_keyword_opening_golden():
     from video_factory.sfx import SFX_BY_TYPE
 
-    for t in ("keyword_pop", "opening_card", "transition"):
+    # keyword_pop、开场卡、金句卡均有 SFX 映射。
+    for t in ("keyword_pop", "opening_card", "golden_card"):
         assert t in SFX_BY_TYPE
+    # 转场音效已取消（2026-07-15 用户点名），不再注入。
+    assert "transition" not in SFX_BY_TYPE
 
 
 # ---------- 转场特效音（Task B）：转场点混入 whoosh ----------
 
-def test_overlay_mixes_transition_whoosh_at_transition_points(tmp_path):
+def test_overlay_does_not_mix_transition_sfx(tmp_path):
+    # 转场音效已取消（2026-07-15 用户点名）：overlay_effects 不再有 transition_points 参数，
+    # 即使 sfx_enabled=True 也不会把 transition.wav 混入音轨——不再注入。
+    import inspect
+    sig = inspect.signature(overlay_effects)
+    assert "transition_points" not in sig.parameters  # 参数已删除，不再接受
+
     base = tmp_path / "release.mp4"
     base.write_bytes(b"base")
     e0 = tmp_path / "effect_00.mov"
@@ -947,21 +957,19 @@ def test_overlay_mixes_transition_whoosh_at_transition_points(tmp_path):
         runner=runner,
         sfx_enabled=True,
         sfx_dir=sfx_dir,
-        transition_points=[3.0, 7.5],
     )
 
     cmd = next(c for c in runner.commands if "-filter_complex" in c)
     fc = cmd[cmd.index("-filter_complex") + 1]
-    # intro whoosh + 两个转场 whoosh 一起混：amix inputs = 1(底) + 1(intro) + 2(转场) = 4
-    assert "amix=inputs=4:duration=first:normalize=0" in fc
-    assert "adelay=3000:all=1" in fc
-    assert "adelay=7500:all=1" in fc
-    # transition.wav 作为额外输入进混音
-    assert str(sfx_dir / "transition.wav") in cmd
+    # 只有 intro 特效音（底片 + intro = inputs=2），无转场 whoosh。
+    assert "amix=inputs=2:duration=first:normalize=0" in fc
+    # transition.wav 不再出现在命令行中——不再注入。
+    assert str(sfx_dir / "transition.wav") not in " ".join(str(x) for x in cmd)
 
 
-def test_overlay_no_transition_sfx_when_points_empty(tmp_path):
-    # 无转场点（未走 xfade）→ 只混特效自身音效，不引入 transition。
+def test_overlay_sfx_without_transition_even_with_plan_points(tmp_path):
+    # assembly_plan 中有 transition_points 字段也与 overlay_effects 无关；
+    # 特效音仅按各特效类型映射音效，不再为转场点注入 transition.wav。
     base = tmp_path / "release.mp4"
     base.write_bytes(b"base")
     e0 = tmp_path / "effect_00.mov"
@@ -976,13 +984,13 @@ def test_overlay_no_transition_sfx_when_points_empty(tmp_path):
         runner=runner,
         sfx_enabled=True,
         sfx_dir=sfx_dir,
-        transition_points=[],
     )
 
     cmd = next(c for c in runner.commands if "-filter_complex" in c)
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "amix=inputs=2:duration=first:normalize=0" in fc  # 底 + intro
-    assert str(sfx_dir / "transition.wav") not in cmd
+    # 只有 intro 特效音（底片 + intro = inputs=2），无转场音注入。
+    assert "amix=inputs=2:duration=first:normalize=0" in fc
+    assert str(sfx_dir / "transition.wav") not in " ".join(str(x) for x in cmd)
 
 
 # ============================================================
@@ -992,8 +1000,12 @@ def test_overlay_no_transition_sfx_when_points_empty(tmp_path):
 from video_factory.effects import (  # noqa: E402
     DENSITY_MIN_GAP_S,
     DENSITY_VACUUM_S,
+    GOLDEN_CARD_DURATION,
+    GOLDEN_CARD_MIN_GAP_S,
     KEYWORD_POP_COLORS,
     _apply_density_control,
+    _apply_golden_density_control,
+    _derive_golden_events,
     _derive_keyword_events,
 )
 
@@ -1022,10 +1034,10 @@ def _starts(durations: list[float]) -> list[float]:
 # ---- _derive_keyword_events ----
 
 def test_derive_keyword_events_uses_emphasis_when_present():
-    """有 emphasis 时按均匀分布取落点（不走规则抽取）。"""
+    """有 emphasis 时按均匀分布取落点（不走规则抽取）；golden 类条目不进 keyword_pop。"""
     sections = [
         _make_section("hook", 10.0),
-        _make_section("第一节", 30.0),  # 3条emphasis → 30/4=7.5s间隔
+        _make_section("第一节", 30.0),
     ]
     rw_sections = [
         _make_rewrite_section(
@@ -1033,7 +1045,7 @@ def test_derive_keyword_events_uses_emphasis_when_present():
             emphasis=[
                 {"text": "核心词A", "kind": "keyword"},
                 {"text": "50%收益", "kind": "number"},
-                {"text": "持续就是力量", "kind": "golden"},
+                {"text": "持续就是力量", "kind": "golden"},  # golden 不进 keyword_pop
             ],
         )
     ]
@@ -1041,15 +1053,14 @@ def test_derive_keyword_events_uses_emphasis_when_present():
 
     events = _derive_keyword_events(sections, rw_sections, starts)
 
-    # 跳过 hook 节，只处理第一节
-    assert len(events) == 3
-    # 均匀分布：at 1/(3+1)*30=7.5, 2/(3+1)*30=15, 3/(3+1)*30=22.5，加 section_start=10
+    # golden 被过滤，只剩 keyword + number 两条
+    assert len(events) == 2
     texts = [e[1] for e in events]
-    assert texts == ["核心词A", "50%收益", "持续就是力量"]
+    assert texts == ["核心词A", "50%收益"]
+    # 均匀分布（n=2）：1/(2+1)*30=10, 2/(2+1)*30=20，加 section_start=10
     times = [e[0] for e in events]
-    assert abs(times[0] - (10 + 7.5)) < 0.01
-    assert abs(times[1] - (10 + 15.0)) < 0.01
-    assert abs(times[2] - (10 + 22.5)) < 0.01
+    assert abs(times[0] - (10 + 10.0)) < 0.01
+    assert abs(times[1] - (10 + 20.0)) < 0.01
 
 
 def test_derive_keyword_events_falls_back_to_rule_without_emphasis():
@@ -1220,23 +1231,33 @@ def test_manifest_count_unchanged_without_emphasis():
 
 
 def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
-    """有 emphasis 时 keyword_pop 落点来自 emphasis 均匀分布（不走 40% 规则）。"""
+    """有 emphasis 时 keyword_pop 落点来自 emphasis 均匀分布（不走 40% 规则）；
+    golden 类条目不进 keyword_pop，单独派生 golden_card。
+    两类 emphasis 放在不同节以避免时刻重叠导致 keyword_pop 被过滤。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
-            {"index": 1, "title": "第一节", "duration_seconds": 40.0, "slices": []},
+            {"index": 1, "title": "节一", "duration_seconds": 40.0, "slices": []},  # 5-45s
+            {"index": 2, "title": "节二", "duration_seconds": 40.0, "slices": []},  # 45-85s
         ]
     }
     rewrite_with_emphasis = {
         "hook": "钩子",
         "sections": [
             {
-                "title": "第一节",
+                "title": "节一",
                 "narration": "这节口播文案",
                 "visual_hint": "",
                 "emphasis": [
-                    {"text": "关键词X", "kind": "keyword"},
-                    {"text": "关键词Y", "kind": "golden"},
+                    {"text": "关键词X", "kind": "keyword"},  # keyword_pop 在节一
+                ],
+            },
+            {
+                "title": "节二",
+                "narration": "",
+                "visual_hint": "",
+                "emphasis": [
+                    {"text": "关键词Y", "kind": "golden"},   # golden_card 在节二（间距>20s）
                 ],
             }
         ],
@@ -1245,11 +1266,243 @@ def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
     }
     manifest = build_effects_manifest(plan, rewrite_with_emphasis)
     kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    golden_cards = [e for e in manifest["effects"] if e["type"] == "golden_card"]
 
-    # 2 条 emphasis → 2 个 keyword_pop（均匀分布：40/(2+1)=13.33s，5+13.33, 5+26.67）
-    assert len(kw_pops) == 2
-    assert abs(kw_pops[0]["start"] - (5.0 + 40.0 / 3)) < 0.5
-    assert abs(kw_pops[1]["start"] - (5.0 + 40.0 * 2 / 3)) < 0.5
-    # 关键词文本来自 emphasis，不是规则抽取的节标题
-    assert kw_pops[0]["keyword"] == "关键词X"
-    assert kw_pops[1]["keyword"] == "关键词Y"
+    # keyword 类（节一）应存在；golden_card 由节二的 "关键词Y" 派生
+    assert len(kw_pops) >= 1
+    assert any(k["keyword"] == "关键词X" for k in kw_pops)
+    # golden_card 包含 "关键词Y"
+    assert len(golden_cards) == 1
+    assert golden_cards[0]["text"] == "关键词Y"
+
+
+# ============================================================
+# 任务A：golden_card —— 派生、密度控制、撞窗、keyword_pop 过滤
+# ============================================================
+
+# ---- _derive_golden_events ----
+
+def test_derive_golden_events_collects_golden_emphasis():
+    """kind=golden 的 emphasis 按均匀分布产生 golden_card 落点。"""
+    sections = [
+        _make_section("hook", 10.0),
+        _make_section("第一节", 30.0),
+    ]
+    rw_sections = [
+        _make_rewrite_section(
+            "这节口播",
+            emphasis=[
+                {"text": "核心词A", "kind": "keyword"},   # 不进 golden
+                {"text": "持续就是力量", "kind": "golden"},
+            ],
+        )
+    ]
+    starts = _starts([10.0, 30.0])
+
+    events = _derive_golden_events(sections, rw_sections, starts)
+
+    assert len(events) == 1
+    assert events[0][1] == "持续就是力量"
+    # n=1: offset = 1/(1+1)*30 = 15, time = 10+15 = 25
+    assert abs(events[0][0] - 25.0) < 0.01
+
+
+def test_derive_golden_events_skips_hook_section():
+    """第 0 节（hook）跳过，与 keyword_events 同逻辑。"""
+    sections = [_make_section("hook", 10.0)]
+    rw_sections = [_make_rewrite_section("hook文案", emphasis=[{"text": "金句", "kind": "golden"}])]
+    events = _derive_golden_events(sections, rw_sections, _starts([10.0]))
+    assert events == []
+
+
+def test_derive_golden_events_ignores_keyword_number():
+    """keyword/number 不进 golden events。"""
+    sections = [
+        _make_section("hook", 5.0),
+        _make_section("节1", 20.0),
+    ]
+    rw_sections = [
+        _make_rewrite_section("", emphasis=[
+            {"text": "词A", "kind": "keyword"},
+            {"text": "50%", "kind": "number"},
+        ])
+    ]
+    events = _derive_golden_events(sections, rw_sections, _starts([5.0, 20.0]))
+    assert events == []
+
+
+def test_derive_golden_events_multiple_golden_per_section():
+    """单节内多条 golden 均匀分布，最多取 3 条。"""
+    sections = [
+        _make_section("hook", 5.0),
+        _make_section("节1", 60.0),
+    ]
+    rw_sections = [
+        _make_rewrite_section("", emphasis=[
+            {"text": "金句A", "kind": "golden"},
+            {"text": "金句B", "kind": "golden"},
+        ])
+    ]
+    events = _derive_golden_events(sections, rw_sections, _starts([5.0, 60.0]))
+    assert len(events) == 2
+    # n=2: 1/(2+1)*60=20→time=25, 2/(2+1)*60=40→time=45
+    assert abs(events[0][0] - 25.0) < 0.01
+    assert abs(events[1][0] - 45.0) < 0.01
+
+
+# ---- _apply_golden_density_control ----
+
+def test_apply_golden_density_min_gap_drops_close_event():
+    """相邻 golden_card 间隔 < GOLDEN_CARD_MIN_GAP_S 时丢弃后出现的事件。"""
+    events = [(10.0, "A"), (15.0, "B"), (40.0, "C")]
+    result = _apply_golden_density_control(events, [], 100.0)
+    # 10→A 保留；15-10=5s < 20s → 丢弃 B；40-10=30s >= 20s → 保留 C
+    assert len(result) == 2
+    assert result[0][1] == "A"
+    assert result[1][1] == "C"
+
+
+def test_apply_golden_density_exact_min_gap_kept():
+    """恰好等于 GOLDEN_CARD_MIN_GAP_S 的间隔应保留（>=，非 >）。"""
+    events = [(10.0, "A"), (10.0 + GOLDEN_CARD_MIN_GAP_S, "B")]
+    result = _apply_golden_density_control(events, [], 100.0)
+    assert len(result) == 2
+
+
+def test_apply_golden_density_window_collision_still_collides_discards():
+    """撞保护窗口 → 顺延 0.5s 后仍撞则丢弃。"""
+    # 保护窗口 [10.0, 13.0]；候选时刻 11.0
+    # golden_card [11.0, 13.4] 与 [10.0, 13.0] 重叠 → 顺延到 11.5
+    # [11.5, 13.9] 仍与 [10.0, 13.0] 重叠 → 丢弃
+    events = [(11.0, "金句")]
+    result = _apply_golden_density_control(events, [(10.0, 13.0)], 100.0)
+    assert result == []
+
+
+def test_apply_golden_density_window_collision_delay_succeeds():
+    """撞保护窗口 → 顺延 0.5s 后不再撞则保留，起始时刻更新。"""
+    # 保护窗口 [10.0, 11.0]；候选时刻 10.5
+    # golden_card [10.5, 12.9] 与 [10.0, 11.0] 重叠 → 顺延到 11.0
+    # golden_card [11.0, 13.4]：11.0 < 11.0 为 False → 不重叠 → 保留
+    events = [(10.5, "金句")]
+    result = _apply_golden_density_control(events, [(10.0, 11.0)], 100.0)
+    assert len(result) == 1
+    assert abs(result[0][0] - 11.0) < 0.01
+    assert result[0][1] == "金句"
+
+
+def test_apply_golden_density_empty_input():
+    """空输入直接返回空（不崩溃）。"""
+    assert _apply_golden_density_control([], [], 100.0) == []
+
+
+# ---- build_effects_manifest golden_card 集成 ----
+
+def test_build_manifest_golden_goes_to_golden_card_not_keyword_pop():
+    """build_effects_manifest：golden emphasis 生成 golden_card，不进 keyword_pop。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 10.0},
+            {"index": 1, "title": "节1", "duration_seconds": 60.0},
+        ]
+    }
+    rewrite = {
+        "hook": "开场",
+        "sections": [{
+            "narration": "这节口播",
+            "emphasis": [
+                {"text": "要抓住机会", "kind": "golden"},
+                {"text": "核心词", "kind": "keyword"},
+            ]
+        }]
+    }
+    manifest = build_effects_manifest(plan, rewrite)
+    types = [e["type"] for e in manifest["effects"]]
+    assert "golden_card" in types
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    assert golden[0]["text"] == "要抓住机会"
+    # keyword_pop 里不含 golden 文字
+    kw_keywords = [e.get("keyword", "") for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    assert "要抓住机会" not in kw_keywords
+
+
+def test_keyword_pop_filtered_near_golden_window():
+    """keyword_pop 落在 golden_card 时间窗 +-1s 内时被过滤掉。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0},
+            {"index": 1, "title": "节1", "duration_seconds": 120.0},
+        ]
+    }
+    # 一个 golden + 一个 keyword：均匀分布后各自均为 n=1，
+    # 两者落在同一节的相同比例位置 → 时刻相同 → keyword 与 golden_card 窗口重叠 → 被过滤。
+    rewrite = {
+        "hook": "开场",
+        "sections": [{
+            "narration": "",
+            "emphasis": [
+                {"text": "金句", "kind": "golden"},
+                {"text": "关键词", "kind": "keyword"},
+            ]
+        }]
+    }
+    manifest = build_effects_manifest(plan, rewrite)
+    golden_specs = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    kw_specs = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+
+    assert len(golden_specs) >= 1
+    golden_start = golden_specs[0]["start"]
+    golden_end = golden_start + GOLDEN_CARD_DURATION
+    # 所有 keyword_pop 都不应落在 golden_card 的 +-1s 窗口内
+    for ks in [e["start"] for e in kw_specs]:
+        assert not (golden_start - 1.0 <= ks <= golden_end + 1.0), (
+            f"keyword_pop at {ks}s 未被 golden_card [{golden_start}, {golden_end}] 过滤"
+        )
+
+
+def test_golden_card_duration_from_manifest():
+    """manifest 中 golden_card 的 duration 近似等于 GOLDEN_CARD_DURATION（帧对齐误差 < 1帧）。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0},
+            {"index": 1, "title": "节1", "duration_seconds": 60.0},
+        ]
+    }
+    rewrite = {
+        "hook": "开场",
+        "sections": [{"narration": "", "emphasis": [{"text": "金句A", "kind": "golden"}]}]
+    }
+    manifest = build_effects_manifest(plan, rewrite)
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_card"]
+    assert len(golden) == 1
+    assert abs(golden[0]["duration"] - GOLDEN_CARD_DURATION) < 0.1
+
+
+def test_golden_card_min_gap_in_full_manifest():
+    """全片多节均含 golden emphasis 时，golden_card 间距 >= GOLDEN_CARD_MIN_GAP_S。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0},
+            {"index": 1, "title": "节1", "duration_seconds": 15.0},   # 5-20s
+            {"index": 2, "title": "节2", "duration_seconds": 15.0},   # 20-35s
+            {"index": 3, "title": "节3", "duration_seconds": 30.0},   # 35-65s
+        ]
+    }
+    rewrite = {
+        "hook": "开场",
+        "sections": [
+            {"narration": "", "emphasis": [{"text": "金句A", "kind": "golden"}]},
+            {"narration": "", "emphasis": [{"text": "金句B", "kind": "golden"}]},
+            {"narration": "", "emphasis": [{"text": "金句C", "kind": "golden"}]},
+        ]
+    }
+    manifest = build_effects_manifest(plan, rewrite)
+    golden = sorted(
+        [e for e in manifest["effects"] if e["type"] == "golden_card"],
+        key=lambda e: e["start"],
+    )
+    for i in range(1, len(golden)):
+        gap = golden[i]["start"] - golden[i - 1]["start"]
+        assert gap >= GOLDEN_CARD_MIN_GAP_S - 0.1, (
+            f"golden_card 间隔 {gap:.1f}s 小于 {GOLDEN_CARD_MIN_GAP_S}s"
+        )

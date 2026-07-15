@@ -8,8 +8,10 @@ import { QuoteCard } from "./compositions/QuoteCard";
 import { NumberPop } from "./compositions/NumberPop";
 import { KeywordPop } from "./compositions/KeywordPop";
 import { OpeningCard } from "./compositions/OpeningCard";
+import { GoldenCard } from "./compositions/GoldenCard";
 import {
   chapterCardSchema,
+  goldenCardSchema,
   introSchema,
   keyPointsSchema,
   keywordPopSchema,
@@ -135,6 +137,19 @@ export const RemotionRoot: React.FC = () => {
         defaultProps={{
           title: "主题词",
           points: ["要点一", "要点二"],
+          accent: "#e8b84b",
+        }}
+      />
+      <Composition
+        id="GoldenCard"
+        component={GoldenCard}
+        durationInFrames={72}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={goldenCardSchema}
+        defaultProps={{
+          text: "核心金句示例",
           accent: "#e8b84b",
         }}
       />

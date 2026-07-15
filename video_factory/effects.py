@@ -54,6 +54,7 @@ _COMPOSITION_BY_TYPE = {
     "number_pop": "NumberPop",
     "keyword_pop": "KeywordPop",
     "opening_card": "OpeningCard",
+    "golden_card": "GoldenCard",
 }
 
 # 开屏要点卡：片头结束后逐行浮现各节标题。
@@ -91,6 +92,10 @@ OPENING_TITLE_MAX_CHARS = 8
 OPENING_POINT_LINES = 2          # 下方要点取第 1、2 节 title
 # 开场卡结尾硬切（2026-07-15 用户点名，对标博主同款）：intro 紧接开场卡结束，无交叠淡入。
 INTRO_START_AFTER_OPENING = OPENING_CARD_DURATION
+
+# 金句全屏卡（kind=golden emphasis 升级形态）：时长与密度控制。
+GOLDEN_CARD_DURATION = 2.4       # 全屏卡时长（秒，比开场卡更充裕，金句要读完）
+GOLDEN_CARD_MIN_GAP_S = 20.0     # 相邻 golden_card 最小间隔（秒）
 
 
 class EffectsError(RuntimeError):
@@ -359,11 +364,14 @@ def _derive_keyword_events(
             else None
         )
 
-        # 取所有 emphasis 条目（三种 kind 均映射为 keyword_pop，text 即弹出内容）
+        # 取 keyword/number 类 emphasis（golden 单独派生为 golden_card，不进 keyword_pop）
         em_texts: list[str] = []
         if rw_section is not None:
             for em in (rw_section.get("emphasis") or []):
                 if isinstance(em, dict):
+                    kind = str(em.get("kind") or "keyword")
+                    if kind == "golden":
+                        continue  # golden 由 _derive_golden_events 处理，不进弹词
                     text = str(em.get("text") or "").strip()
                     if text:
                         em_texts.append(text)
@@ -463,6 +471,90 @@ def _apply_density_control(
     return sorted(kept + fills, key=lambda e: e[0])
 
 
+def _derive_golden_events(
+    sections: list[dict],
+    rewrite_sections: list,
+    starts: list[float],
+) -> list[tuple[float, str]]:
+    """派生 golden_card 落点：仅收集 kind=golden 的 emphasis 条目，均匀分布到节内时刻。
+
+    与 _derive_keyword_events 镜像逻辑，但只处理 kind=golden；第 0 节（hook）始终跳过。
+    """
+    events: list[tuple[float, str]] = []
+    for i, section in enumerate(sections):
+        if i == 0:
+            continue
+        sec_start = starts[i]
+        sec_dur = _section_duration(section)
+        rw_idx = i - 1
+        rw_section = (
+            rewrite_sections[rw_idx]
+            if isinstance(rewrite_sections, list)
+            and rw_idx < len(rewrite_sections)
+            and isinstance(rewrite_sections[rw_idx], dict)
+            else None
+        )
+        if rw_section is None:
+            continue
+        golden_texts: list[str] = []
+        for em in (rw_section.get("emphasis") or []):
+            if isinstance(em, dict) and str(em.get("kind") or "") == "golden":
+                text = str(em.get("text") or "").strip()
+                if text:
+                    golden_texts.append(text)
+        golden_texts = golden_texts[:3]
+        n = len(golden_texts)
+        for idx, text in enumerate(golden_texts):
+            offset = (idx + 1) / (n + 1) * sec_dur
+            events.append((sec_start + offset, text))
+    return events
+
+
+def _apply_golden_density_control(
+    events: list[tuple[float, str]],
+    protected_windows: list[tuple[float, float]],
+    total_duration: float,
+) -> list[tuple[float, str]]:
+    """密度控制：相邻 golden_card 间隔 >= GOLDEN_CARD_MIN_GAP_S；
+    撞保护窗口（opening/intro/chapter_card）则顺延 0.5s 再检查，仍撞则丢弃（宁缺勿滥）。
+
+    保护窗口格式：[(start, end), ...]，撞窗判断为 golden_card 时间窗 [t, t+DURATION]
+    与保护窗口有任意交叠即算碰撞。
+    """
+    if not events:
+        return events
+
+    events = sorted(events, key=lambda e: e[0])
+
+    def _overlaps_any(t: float) -> bool:
+        """检查 [t, t+GOLDEN_CARD_DURATION] 是否与任意保护窗口重叠。"""
+        end = t + GOLDEN_CARD_DURATION
+        for ws, we in protected_windows:
+            if t < we and end > ws:
+                return True
+        return False
+
+    kept: list[tuple[float, str]] = []
+    for time, text in events:
+        # 超出视频长度则丢弃
+        if time + GOLDEN_CARD_DURATION > total_duration:
+            continue
+        # 最小间隔检查：相邻 golden_card 保留先出现的
+        if kept and time - kept[-1][0] < GOLDEN_CARD_MIN_GAP_S:
+            continue
+        # 保护窗口碰撞检查：顺延 0.5s 一次，仍撞则丢弃
+        if _overlaps_any(time):
+            time = time + 0.5
+            if _overlaps_any(time):
+                continue
+        # 顺延后二次间隔检查（防御）
+        if kept and time - kept[-1][0] < GOLDEN_CARD_MIN_GAP_S:
+            continue
+        kept.append((time, text))
+
+    return kept
+
+
 def _build_rich_effects(
     sections: list[dict],
     rewrite: dict | None,
@@ -553,8 +645,41 @@ def _build_rich_effects(
     # 关键词弹出：emphasis 均匀分布优先，无 emphasis 回落规则抽取，密度控制，三色轮换。
     keyword_events = _derive_keyword_events(sections, rewrite_sections, starts)
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
-    for color_idx, (kw_start, keyword) in enumerate(keyword_events):
-        color = KEYWORD_POP_COLORS[color_idx % len(KEYWORD_POP_COLORS)]
+
+    # 金句全屏卡：kind=golden emphasis 单独派生，密度控制 + 保护窗口碰撞检查。
+    # 保护窗口：opening_card / intro / 各章节卡（避免全屏卡与这些固定特效叠加）。
+    golden_events = _derive_golden_events(sections, rewrite_sections, starts)
+    opening_exists = bool(_opening_theme(rewrite))
+    intro_start_t = INTRO_START_AFTER_OPENING if opening_exists else 0.0
+    protected: list[tuple[float, float]] = [
+        (intro_start_t, key_points_start),  # intro 时间窗
+    ]
+    if opening_exists:
+        protected.append((0.0, OPENING_CARD_DURATION))
+    for i in range(1, len(sections)):
+        protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
+    golden_events = _apply_golden_density_control(golden_events, protected, total_duration)
+    # 收集最终 golden_card 时间窗，用于后续过滤 keyword_pop
+    golden_windows: list[tuple[float, float]] = []
+    for gtime, gtext in golden_events:
+        spec = _frame_aligned(
+            EffectSpec(
+                type="golden_card",
+                start=gtime,
+                duration=GOLDEN_CARD_DURATION,
+                props={"text": gtext, "accent": accent},
+            ),
+            fps,
+        )
+        rich.append(spec)
+        golden_windows.append((spec.start, spec.start + spec.duration))
+
+    # keyword_pop 三色轮换；过滤掉落在 golden_card 时间窗 ±1s 内的弹词（全屏卡前后弹小词很怪）。
+    kw_color_idx = 0
+    for kw_start, keyword in keyword_events:
+        if any(gs - 1.0 <= kw_start <= ge + 1.0 for gs, ge in golden_windows):
+            continue
+        color = KEYWORD_POP_COLORS[kw_color_idx % len(KEYWORD_POP_COLORS)]
         rich.append(_frame_aligned(
             EffectSpec(
                 type="keyword_pop",
@@ -564,6 +689,7 @@ def _build_rich_effects(
             ),
             fps,
         ))
+        kw_color_idx += 1
 
     return rich
 
@@ -701,7 +827,6 @@ def overlay_effects(
     sfx_enabled: bool = False,
     sfx_volume: float = DEFAULT_SFX_VOLUME,
     sfx_dir: Path | str | None = None,
-    transition_points: list[float] | None = None,
 ) -> Path:
     """把若干带 alpha 的特效片段逐层级联 overlay 到原片上。
 
@@ -711,8 +836,6 @@ def overlay_effects(
 
     effects: [{"path": Path, "start": float, "type": str}]，每条按 enable='between(t,start,end)'
     限定显示窗口。end 由片段自身时长决定（ffprobe 探测；探测不到则退化为长窗口）。
-    transition_points: 来自 assembly_plan 的转场时刻列表；sfx_enabled 时给每个转场点混一声
-    transition whoosh（复用同一 adelay 混音管线）。
     """
     base_video = Path(base_video)
     output = Path(output)
@@ -741,7 +864,6 @@ def overlay_effects(
     audio_filter, sfx_inputs, sfx_warnings = _build_sfx_audio(
         base_video, kept, sfx_enabled, sfx_volume, sfx_dir,
         base_input_offset=1 + len(kept), runner=runner,
-        transition_points=transition_points,
     )
     if sfx_warnings:
         _append_warnings(output.parent, sfx_warnings)
@@ -784,13 +906,11 @@ def _build_sfx_audio(
     sfx_dir: Path | str | None,
     base_input_offset: int,
     runner: Runner,
-    transition_points: list[float] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """构造特效音的音频 filter 片段与额外 ffmpeg 输入。
 
     返回 (audio_filter, extra_inputs, warnings)。audio_filter 为空串表示不混音效
     （未开启 / 无音效文件 / 底片无音轨），调用方回退到 -c:a copy 直通。
-    转场点也并进同一 items 列表（type=transition），复用后续的 adelay/amix 管线。
     """
     warnings: list[str] = []
     if not sfx_enabled:
@@ -800,11 +920,6 @@ def _build_sfx_audio(
         path = resolve_sfx_path(effect.get("type"), sfx_dir)
         if path is not None:
             items.append((float(effect.get("start") or 0.0), path))
-    # 转场 whoosh：assembly_plan 的每个转场点混一声（音效文件缺失就跳过这一声，不阻断）。
-    for point in transition_points or []:
-        path = resolve_sfx_path("transition", sfx_dir)
-        if path is not None:
-            items.append((float(point), path))
     if not items:
         warnings.append("特效音已开启但未找到任何音效文件（assets/sfx/ 缺失或类型无对应），已跳过。")
         return "", [], warnings
@@ -1143,8 +1258,6 @@ def main(argv: list[str] | None = None) -> int:
             release,
             sfx_enabled=args.sfx,
             sfx_volume=args.sfx_volume,
-            # 转场点来自 P2 的 assembly_plan.json（xfade 时写入），给每个转场配一声 whoosh。
-            transition_points=plan.get("transition_points") or [],
         )
     except (EffectsError, OSError) as exc:
         print(f"特效层失败：{exc}")
