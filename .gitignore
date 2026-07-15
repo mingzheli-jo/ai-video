@@ -46,3 +46,6 @@ remotion/out/
 *.aac
 
 # Keep project-generated text, code, docs, tests, and small images in Git.
+
+# AI 生图图片库（生成物，1GB+，本地资产不入库）
+素材库/

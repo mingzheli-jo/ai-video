@@ -8,8 +8,10 @@ rem LF 换行会让 cmd 解析中断、双击闪退（2026-07 修复过，别再
 
 if not exist ".venv\Scripts\python.exe" ( echo [错误] 未找到 .venv 虚拟环境，请先完成项目安装。 & pause & exit /b 1 )
 
-rem 启动前清掉仍占用 56090 端口的旧进程：否则旧进程还占着端口，新进程 bind 失败会直接
-rem 闪退，表现为"双击重启后还是旧代码/改动没生效"（2026-07-14 定位到的根因）。
+rem 启动前清掉所有旧的工作台进程（含不再监听端口的"幽灵"实例——只按端口杀会漏掉它们，
+rem 2026-07-14 事故里就是幽灵进程分走了请求导致凭据时灵时不灵）。
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -match 'video_factory.studio' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+rem 再按端口兜底清一次（万一有非 python 进程占着 56090）。
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":56090"') do taskkill /F /PID %%a >nul 2>&1
 
 echo ============================================

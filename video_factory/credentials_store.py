@@ -16,6 +16,19 @@ from pathlib import Path
 # 项目根的 credentials.yaml（基于本文件定位，不随 CWD 变化）。
 CREDENTIALS_PATH = Path(__file__).resolve().parent.parent / "credentials.yaml"
 
+# 全部凭据名（唯一权威名单，studio 白名单与各阶段 CLI 的自动加载共用）。
+# 顺序即 studio「凭据与依赖」页的展示顺序。
+ALL_CREDENTIAL_NAMES = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "VOLC_TTS_APIKEY",
+    "VOLC_TTS_APPID",
+    "VOLC_TTS_TOKEN",
+    "PEXELS_API_KEY",
+    "ARK_API_KEY",
+)
+
 _HEADER = (
     "# King-AI-video 凭据配置（本文件含明文密钥，已在 .gitignore 忽略，切勿提交/分享）\n"
     "# 只填你要用的，其余留空即可。改完保存本文件、重启服务即生效；\n"
@@ -72,6 +85,23 @@ def load_into_env(allowed: frozenset[str], path: Path | None = None) -> list[str
             os.environ[key] = value
             loaded.append(key)
     return loaded
+
+
+def ensure_env_loaded() -> list[str]:
+    """各阶段 CLI 的凭据自动加载入口：把 credentials.yaml 里的全部凭据填进空缺的环境变量。
+
+    背景（2026-07-14 真实事故）：此前只有 studio 启动时加载一次 yaml，各阶段 CLI 完全
+    不读 yaml——凭据在服务启动后才写入 yaml 时，运行中的进程环境里没有 key，rewrite
+    阶段白跑 150s whisper 转写后报「未配置任何 LLM 凭据」。每个阶段 main() 开头调本函数，
+    无论直接 CLI 跑还是经 batch/studio 在进程内跑，都能兜住。
+
+    真实环境变量始终优先（load_into_env 只填空缺）；文件缺失/读取失败静默返回 []，
+    绝不能因为凭据文件的问题打断本可用环境变量跑通的流程。
+    """
+    try:
+        return load_into_env(frozenset(ALL_CREDENTIAL_NAMES))
+    except OSError:
+        return []
 
 
 def _sanitize_credential_value(value: str) -> str:

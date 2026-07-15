@@ -91,6 +91,24 @@ def test_save_then_load_roundtrip(tmp_path, monkeypatch):
     assert os.environ["VOLC_TTS_APIKEY"] == "vk-round"
 
 
+def test_ensure_env_loaded_fills_from_default_path(monkeypatch):
+    """ensure_env_loaded 用模块级 CREDENTIALS_PATH（conftest 已隔离到 tmp），
+    写入该路径后应能把空缺 env 填上；文件缺失时静默返回 []。"""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    assert cs.ensure_env_loaded() == []  # 隔离路径下无文件 → 静默为空
+    cs.CREDENTIALS_PATH.write_text('DEEPSEEK_API_KEY: "dsk-auto"\n', encoding="utf-8")
+    loaded = cs.ensure_env_loaded()
+    assert "DEEPSEEK_API_KEY" in loaded
+    assert os.environ["DEEPSEEK_API_KEY"] == "dsk-auto"
+
+
+def test_all_credential_names_cover_known_providers():
+    """权威名单必须覆盖全链路用到的凭据（studio 白名单与 CLI 自动加载共用此名单）。"""
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY",
+                 "VOLC_TTS_APIKEY", "VOLC_TTS_APPID", "VOLC_TTS_TOKEN", "ARK_API_KEY"):
+        assert name in cs.ALL_CREDENTIAL_NAMES
+
+
 def test_save_credential_blocks_newline_injection(tmp_path):
     """安全回归：凭据值里的换行/引号不得注入出额外的白名单键行，绕过键名白名单。"""
     path = tmp_path / "credentials.yaml"
