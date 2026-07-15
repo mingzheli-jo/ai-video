@@ -500,3 +500,26 @@ def test_single_instance_server_rejects_second_bind():
             studio._SingleInstanceServer(("127.0.0.1", port), handler)
     finally:
         first.server_close()
+
+
+# ---------- 改写文风指令设置（P14） ----------
+
+def test_settings_save_rewrite_prompt_echoes_own_value(server):
+    """回归：/api/settings 必须回显该设置项自己的生效值（历史 bug：硬编码回显生图提示词）。"""
+    port = server["port"]
+    status, data = _json(port, "POST", "/api/settings",
+                         {"name": "REWRITE_STYLE_PROMPT", "value": "多用短句，别用家人们"})
+    assert status == 200 and data["persisted"] is True
+    assert data["value"] == "多用短句，别用家人们"        # 回显自己，不是生图提示词
+    _, meta = _json(port, "GET", "/api/meta")
+    assert meta["rewrite_style_prompt"] == "多用短句，别用家人们"
+    # 清空 = 恢复内置模板（空串）
+    status, data = _json(port, "POST", "/api/settings", {"name": "REWRITE_STYLE_PROMPT", "value": ""})
+    assert status == 200 and data["value"] == ""
+
+
+def test_page_has_rewrite_prompt_card():
+    from video_factory import studio_ui
+
+    html = studio_ui.render_page()
+    assert 'id="rewritePrompt"' in html and 'id="rewritePromptSave"' in html

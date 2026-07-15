@@ -588,3 +588,41 @@ def test_build_rewrite_prompts_includes_emphasis_guidance():
     assert "keyword" in system_prompt
     assert "number" in system_prompt
     assert "golden" in system_prompt
+
+
+# ---------- 改写文风指令（P14：DeepSeek 提示词自定义，仿生图 IMAGE_STYLE_PROMPT 机制） ----------
+
+def test_rewrite_style_prompt_priority_env_over_settings(monkeypatch, tmp_path):
+    from video_factory import settings_store
+    from video_factory.rewrite import REWRITE_STYLE_PROMPT_ENV, get_rewrite_style_prompt
+
+    settings_path = tmp_path / "settings.yaml"
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", settings_path)
+    monkeypatch.delenv(REWRITE_STYLE_PROMPT_ENV, raising=False)
+    assert get_rewrite_style_prompt() == ""          # 无 env 无文件 → 空（用内置模板）
+    settings_store.save_setting(REWRITE_STYLE_PROMPT_ENV, "settings里的指令", path=settings_path)
+    assert get_rewrite_style_prompt() == "settings里的指令"   # settings.yaml 生效
+    monkeypatch.setenv(REWRITE_STYLE_PROMPT_ENV, "env里的指令")
+    assert get_rewrite_style_prompt() == "env里的指令"        # 环境变量优先
+
+
+def test_build_prompts_injects_custom_style_directive(monkeypatch, tmp_path):
+    from video_factory import settings_store
+    from video_factory.rewrite import REWRITE_STYLE_PROMPT_ENV, build_rewrite_prompts
+
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.yaml")
+    monkeypatch.setenv(REWRITE_STYLE_PROMPT_ENV, "多用短句和反问，结尾留悬念")
+    system_prompt, _ = build_rewrite_prompts("原始文案")
+    assert "全局创作指令" in system_prompt
+    assert "多用短句和反问，结尾留悬念" in system_prompt
+    assert "JSON 输出格式必须严格遵守" in system_prompt   # 格式硬约束不可被指令推翻
+
+
+def test_build_prompts_no_directive_block_when_unset(monkeypatch, tmp_path):
+    from video_factory import settings_store
+    from video_factory.rewrite import REWRITE_STYLE_PROMPT_ENV, build_rewrite_prompts
+
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.yaml")
+    monkeypatch.delenv(REWRITE_STYLE_PROMPT_ENV, raising=False)
+    system_prompt, _ = build_rewrite_prompts("原始文案")
+    assert "全局创作指令" not in system_prompt          # 未设置 → 不注入空块

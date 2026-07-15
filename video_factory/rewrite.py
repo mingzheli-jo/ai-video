@@ -50,6 +50,23 @@ MIN_SECTIONS = 2
 MIN_LENGTH_RATIO = 0.85
 MAX_EXPAND_ROUNDS = 2
 
+# 用户自定义改写文风指令（仿照生图 IMAGE_STYLE_PROMPT 的同款机制）：
+# 优先级 环境变量 > settings.yaml > 空（空=只用内置七种内容类型模板）。
+# 非空时作为「全局创作指令」追加进 system prompt，压过模板的文风约定，
+# 但绝不允许违反 JSON 输出格式硬性要求（否则解析会崩）。
+REWRITE_STYLE_PROMPT_ENV = "REWRITE_STYLE_PROMPT"
+
+
+def get_rewrite_style_prompt() -> str:
+    """当前生效的改写文风指令：环境变量 > settings.yaml > 空串。惰性导入避免环依赖。"""
+    env_value = (os.getenv(REWRITE_STYLE_PROMPT_ENV) or "").strip()
+    if env_value:
+        return env_value
+    from video_factory.settings_store import load_settings
+
+    return (load_settings().get(REWRITE_STYLE_PROMPT_ENV) or "").strip()
+
+
 # 需要走 ASR 语音转写的媒体后缀（视频 + 音频）。
 MEDIA_SUFFIXES = (
     ".mp4", ".mov", ".mkv", ".webm", ".m4v",
@@ -151,6 +168,14 @@ def build_rewrite_prompts(
         "golden=金句精华（≤10字）。\n"
         "   没有值得强调的就省略 emphasis 字段或填空数组——宁缺勿滥，每节最多 3 条。"
     )
+    # 用户自定义文风指令（全局生效）：压过内容类型模板的文风约定，
+    # 但 JSON 输出格式硬性要求不可违反；单条 job 的 brief 优先级仍最高。
+    custom_style = get_rewrite_style_prompt()
+    if custom_style:
+        system_prompt += (
+            f"\n全局创作指令（用户自定义，与上述文风/口吻约定冲突时以此为准，"
+            f"但第 6 条 JSON 输出格式必须严格遵守）：{custom_style}"
+        )
     brief_block = (
         f"创作要求（必须遵守，与内容类型模板冲突时以此为准）：{brief.strip()}\n\n"
         if brief.strip()

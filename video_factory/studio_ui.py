@@ -665,6 +665,8 @@ function renderCredPage(meta) {
     </div>`).join('');
   const sp = h('#stylePrompt');
   if (sp) sp.value = meta.image_style_prompt || '';
+  const rp = h('#rewritePrompt');
+  if (rp) rp.value = meta.rewrite_style_prompt || '';
   const deps = { ffmpeg: 'ffmpeg — 缺失则无法拼装与转码', node: 'node — 缺失则特效渲染不可用', faster_whisper: 'faster-whisper — 缺失则本地字幕转写降级', edge_tts: 'edge-tts — 缺失则 edge 配音不可用' };
   h('#depList').innerHTML = Object.keys(meta.dependencies).map(k =>
     `<div class="dep-item"><span class="dot ${meta.dependencies[k]?'on':'off'}"></span><span>${esc(deps[k]||k)}</span></div>`).join('');
@@ -678,6 +680,20 @@ async function saveStylePrompt() {
     h('#stylePrompt').value = data.value || '';
     msg.textContent = value ? '已保存并生效' : '已恢复内置默认';
     S.meta.image_style_prompt = data.value;
+  } else {
+    msg.textContent = '保存失败：' + esc(data.error || status);
+  }
+  setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
+async function saveRewritePrompt() {
+  const value = h('#rewritePrompt').value.trim();
+  const { status, data } = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'REWRITE_STYLE_PROMPT', value }) });
+  const msg = h('#rewritePromptMsg');
+  if (status === 200) {
+    h('#rewritePrompt').value = data.value || '';
+    msg.textContent = value ? '已保存并生效' : '已清空（只用内置内容类型模板）';
+    S.meta.rewrite_style_prompt = data.value;
   } else {
     msg.textContent = '保存失败：' + esc(data.error || status);
   }
@@ -707,6 +723,7 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#batchRunBtn').addEventListener('click', batchRun);
   h('#batchAddBtn').addEventListener('click', () => addBatchJob());
   h('#stylePromptSave').addEventListener('click', saveStylePrompt);
+  h('#rewritePromptSave').addEventListener('click', saveRewritePrompt);
   // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
   h('#compareClose').addEventListener('click', closeCompare);
   h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
@@ -868,6 +885,16 @@ def _body() -> str:
         <div class="batch-actions">
           <button type="button" class="btn" id="stylePromptSave">保存风格</button>
           <span id="stylePromptMsg" class="task-meta"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>改写文风指令</h2>
+        <p class="desc">DeepSeek 文案改写的全局自定义指令：口吻、句式、禁忌词、结尾习惯等，追加到内置内容类型模板之后（冲突时以此为准）。
+        留空 = 只用内置七种内容类型模板；改完点保存立即生效并写入 settings.yaml。示例："多用短句和反问，别用'家人们''宝子'这类称呼，每节结尾留一个悬念"。</p>
+        <textarea id="rewritePrompt" style="min-height:96px" placeholder="留空 = 内置模板默认文风"></textarea>
+        <div class="batch-actions">
+          <button type="button" class="btn" id="rewritePromptSave">保存指令</button>
+          <span id="rewritePromptMsg" class="task-meta"></span>
         </div>
       </div>
       <div class="card">

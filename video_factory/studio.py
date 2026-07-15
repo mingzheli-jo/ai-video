@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from video_factory import batch, credentials_store, settings_store, studio_ui
 from video_factory.image_gen import DEFAULT_STYLE_PROMPT, get_style_prompt
+from video_factory.rewrite import get_rewrite_style_prompt
 from video_factory.assemble import ASPECT_PRESETS, FIT_MODES
 from video_factory.batch import PLATFORM_PRESETS, resolve_job, validate_job
 from video_factory.pipeline import DOUBAO_DEFAULT_VOICE, EDGE_DEFAULT_VOICE
@@ -125,6 +126,8 @@ def build_meta() -> dict:
         # 生图风格提示词：当前生效值 + 内置默认（UI 用于回显与"恢复默认"提示）。
         "image_style_prompt": get_style_prompt(),
         "image_style_prompt_default": DEFAULT_STYLE_PROMPT,
+        # 改写文风指令（DeepSeek 提示词自定义，同款机制）：空=只用内置内容类型模板。
+        "rewrite_style_prompt": get_rewrite_style_prompt(),
     }
 
 
@@ -602,7 +605,12 @@ def make_handler(store: TaskStore):
                 settings_store.save_setting(name, value)
             except OSError:
                 persisted = False
-            self._send_json({"name": name, "value": get_style_prompt(), "persisted": persisted})
+            # 回显该设置项自己的当前生效值（历史 bug：曾硬编码回显生图提示词）。
+            effective = {
+                "IMAGE_STYLE_PROMPT": get_style_prompt,
+                "REWRITE_STYLE_PROMPT": get_rewrite_style_prompt,
+            }.get(name, lambda: value)()
+            self._send_json({"name": name, "value": effective, "persisted": persisted})
 
         def _handle_upload(self, query: dict) -> None:
             kind = (query.get("kind") or [""])[0]

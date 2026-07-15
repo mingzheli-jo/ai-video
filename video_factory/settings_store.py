@@ -14,7 +14,7 @@ from video_factory.credentials_store import _parse_flat_yaml, save_credential as
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.yaml"
 
 # 设置白名单：新增设置项时在这里登记（studio 的 /api/settings 只认白名单）。
-SETTING_NAMES = ("IMAGE_STYLE_PROMPT",)
+SETTING_NAMES = ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT")
 
 _HEADER = (
     "# King-AI-video 偏好设置（不含密钥，可随意备份/分享）\n"
@@ -23,6 +23,10 @@ _HEADER = (
     "#\n"
     "# 生图风格提示词：会自动拼接到每条生图提示词之后，统一全片画风。\n"
     'IMAGE_STYLE_PROMPT: ""\n'
+    "#\n"
+    "# 改写文风指令：追加进 DeepSeek 改写的 system prompt，全局定制口吻/句式/禁忌词；\n"
+    "# 留空 = 只用内置七种内容类型模板。\n"
+    'REWRITE_STYLE_PROMPT: ""\n'
 )
 
 
