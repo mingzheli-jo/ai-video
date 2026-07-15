@@ -804,7 +804,8 @@ def _concat_demux(concat_path: Path, output_path: Path, fps: int, runner: Runner
 def _finalize_silent(silent_video: Path, release_path: Path, runner: Runner) -> None:
     # 无音频：直接把合并结果拷成 release（copy 保持无损、无重编码）。
     _run(
-        ["ffmpeg", "-y", *_FF_QUIET, "-i", str(silent_video), "-c", "copy", str(release_path)],
+        ["ffmpeg", "-y", *_FF_QUIET, "-i", str(silent_video), "-c", "copy",
+         "-movflags", "+faststart", str(release_path)],
         runner,
         context="成片封装",
     )
@@ -876,6 +877,7 @@ def _mux_voiceover_command(
         "192k",
         *_duration_cap_args(audio_duration),
         "-shortest",
+        "-movflags", "+faststart",  # moov 挪到文件头，浏览器可边下边播
         str(release_path),
     ]
 
@@ -944,6 +946,7 @@ def _mux_with_bgm_command(
         "192k",
         *_duration_cap_args(audio_duration),
         "-shortest",
+        "-movflags", "+faststart",  # moov 挪到文件头，浏览器可边下边播
         str(release_path),
     ]
 

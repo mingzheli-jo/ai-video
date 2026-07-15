@@ -342,6 +342,7 @@ def test_mux_command_byte_identical_when_no_bgm(tmp_path):
         "-b:a", "192k",
         "-t", "60.000",
         "-shortest",
+        "-movflags", "+faststart",
         release,
     ]
 

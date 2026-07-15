@@ -628,6 +628,9 @@ def _build_burn_command() -> list[str]:
         "-vf", f"subtitles={ASS_FILENAME}",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-c:a", "copy",
+        # +faststart：把 moov 索引原子挪到文件头，浏览器才能边下边播（2026-07-15 修复
+        # 页面播放"闪烁+播2秒就停+循环"——根因是 moov 默认在文件末尾、需下完整片才能起播）。
+        "-movflags", "+faststart",
         RELEASE_FILENAME + ".sub.tmp.mp4",
     ]
 

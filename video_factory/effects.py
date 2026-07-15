@@ -1010,6 +1010,9 @@ def overlay_effects(
         "medium",
         "-crf",
         "18",
+        # moov 挪到文件头，浏览器可边下边播（特效层是"关字幕时"的最终产物）。
+        "-movflags",
+        "+faststart",
         str(output),
     ]
     _run(command, runner, context="特效叠加")

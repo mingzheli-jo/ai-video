@@ -1112,3 +1112,13 @@ def test_render_ass_font_scale_multiplies_zh_font(_clean_subtitle_env, monkeypat
     assert base_size == 54                     # 旧默认不变
     assert big_size == round(54 * 1.5) == 81   # 系数乘在基准字号上
     assert big_size > base_size
+
+
+def test_burn_command_has_faststart_for_web_playback():
+    """回归：最终 mp4 必须带 -movflags +faststart（moov 移到文件头），
+    否则浏览器需下完整片才能起播——页面播放"闪烁+播2秒停+循环"的根因。"""
+    from video_factory.subtitles import _build_burn_command
+
+    cmd = _build_burn_command()
+    assert "-movflags" in cmd
+    assert cmd[cmd.index("-movflags") + 1] == "+faststart"
