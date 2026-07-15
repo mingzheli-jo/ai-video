@@ -487,13 +487,32 @@ def make_handler(store: TaskStore):
             if target.suffix.lower() == ".mp4" and range_header.startswith("bytes="):
                 self._serve_range(target, size, ctype, range_header)
                 return
-            data = target.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Length", str(size))
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
-            self.wfile.write(data)
+            self._stream_file(target, 0, size)
+
+        def _stream_file(self, target: Path, start: int, length: int) -> None:
+            """按 1MB 块流式下发文件片段（2026-07-15 页面播放卡顿修复）。
+
+            此前整段 read 进内存再一次性 write：大 mp4 首字节极慢、吃内存，叠加 60s
+            连接超时，表现为"点播放卡顿→回到开头→永远播不完"。流式后首字节毫秒级。
+            浏览器拖动进度条/暂停会随手掐断连接（正常行为），断开异常一律静默吞掉。
+            """
+            try:
+                with target.open("rb") as fh:
+                    fh.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = fh.read(min(_UPLOAD_CHUNK, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
+                pass  # 客户端主动断开，不是服务错误
 
         def _serve_range(self, target: Path, size: int, ctype: str, header: str) -> None:
             spec = header.split("=", 1)[1].split(",")[0].strip()
@@ -511,16 +530,14 @@ def make_handler(store: TaskStore):
                 self.end_headers()
                 return
             length = end - start + 1
-            with target.open("rb") as fh:
-                fh.seek(start)
-                chunk = fh.read(length)
             self.send_response(HTTPStatus.PARTIAL_CONTENT)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
-            self.wfile.write(chunk)
+            # 浏览器常发 bytes=0-（开区间到文件尾）：整段读内存曾是播放卡死主因，流式下发。
+            self._stream_file(target, start, length)
 
         # ----- POST -----
 

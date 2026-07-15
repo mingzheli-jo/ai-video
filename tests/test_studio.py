@@ -552,9 +552,9 @@ def test_settings_save_subtitle_font_size_roundtrip_and_meta(server):
     assert settings_store.load_settings(server["tmp"] / "settings.yaml")["SUBTITLE_FONT_SIZE"] == "1.3"
     _, meta = _json(port, "GET", "/api/meta")
     assert meta["subtitle_font_size"] == 1.3
-    # 越界值 5.0 → 钳位到 1.5 回显；清空 → 恢复默认 1.0。
+    # 越界值 5.0 → 钳位到 3.0 回显（上限已放开到 3.0）；清空 → 恢复默认 1.0。
     _, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_SIZE", "value": "5.0"})
-    assert data["value"] == "1.5"
+    assert data["value"] == "3.0"
     _, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_SIZE", "value": ""})
     assert data["value"] == "1.0"
 

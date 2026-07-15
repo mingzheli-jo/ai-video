@@ -674,6 +674,7 @@ function renderCredPage(meta) {
     sfn.innerHTML = meta.subtitle_font_options.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
     sfn.value = meta.subtitle_font_name || '';
   }
+  syncSubPreview();  // meta 回填后立即按当前字体/字号刷新预览
   const deps = { ffmpeg: 'ffmpeg — 缺失则无法拼装与转码', node: 'node — 缺失则特效渲染不可用', faster_whisper: 'faster-whisper — 缺失则本地字幕转写降级', edge_tts: 'edge-tts — 缺失则 edge 配音不可用' };
   h('#depList').innerHTML = Object.keys(meta.dependencies).map(k =>
     `<div class="dep-item"><span class="dot ${meta.dependencies[k]?'on':'off'}"></span><span>${esc(deps[k]||k)}</span></div>`).join('');
@@ -705,6 +706,17 @@ async function saveRewritePrompt() {
     msg.textContent = '保存失败：' + esc(data.error || status);
   }
   setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
+function syncSubPreview() {
+  // 字体/字号所见即所得（2026-07-15 用户点名：盲选字体再生成成片成本太高）。
+  const pv = h('#subFontPreview');
+  if (!pv) return;
+  const fam = (h('#subFontName') && h('#subFontName').value) || 'Microsoft YaHei';
+  const raw = parseFloat(h('#subFontSize') && h('#subFontSize').value);
+  const scale = isNaN(raw) ? 1.0 : Math.min(3, Math.max(0.7, raw));
+  pv.style.fontFamily = '"' + fam + '", "Microsoft YaHei", sans-serif';
+  pv.style.fontSize = Math.round(24 * scale) + 'px';
 }
 
 async function saveSubtitleStyle() {
@@ -752,6 +764,8 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#stylePromptSave').addEventListener('click', saveStylePrompt);
   h('#rewritePromptSave').addEventListener('click', saveRewritePrompt);
   h('#subStyleSave').addEventListener('click', saveSubtitleStyle);
+  h('#subFontName').addEventListener('change', syncSubPreview);
+  h('#subFontSize').addEventListener('input', syncSubPreview);
   // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
   h('#compareClose').addEventListener('click', closeCompare);
   h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
@@ -927,14 +941,18 @@ def _body() -> str:
       </div>
       <div class="card">
         <h2>字幕样式</h2>
-        <p class="desc">烧录字幕的字号与字体族。字号为缩放系数（0.7~1.5，留空 = 默认 1.0），字体从下拉白名单选择。
+        <p class="desc">烧录字幕的字号与字体族。字号为缩放系数（0.7~3.0，留空 = 默认 1.0），字体从下拉白名单选择。
         默认即对标爆款博主样式：<b>粗体白字 + 厚黑描边</b>；改完点保存立即生效并写入 settings.yaml。</p>
-        <div class="batch-actions">
-          <label>字号系数 <input type="number" id="subFontSize" min="0.7" max="1.5" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
-          <label>字体 <select id="subFontName"></select></label>
+        <div class="batch-actions" style="align-items:flex-end;flex-wrap:wrap;gap:14px">
+          <label style="display:flex;flex-direction:column;gap:6px">字号系数
+            <input type="number" id="subFontSize" min="0.7" max="3" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
+          <label style="display:flex;flex-direction:column;gap:6px">字体
+            <select id="subFontName"></select></label>
           <button type="button" class="btn" id="subStyleSave">保存样式</button>
           <span id="subStyleMsg" class="task-meta"></span>
         </div>
+        <div id="subFontPreview" style="margin-top:14px;padding:12px 18px;background:#101014;border-radius:10px;color:#ffffff;font-weight:700;-webkit-text-stroke:1.2px #000;paint-order:stroke fill;text-shadow:0 2px 8px rgba(0,0,0,.7);font-size:24px;line-height:1.5">真正困住你的，从来不是事情本身 0123</div>
+        <p class="desc" style="margin-top:8px">预览随上方选择实时变化（本机字体渲染：未安装的字体显示为系统默认，最终以成片为准）。</p>
       </div>
       <div class="card">
         <h2>依赖状态</h2>

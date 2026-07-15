@@ -973,7 +973,7 @@ def test_subtitle_font_scale_reads_settings_when_no_env(_clean_subtitle_env):
 
 def test_subtitle_font_scale_clamps_out_of_range(_clean_subtitle_env, monkeypatch):
     monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "5.0")
-    assert get_subtitle_font_scale() == 1.5   # 上界钳位
+    assert get_subtitle_font_scale() == 3.0   # 上界钳位（2026-07-15 用户点名 1.5→3.0）
     monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "0.1")
     assert get_subtitle_font_scale() == 0.7   # 下界钳位
 

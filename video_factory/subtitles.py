@@ -79,7 +79,9 @@ _EN_FONT_MIN = 12
 SUBTITLE_FONT_SIZE_ENV = "SUBTITLE_FONT_SIZE"
 _SUBTITLE_FONT_SCALE_DEFAULT = 1.0
 _SUBTITLE_FONT_SCALE_MIN = 0.7
-_SUBTITLE_FONT_SCALE_MAX = 1.5
+# 上限 3.0（2026-07-15 用户点名从 1.5 放开）：大字号会顶着宽度约束自动折行，
+# 观感由用户预览自行把关。
+_SUBTITLE_FONT_SCALE_MAX = 3.0
 
 # 字幕字体族（用户可调，白名单制）：非白名单/空值回落默认 Microsoft YaHei。
 # 优先级：环境变量 SUBTITLE_FONT_NAME > settings.yaml > 默认值。
