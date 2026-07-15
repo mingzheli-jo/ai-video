@@ -249,6 +249,114 @@ def test_plan_beats_zero_duration_section_gets_one_beat():
     assert len(hook_beats) == 1  # 0 秒节退化 1 拍
 
 
+# ---------- 变长拍：plan_beats_from_timeline（P16 二期，卡话切） ----------
+
+def _sent(text, start, end):
+    return {"text": text, "start": start, "end": end}
+
+
+def _mock_split_on_pipe(monkeypatch):
+    """把 split_sentences 换成按 | 切分：测试用它精确控制每节句数，不依赖真实分句规则。"""
+    monkeypatch.setattr(
+        "video_factory.subtitles.split_sentences",
+        lambda text: [p for p in str(text).split("|") if p],
+    )
+
+
+def test_plan_beats_from_timeline_accumulates_to_min(monkeypatch):
+    """顺序累计句子，累计时长 ≥min_beat（2.5s）即封一拍。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {"hook": "A|B|C|D"}  # 4 句
+    sents = [_sent("甲", 0, 1.5), _sent("乙", 1.5, 3.0),
+             _sent("丙", 3.0, 4.5), _sent("丁", 4.5, 6.0)]
+    beats = plan_beats_from_timeline(rewrite, sents)
+    assert len(beats) == 2  # 甲+乙=3.0 封一拍；丙+丁=3.0 封一拍
+    assert [round(b.duration, 3) for b in beats] == [3.0, 3.0]
+    assert beats[0].narration_slice == "甲乙" and beats[1].narration_slice == "丙丁"
+    assert [b.global_index for b in beats] == [0, 1]
+    assert all(b.section_index == 0 for b in beats)
+
+
+def test_plan_beats_from_timeline_splits_over_long_sentence(monkeypatch):
+    """单句 >max_beat（8s）拆成 ceil(d/max) 等份子拍。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {"hook": "X"}
+    sents = [_sent("超长句", 0, 18.0)]  # 18s > 8s → ceil(18/8)=3 份
+    beats = plan_beats_from_timeline(rewrite, sents)
+    assert len(beats) == 3
+    assert all(abs(b.duration - 6.0) < 1e-6 for b in beats)  # 18/3=6
+    assert all(b.narration_slice == "超长句" for b in beats)
+
+
+def test_plan_beats_from_timeline_merges_tail_remnant(monkeypatch):
+    """节尾不足 min_beat 的残拍并入前一拍。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {"hook": "A|B"}
+    sents = [_sent("甲", 0, 3.0), _sent("乙", 3.0, 4.0)]  # 甲封拍(3.0)，乙(1.0)残→并入
+    beats = plan_beats_from_timeline(rewrite, sents)
+    assert len(beats) == 1
+    assert abs(beats[0].duration - 4.0) < 1e-6  # 3.0+1.0 并入
+    assert beats[0].narration_slice == "甲乙"
+
+
+def test_plan_beats_from_timeline_keeps_lone_short_beat(monkeypatch):
+    """节首句独拍且不足 min_beat 时保留（该节仅此一拍，无前一拍可并）。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {"hook": "A"}
+    sents = [_sent("甲", 0, 1.0)]  # 1.0 < 2.5，但独此一拍
+    beats = plan_beats_from_timeline(rewrite, sents)
+    assert len(beats) == 1
+    assert abs(beats[0].duration - 1.0) < 1e-6
+
+
+def test_plan_beats_from_timeline_count_mismatch_returns_none(monkeypatch):
+    """每节句数之和 != timeline 句数（分句口径漂移）→ 返回 None 让调用方回落 5s 路径。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {"hook": "A|B"}  # 期望 2 句
+    sents = [_sent("甲", 0, 2.0), _sent("乙", 2.0, 4.0), _sent("丙", 4.0, 6.0)]  # 却 3 句
+    assert plan_beats_from_timeline(rewrite, sents) is None
+
+
+def test_plan_beats_from_timeline_empty_sentences_returns_none(monkeypatch):
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    assert plan_beats_from_timeline({"hook": "A"}, []) is None
+
+
+def test_plan_beats_from_timeline_maps_sentences_to_sections(monkeypatch):
+    """多节：timeline 句按每节句数对号入座，section_index/section_title 正确归属。"""
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite = {
+        "hook": "h",  # 1 句
+        "sections": [
+            {"title": "第一节", "narration": "a|b"},  # 2 句
+            {"title": "第二节", "narration": "c"},     # 1 句
+        ],
+    }
+    sents = [_sent("钩", 0, 3.0),                      # hook 节
+             _sent("甲", 3.0, 4.5), _sent("乙", 4.5, 6.0),  # 第一节：1.5+1.5=3.0 一拍
+             _sent("丙", 6.0, 9.0)]                     # 第二节：3.0 一拍
+    beats = plan_beats_from_timeline(rewrite, sents)
+    assert [b.section_index for b in beats] == [0, 1, 2]
+    assert [b.section_title for b in beats] == ["hook", "第一节", "第二节"]
+    assert [b.global_index for b in beats] == [0, 1, 2]
+    # 全片 Σ拍时长 = Σ句时长（真实音频跨度守恒）
+    assert abs(sum(b.duration for b in beats) - 9.0) < 1e-6
+
+
 def test_match_beats_returns_none_without_credentials(monkeypatch):
     from video_factory.image_gen import match_beats_to_library, plan_beats
 

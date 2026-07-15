@@ -379,7 +379,7 @@ function selectVisual(key) {
   if (hint) hint.style.display = ai ? 'block' : 'none';
 }
 
-const STAGE_LABELS = { rewrite: '文案改写', image_gen: 'AI 生图', assemble: '素材拼装', effects: '特效', subtitles: '字幕' };
+const STAGE_LABELS = { rewrite: '文案改写', voice: '配音', image_gen: 'AI 生图', assemble: '素材拼装', effects: '特效', subtitles: '字幕' };
 const ALL_STAGES = ['rewrite', 'image_gen', 'assemble', 'effects', 'subtitles'];
 
 function stageClass(task, stage) {

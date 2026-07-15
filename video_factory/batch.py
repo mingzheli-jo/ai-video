@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from video_factory import credentials_store, stage_report
+from video_factory import credentials_store, stage_report, timeline
 from video_factory.assemble import ASPECT_PRESETS, FIT_MODES
 from video_factory.rewrite_styles import STYLES
 
@@ -231,6 +231,31 @@ def build_rewrite_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
     return argv
 
 
+def build_voice_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
+    """配音阶段 argv：与 assemble 同款的配音获取语义（--audio 优先，否则 --tts/--voice/语速）。
+
+    P16 二期把 TTS 前移为独立 voice 阶段，本 builder 组装其 CLI 参数。voice 产出
+    voiceover.wav / voiceover_fitted.wav 与 timeline.json 于 job_dir，供下游按盘复用。
+    """
+    argv = [
+        "--rewrite", str(job_dir / "rewrite.json"),
+        "--duration", str(job.duration),
+    ]
+    if job.audio:
+        # 复用现成配音：voice 的 --audio 与 --tts 互斥，audio 优先（原样引用，不变速）。
+        argv += ["--audio", job.audio]
+    else:
+        if job.tts:
+            argv += ["--tts", job.tts]
+        if job.voice:
+            argv += ["--voice", job.voice]
+        if job.voice_speed is not None:
+            # 语速只对现场 TTS 有意义（复用现成配音 --audio 时变速会毁成品，不传）。
+            argv += ["--voice-speed", str(job.voice_speed)]
+    argv += ["--output", str(job_dir)]
+    return argv
+
+
 def _assets_dir_for(job: ResolvedJob, job_dir: Path) -> str:
     """拼装用的素材目录：ai_image 用生图阶段产出的 gen_assets/，否则用户的视频素材目录。"""
     if job.visual_source == "ai_image":
@@ -248,15 +273,27 @@ def build_assemble_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
     ]
     if job.audio:
         # 复用现成配音：assemble 的 --audio 与 --tts 互斥，audio 优先。
+        # voice 阶段对用户自带 --audio 原样直接引用，assemble 照旧读同一文件。
         argv += ["--audio", job.audio]
     else:
-        if job.tts:
-            argv += ["--tts", job.tts]
-        if job.voice:
-            argv += ["--voice", job.voice]
-        if job.voice_speed is not None:
-            # 语速只对现场 TTS 有意义（复用现成配音 --audio 时变速会毁成品，不传）。
-            argv += ["--voice-speed", str(job.voice_speed)]
+        # 运行时改造（P16 二期）：voice 阶段已把配音落盘到 job_dir，优先复用其产物——
+        # fitted（atempo 微调过）> raw（未微调）。都没有（voice 阶段失败/老任务无 voice 产物）
+        # 才回落现有 --tts/--voice/--voice-speed 组装，由 assemble 内嵌 TTS 兜底（其逻辑不动）。
+        # 本 builder 在阶段执行时才被调用，故此刻可查盘判断 voice 是否已产出。
+        fitted = job_dir / "voiceover_fitted.wav"
+        raw = job_dir / "voiceover.wav"
+        if fitted.exists():
+            argv += ["--audio", str(fitted)]
+        elif raw.exists():
+            argv += ["--audio", str(raw)]
+        else:
+            if job.tts:
+                argv += ["--tts", job.tts]
+            if job.voice:
+                argv += ["--voice", job.voice]
+            if job.voice_speed is not None:
+                # 语速只对现场 TTS 有意义（复用现成配音 --audio 时变速会毁成品，不传）。
+                argv += ["--voice-speed", str(job.voice_speed)]
     if job.bgm:
         argv += ["--bgm", job.bgm]
         if job.bgm_volume is not None:
@@ -340,6 +377,12 @@ def _run_rewrite(job: ResolvedJob, job_dir: Path) -> int:
     return rewrite.main(build_rewrite_argv(job, job_dir))
 
 
+def _run_voice(job: ResolvedJob, job_dir: Path) -> int:
+    from video_factory import voice
+
+    return voice.main(build_voice_argv(job, job_dir))
+
+
 def _run_image_gen_section_fallback(
     rewrite: dict, size: str, gen_dir: Path, job_dir: Path
 ) -> int:
@@ -409,10 +452,19 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             compute_section_durations,
             match_beats_to_library,
             plan_beats,
+            plan_beats_from_timeline,
         )
 
-        section_durs = compute_section_durations(rewrite_data, float(job.duration))
-        beats = plan_beats(rewrite_data, section_durs)
+        # 变长拍（卡话切）：voice 阶段已产 timeline.json 时，按逐句真实起止规划变长拍；
+        # 拍的规划与 assemble 拼装侧共用同一权威函数 plan_beats_from_timeline、喂同一输入，
+        # 拍数（=生图张数）天然与拼装侧一致。无 timeline / 计数不符 → 回落旧 5s 均分。
+        timeline_sentences = timeline.load_timeline(job_dir / timeline.TIMELINE_FILENAME)
+        beats = None
+        if timeline_sentences:
+            beats = plan_beats_from_timeline(rewrite_data, timeline_sentences)
+        if not beats:
+            section_durs = compute_section_durations(rewrite_data, float(job.duration))
+            beats = plan_beats(rewrite_data, section_durs)
         library_root = image_gen.LIBRARY_ROOT
         library_index = image_gen.load_index(library_root)
         beat_matches = match_beats_to_library(beats, library_index, library_root)
@@ -528,6 +580,7 @@ def _run_subtitles(job: ResolvedJob, job_dir: Path) -> int:
 # 阶段执行器：默认实现均惰性 import 对应模块并调 main(argv)，测试整体 mock 掉本 dict。
 STAGE_RUNNERS: dict[str, Callable[[ResolvedJob, Path], int]] = {
     "rewrite": _run_rewrite,
+    "voice": _run_voice,
     "image_gen": _run_image_gen,
     "assemble": _run_assemble,
     "effects": _run_effects,
@@ -535,13 +588,15 @@ STAGE_RUNNERS: dict[str, Callable[[ResolvedJob, Path], int]] = {
 }
 
 # 全量阶段顺序（进度展示用）；image_gen 仅 ai_image 模式执行，effects/subtitles 由开关决定。
-_STAGE_ORDER = ("rewrite", "image_gen", "assemble", "effects", "subtitles")
+# voice（配音 + 主时间轴）P16 二期前移，恒在 rewrite 之后、image_gen/assemble 之前。
+_STAGE_ORDER = ("rewrite", "voice", "image_gen", "assemble", "effects", "subtitles")
 
 
 def _stages_for(job: ResolvedJob) -> list[str]:
-    stages = ["rewrite"]
+    # 配音阶段（voice）前移：主时间轴在生图之前就绪，变长拍（卡话切）才有逐句时钟可依。
+    stages = ["rewrite", "voice"]
     if job.visual_source == "ai_image":
-        stages.append("image_gen")  # 生图夹在 rewrite 与 assemble 之间
+        stages.append("image_gen")  # 生图夹在 voice 与 assemble 之间（消费 timeline.json）
     stages.append("assemble")
     if job.effects:
         stages.append("effects")
@@ -594,10 +649,14 @@ class JobReport:
         return payload
 
 
-# _collect_outputs 汇报的关键产物名——(重)跑前先清掉上一轮遗留，避免本轮在早期阶段就
-# 失败时，_collect_outputs 把上次遗留的旧成片当成本次 final 汇报，误导只看 final 的下游。
+# (重)跑前先清掉上一轮遗留，避免本轮在早期阶段就失败时，_collect_outputs 把上次遗留的旧
+# 成片当成本次 final 汇报，误导只看 final 的下游。
+# 注意（P16 二期）：voiceover.wav / voiceover_fitted.wav **不清**——重跑复用配音是特性
+# （省 TTS 成本与时长）；但 timeline.json 必须清：它是逐句真实起止的唯一时钟，配音一旦
+# 重合成，旧时间轴就与新音轨系统性错位，绝不能让陈旧的它串进本轮生图/特效/字幕。
 _OUTPUT_ARTIFACTS = (
     "rewrite.json",
+    "timeline.json",
     "release.mp4",
     "assembly_plan.json",
     "release_with_effects.mp4",
@@ -797,6 +856,7 @@ def _dry_run_argv(job: ResolvedJob) -> dict[str, list[str]]:
     job_dir = Path(job.output)
     builders = {
         "rewrite": build_rewrite_argv,
+        "voice": build_voice_argv,
         "assemble": build_assemble_argv,
         "effects": build_effects_argv,
         "subtitles": build_subtitles_argv,

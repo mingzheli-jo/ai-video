@@ -1306,3 +1306,105 @@ def test_build_ordered_assembly_plan_groups_beats_into_real_sections(tmp_path):
     for a in plan.allocations:
         assert a.duration == pytest.approx(sum(s.duration for s in a.slices), abs=1e-6)
     assert sum(a.duration for a in plan.allocations) == pytest.approx(20.0, abs=0.1)
+
+
+# ---------- 变长拍（卡话切）：build_ordered_assembly_plan + timeline_sentences（P16 二期） ----------
+
+def _pipe_rewrite():
+    """按 | 精确控制每节句数的 rewrite（配合 mock split_sentences）。"""
+    return {
+        "hook": "A|B",  # 2 句
+        "sections": [{"title": "第一节", "narration": "C|D"}],  # 2 句
+        "target_duration_seconds": 90,
+    }
+
+
+def _mock_split_on_pipe(monkeypatch):
+    monkeypatch.setattr(
+        "video_factory.subtitles.split_sentences",
+        lambda text: [p for p in str(text).split("|") if p],
+    )
+
+
+def _pipe_timeline():
+    """4 句 timeline：hook(A=3s,B=1s)、第一节(C=3s,D=1s)；各节残拍并入 → 每节 1 拍 4s。"""
+    return [
+        {"text": "甲", "start": 0.0, "end": 3.0},
+        {"text": "乙", "start": 3.0, "end": 4.0},
+        {"text": "丙", "start": 4.0, "end": 7.0},
+        {"text": "丁", "start": 7.0, "end": 8.0},
+    ]
+
+
+def test_build_ordered_plan_uses_timeline_beat_durations(tmp_path, monkeypatch):
+    """给了 timeline：切片时长=拍真实时长，目标时长=Σ拍时长（真实音频跨度），不再是 5s 均分。"""
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    _mock_split_on_pipe(monkeypatch)
+    imgs = []
+    for i in range(2):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+    plan = build_ordered_assembly_plan(
+        _pipe_rewrite(), imgs, target_duration=90.0, timeline_sentences=_pipe_timeline()
+    )
+    # 目标时长 = Σ拍时长 = 8.0（真实音频跨度），而非 CLI 传的 90
+    assert plan.target_duration == pytest.approx(8.0, abs=1e-6)
+    # 2 真实节（hook + 第一节），各 1 拍，拍时长 = 句群真实时长 4.0（3.0 封拍 + 1.0 残拍并入）
+    assert len(plan.allocations) == 2
+    slices = [s for a in plan.allocations for s in a.slices]
+    assert [round(s.duration, 3) for s in slices] == [4.0, 4.0]
+    # 第 k 拍用第 k 图
+    assert slices[0].path == imgs[0] and slices[1].path == imgs[1]
+
+
+def test_build_ordered_plan_beat_count_matches_image_gen(tmp_path, monkeypatch):
+    """拍的唯一权威函数：assemble 拼装侧的切片数与 image_gen 生图侧的拍数逐拍一致。"""
+    from video_factory.assemble import build_ordered_assembly_plan
+    from video_factory.image_gen import plan_beats_from_timeline
+
+    _mock_split_on_pipe(monkeypatch)
+    rewrite, sents = _pipe_rewrite(), _pipe_timeline()
+    imgs = []
+    for i in range(4):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+
+    beats = plan_beats_from_timeline(rewrite, sents)  # 生图侧的拍
+    plan = build_ordered_assembly_plan(rewrite, imgs, target_duration=90.0, timeline_sentences=sents)
+    slices = [s for a in plan.allocations for s in a.slices]
+    assert len(slices) == len(beats)  # 拍数=切片数=图片消费数，天然一致
+    assert [round(s.duration, 3) for s in slices] == [round(b.duration, 3) for b in beats]
+
+
+def test_build_ordered_plan_without_timeline_falls_back_to_5s(tmp_path):
+    """无 timeline（timeline_sentences=None）：回落 5s 均分，目标时长=CLI 传值，与今天一致。"""
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    imgs = []
+    for i in range(6):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+    plan = build_ordered_assembly_plan(REWRITE, imgs, target_duration=20.0, timeline_sentences=None)
+    assert plan.target_duration == pytest.approx(20.0, abs=1e-6)  # 用 CLI 目标，非 Σ拍
+
+
+def test_build_ordered_plan_timeline_count_mismatch_falls_back(tmp_path, monkeypatch):
+    """timeline 句数与 rewrite 每节句数之和对不上 → plan_beats_from_timeline 回 None → 回落 5s。"""
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    _mock_split_on_pipe(monkeypatch)
+    imgs = []
+    for i in range(6):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+    # rewrite 期望 4 句，却喂 3 句 timeline → 计数不符
+    bad_timeline = _pipe_timeline()[:3]
+    plan = build_ordered_assembly_plan(
+        _pipe_rewrite(), imgs, target_duration=20.0, timeline_sentences=bad_timeline
+    )
+    assert plan.target_duration == pytest.approx(20.0, abs=1e-6)  # 回落 CLI 目标，非 Σ拍(8)

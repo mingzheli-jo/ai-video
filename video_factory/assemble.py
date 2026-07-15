@@ -168,6 +168,7 @@ def build_ordered_assembly_plan(
     width: int = TARGET_WIDTH,
     height: int = TARGET_HEIGHT,
     fit: str = "pad",
+    timeline_sentences: list[dict] | None = None,
 ) -> AssemblyPlan:
     """拍级配图模式下的分配计划：第 k 拍使用第 k 张图，时长=该拍目标时长。
 
@@ -177,18 +178,36 @@ def build_ordered_assembly_plan(
     各拍图片切片按拍序排列），section_titles=真实节标题（hook / 各正题节，绝无「-拍N」）。
     如此特效层的章节卡只在真实节边界出现，内部标签不再泄漏进成片；转场「跨节必转」也回到
     真实节边界。
+
+    P16 二期（卡话切）：给了 timeline_sentences 且能规划出变长拍时，拍时长=句群真实时长、
+    目标时长=Σ拍时长（真实音频跨度），画面切换点落在语音停顿处；否则（无 timeline / 计数
+    不符）回落旧的 5s 均分 plan_beats，target_duration 仍取 rewrite/CLI 的目标时长，行为与
+    今天完全一致。拍的规划与 image_gen 生图侧共用同一权威函数 plan_beats_from_timeline，
+    同输入同输出，拍数（=图片数）天然一致。
     """
     # 懒惰导入：避免 assemble 与 image_gen 循环依赖（image_gen 会 import llm/rewrite）。
-    from video_factory.image_gen import compute_section_durations, plan_beats
+    from video_factory.image_gen import (
+        compute_section_durations,
+        plan_beats,
+        plan_beats_from_timeline,
+    )
 
     if not image_paths:
         raise AssemblyError("--ordered-assets 模式下 gen_assets/ 目录没有任何图片（img_*）。")
     if fit not in FIT_MODES:
         raise AssemblyError(f"未知的画幅填充模式：{fit}（可选：{'、'.join(FIT_MODES)}）。")
 
-    duration = _resolve_target_duration(rewrite, target_duration)
-    section_durs = compute_section_durations(rewrite, duration)
-    beats = plan_beats(rewrite, section_durs)
+    beats = None
+    if timeline_sentences:
+        beats = plan_beats_from_timeline(rewrite, timeline_sentences)
+    if beats:
+        # 卡话切：拍时长=句群真实时长，目标时长=Σ拍时长（真实音频跨度）。
+        duration = round(sum(b.duration for b in beats), 3)
+    else:
+        # 回落旧路径：按节字数占比均分目标时长，每节 ceil(节时长/5s) 拍。
+        duration = _resolve_target_duration(rewrite, target_duration)
+        section_durs = compute_section_durations(rewrite, duration)
+        beats = plan_beats(rewrite, section_durs)
 
     if not beats:
         raise AssemblyError("rewrite 里没有可用的文案小节（hook + sections 均为空）。")
@@ -1248,10 +1267,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if fit_note:
                     print(f"时长微调：{fit_note}")
+        # 变长拍（卡话切）的拍基准：只认「进入拼装阶段时就已存在」的 timeline.json——它由 voice
+        # 阶段产出，与 image_gen 生图侧读的是同一份，故拍数（=图片数）一致。必须在下面 assemble
+        # 自己兜底产 timeline 之前读出：否则若 voice 阶段没产、assemble 现产一份，拍基准会与
+        # image_gen（当时无 timeline 走 5s 均分）错位。无则为 None，ordered 模式回落 5s 路径。
+        ordered_timeline = None
+        if args.ordered_assets:
+            ordered_timeline = timeline.load_timeline(output_dir / timeline.TIMELINE_FILENAME)
         # 主时间轴（P16）：配音定稿后立刻对齐产出 timeline.json，作 effects/subtitles 唯一时钟。
         # 必须在 _fit_audio_to_target 微调之后——对齐的是最终混进成片的那条音轨（fitted 与否都对）；
         # --audio 用户自带配音同样产出。失败只告警不阻断（时间轴是增强件）。
-        if audio_path is not None:
+        # P16 二期幂等：voice 阶段前移后已在本目录产过 timeline.json，assemble 不再重复对齐
+        # （省一次 whisper）；仅当目录无 timeline.json（voice 阶段失败/未跑的兜底路径）才产。
+        if audio_path is not None and not (output_dir / timeline.TIMELINE_FILENAME).exists():
             full_voiceover = str(rewrite.get("full_voiceover") or "").strip()
             if full_voiceover:
                 if timeline.produce_timeline(audio_path, full_voiceover, output_dir) is None:
@@ -1263,7 +1291,8 @@ def main(argv: list[str] | None = None) -> int:
             # 拍级配图模式：按 gen_assets/img_NN 顺序逐拍分配，跳过素材池扫描。
             image_paths = _list_ordered_assets(Path(args.assets))
             plan = build_ordered_assembly_plan(
-                rewrite, image_paths, plan_duration, width=width, height=height, fit=args.fit
+                rewrite, image_paths, plan_duration, width=width, height=height, fit=args.fit,
+                timeline_sentences=ordered_timeline,
             )
         else:
             scan = scan_asset_pool(args.assets)

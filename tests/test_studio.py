@@ -95,13 +95,14 @@ class _FakeRunners:
         return runner
 
     def install(self, monkeypatch):
-        runners = {stage: self._make(stage) for stage in ("rewrite", "assemble", "effects", "subtitles")}
+        runners = {stage: self._make(stage) for stage in ("rewrite", "voice", "assemble", "effects", "subtitles")}
         monkeypatch.setattr(batch, "STAGE_RUNNERS", runners)
 
 
 def _write_stage_output(stage, job_dir):
     files = {
         "rewrite": "rewrite.json",
+        "voice": "voiceover.wav",
         "assemble": "release.mp4",
         "effects": "release_with_effects.mp4",
         "subtitles": "release_subtitled.mp4",
@@ -245,8 +246,8 @@ def test_valid_job_runs_to_ok_with_ordered_stages(server, monkeypatch):
     assert status == 200
     task = _wait_status(store, data["id"], "ok")
     assert task["status"] == "ok"
-    # douyin 预设：subtitles=True effects=True → 四阶段全跑
-    assert task["stages_done"] == ["rewrite", "assemble", "effects", "subtitles"]
+    # douyin 预设：subtitles=True effects=True → 含配音共五阶段全跑
+    assert task["stages_done"] == ["rewrite", "voice", "assemble", "effects", "subtitles"]
     assert task["final"].replace("\\", "/").endswith("release_subtitled.mp4")
 
 
@@ -259,7 +260,7 @@ def test_job_effects_off_final_is_release(server, monkeypatch):
     })
     assert status == 200
     task = _wait_status(store, data["id"], "ok")
-    assert task["stages_done"] == ["rewrite", "assemble"]
+    assert task["stages_done"] == ["rewrite", "voice", "assemble"]
     assert task["final"].replace("\\", "/").endswith("release.mp4")
 
 

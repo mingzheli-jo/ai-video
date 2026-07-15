@@ -508,6 +508,105 @@ def plan_beats(
     return beats
 
 
+# 变长拍阈值（P16 二期，卡话切）：拍时长下限 / 上限（秒）。句群累计到下限即封拍；
+# 单句超上限拆等份子拍。2.5~8s 是解说类短视频「一拍一图」的舒适区间（用户拍板）。
+BEAT_MIN_SECONDS = 2.5
+BEAT_MAX_SECONDS = 8.0
+
+
+def plan_beats_from_timeline(
+    rewrite: dict,
+    sentences: list[dict],
+    min_beat: float = BEAT_MIN_SECONDS,
+    max_beat: float = BEAT_MAX_SECONDS,
+) -> list[Beat] | None:
+    """基于主时间轴逐句真实起止规划变长拍（卡话切）——画面切换点落在语音停顿处。
+
+    这是**拍的唯一权威函数**：image_gen 生图侧与 assemble.build_ordered_assembly_plan
+    拼装侧调同一函数、喂同一输入（rewrite + timeline.sentences），拍数天然一致。
+
+    句→节映射：对 hook+各节 narration 分别跑 split_sentences 得每节句数，按序把
+    timeline.sentences（P1 实现即对 full_voiceover 跑同一分句器的产物）对号入座切给各节。
+    任何计数对不上（分句器口径漂移 / rewrite 与 timeline 不同源）→ 返回 None，
+    调用方回落旧的 5s 均分 plan_beats（兜底链完整，无 timeline 时行为与今天完全一致）。
+
+    节内成拍：顺序累计句子，累计时长 ≥min_beat 即封一拍；单句 >max_beat 拆成
+    ceil(d/max) 等份子拍；节尾不足 min_beat 的残拍并入前一拍（该节仅此一拍则保留）。
+    duration=句时长（end-start）累计的真实秒——全片 Σ拍时长即真实音频跨度。
+    """
+    try:
+        # 惰性导入 subtitles（较重，且便于测试 monkeypatch）。
+        from video_factory.subtitles import split_sentences
+
+        sections = _all_sections_from_rewrite(rewrite)
+        if not sections or not sentences:
+            return None
+        per_counts = [len(split_sentences(narration)) for _title, narration in sections]
+    except Exception:  # noqa: BLE001 - 容错：分句失败一律回落 5s 路径，绝不阻断
+        return None
+    if sum(per_counts) != len(sentences):
+        return None  # 计数不符：容错回落（不硬凑，避免拍与句错位）
+
+    beats: list[Beat] = []
+    global_idx = 0
+    cursor = 0
+    for sec_idx, ((title, _narration), count) in enumerate(zip(sections, per_counts)):
+        sec_sents = sentences[cursor:cursor + count]
+        cursor += count
+        for local_idx, (text, dur) in enumerate(
+            _pack_timeline_beats(sec_sents, min_beat, max_beat)
+        ):
+            beats.append(Beat(
+                section_index=sec_idx,
+                beat_index=local_idx,
+                global_index=global_idx,
+                narration_slice=text,
+                duration=round(dur, 3),
+                section_title=title,
+            ))
+            global_idx += 1
+    return beats or None
+
+
+def _pack_timeline_beats(
+    sentences: list[dict], min_beat: float, max_beat: float
+) -> list[tuple[str, float]]:
+    """把一节的若干 timeline 句子打成变长拍，返回 [(拼接句文本, 真实时长秒), ...]。
+
+    见 plan_beats_from_timeline 的成拍规则。duration 取句 end-start 累计，全节 Σ守恒。
+    """
+    def _dur(s: dict) -> float:
+        return max(0.0, float(s.get("end") or 0.0) - float(s.get("start") or 0.0))
+
+    beats: list[tuple[str, float]] = []
+    cur_texts: list[str] = []
+    cur_dur = 0.0
+    for s in sentences:
+        d = _dur(s)
+        text = str(s.get("text") or "")
+        if d > max_beat:
+            # 先封掉当前累计拍（若有），再把这条超长句拆成 ceil(d/max) 等份子拍。
+            if cur_texts:
+                beats.append(("".join(cur_texts), cur_dur))
+                cur_texts, cur_dur = [], 0.0
+            n = max(1, math.ceil(d / max_beat))
+            for _ in range(n):
+                beats.append((text, d / n))
+            continue
+        cur_texts.append(text)
+        cur_dur += d
+        if cur_dur >= min_beat:
+            beats.append(("".join(cur_texts), cur_dur))
+            cur_texts, cur_dur = [], 0.0
+    if cur_texts:  # 节尾残拍
+        if beats:  # 并入前一拍（保证成拍后每拍尽量 ≥min_beat）
+            prev_text, prev_dur = beats[-1]
+            beats[-1] = (prev_text + "".join(cur_texts), prev_dur + cur_dur)
+        else:  # 该节仅此一拍且不足 min_beat → 保留（节首句独拍）
+            beats.append(("".join(cur_texts), cur_dur))
+    return beats
+
+
 # 二级检索参数：每拍粗排候选数 / 喂给 LLM 的总候选上限 / 冷启动兜底条数。
 # 库 ≤CAP 时不粗排（全量直喂，行为与小库时代完全一致）；千级库粗排为毫秒级纯本地计算。
 _PREFILTER_PER_BEAT = 20
