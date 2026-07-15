@@ -25,6 +25,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -253,20 +254,31 @@ def generate_image(prompt: str, size: str = DEFAULT_SIZE) -> bytes:
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=ARK_TIMEOUT_SECONDS) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = ""
+    # 瞬时网络故障（下载图片半途断连 IncompleteRead、超时、连接重置）重试一次再放弃。
+    # 2026-07-15 真实事故：1.48MB 响应体读到 2/3 断连，IncompleteRead 不在原 except 网里，
+    # 裸异常击穿 batch 的"单拍失败跳过"（只接 RuntimeError），整单 385s 白跑。
+    # 注意重试=重新生成（断连时服务端可能已计费），一张 ¥0.2 的代价远小于整单报废。
+    body = None
+    last_error: Exception | None = None
+    for _attempt in range(2):
         try:
-            detail = (exc.read() or b"").decode("utf-8", errors="replace")[:200]
-        except OSError:
-            pass
-        raise ImageGenError(f"方舟生图 HTTP {exc.code}：{detail}") from exc
-    except URLError as exc:
-        raise ImageGenError(f"方舟生图连接失败：{exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise ImageGenError("方舟生图返回非 JSON 响应。") from exc
+            with urlopen(request, timeout=ARK_TIMEOUT_SECONDS) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as exc:  # 明确的 HTTP 错误码：重试大概率无意义，直接报错
+            detail = ""
+            try:
+                detail = (exc.read() or b"").decode("utf-8", errors="replace")[:200]
+            except OSError:
+                pass
+            raise ImageGenError(f"方舟生图 HTTP {exc.code}：{detail}") from exc
+        except json.JSONDecodeError as exc:
+            raise ImageGenError("方舟生图返回非 JSON 响应。") from exc
+        except (URLError, HTTPException, OSError) as exc:
+            # 含 IncompleteRead(HTTPException)、超时/连接重置(OSError 族)——瞬时故障，重试。
+            last_error = exc
+    if body is None:
+        raise ImageGenError(f"方舟生图网络失败（已重试 1 次）：{last_error}") from last_error
 
     data = body.get("data") or []
     if not data or not isinstance(data[0], dict):

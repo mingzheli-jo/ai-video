@@ -330,3 +330,61 @@ def test_beat_match_parser_passes_category_and_tags(monkeypatch):
     result = match_beats_to_library(beats, [])
     assert result[0]["category"] == "人物" and result[0]["tags"] == ["西装", "办公室"]
     assert result[1]["category"] == "场景" and result[1]["tags"] == []  # 宽容归一
+
+
+# ---------- 生图网络瞬时故障（2026-07-15 IncompleteRead 整单报废事故回归） ----------
+
+class _FakeArkResponse:
+    def __init__(self, payload_bytes):
+        self._payload = payload_bytes
+
+    def read(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _ok_ark_payload():
+    import base64 as _b64
+    import json as _json
+
+    return _json.dumps({"data": [{"b64_json": _b64.b64encode(b"img-bytes").decode()}]}).encode()
+
+
+def test_generate_image_retries_once_on_incomplete_read(monkeypatch):
+    """半途断连（IncompleteRead）重试一次成功 → 返回图片字节，不炸。"""
+    from http.client import IncompleteRead
+
+    from video_factory import image_gen
+
+    monkeypatch.setenv("ARK_API_KEY", "ak-test")
+    responses = iter([
+        _FakeArkResponse(IncompleteRead(b"x" * 967679, 510583)),
+        _FakeArkResponse(_ok_ark_payload()),
+    ])
+    monkeypatch.setattr(image_gen, "urlopen", lambda req, timeout: next(responses))
+    assert image_gen.generate_image("城市夜景") == b"img-bytes"
+
+
+def test_generate_image_persistent_network_failure_raises_imagegenerror(monkeypatch):
+    """重试后仍断连 → 必须归一为 ImageGenError（RuntimeError 族），
+    batch 拍级循环才能接住并跳过该拍，绝不再裸异常击穿整单。"""
+    from http.client import IncompleteRead
+
+    from video_factory import image_gen
+    from video_factory.image_gen import ImageGenError
+
+    monkeypatch.setenv("ARK_API_KEY", "ak-test")
+    monkeypatch.setattr(
+        image_gen, "urlopen",
+        lambda req, timeout: _FakeArkResponse(IncompleteRead(b"x", 10)),
+    )
+    with pytest.raises(ImageGenError, match="网络失败"):
+        image_gen.generate_image("城市夜景")
+    assert isinstance(ImageGenError("x"), RuntimeError)  # batch 的 except RuntimeError 接得住

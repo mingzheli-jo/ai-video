@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -160,6 +161,10 @@ def chat_completion(system_prompt: str, user_prompt: str, config: LLMConfig) -> 
         raise LLMProviderError(f"{provider} HTTP {exc.code}：{detail or exc.reason}") from exc
     except URLError as exc:
         raise LLMProviderError(f"{provider} 连接失败：{exc.reason}。请检查网络或代理设置。") from exc
+    except (HTTPException, OSError) as exc:
+        # 含 IncompleteRead（响应体半途断连）等：不转掉会裸异常击穿各调用方的
+        # LLMProviderError 降级路径（翻译分块回退、选图回落、改写报错文案）。
+        raise LLMProviderError(f"{provider} 网络传输中断：{exc}。请检查网络后重试。") from exc
     except json.JSONDecodeError as exc:
         raise LLMProviderError(f"{provider} 返回了非 JSON 响应。") from exc
 

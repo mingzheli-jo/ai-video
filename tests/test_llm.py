@@ -126,3 +126,26 @@ def test_deepseek_missing_key_raises(monkeypatch):
 
     with pytest.raises(LLMProviderError, match="DEEPSEEK_API_KEY"):
         chat_completion("s", "u", LLMConfig(provider="deepseek"))
+
+
+def test_chat_completion_converts_incomplete_read_to_provider_error(monkeypatch):
+    """响应体半途断连（IncompleteRead）必须归一为 LLMProviderError——
+    各调用方的降级路径（翻译分块回退/选图回落/改写报错）都以它为契约。"""
+    from http.client import IncompleteRead
+
+    from video_factory import llm as llm_mod
+
+    class _BrokenResponse:
+        def read(self):
+            raise IncompleteRead(b"partial", 1024)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(llm_mod, "urlopen", lambda req, timeout: _BrokenResponse())
+    with pytest.raises(LLMProviderError, match="网络传输中断"):
+        chat_completion("s", "u", LLMConfig(provider="deepseek"))
