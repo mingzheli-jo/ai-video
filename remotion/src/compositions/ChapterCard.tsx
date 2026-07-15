@@ -6,7 +6,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { ChapterCardProps, FONT_STACK } from "../schema";
+import { ChapterCardProps, FONT_STACK, OVERLAY_TEXT_TOP_LANDSCAPE, OVERLAY_TEXT_TOP_PORTRAIT } from "../schema";
 
 // 章节大字浮现（2026-07-15 用户点名：黄底横条退役，视觉统一成"描边大字浮在画面上"）：
 // 透明背景，细金线从中心展开，节标题大字金色粗黑描边 spring 浮现，左上小号序号淡入。
@@ -59,7 +59,7 @@ export const ChapterCard: React.FC<ChapterCardProps> = ({
           position: "absolute",
           left: "50%",
           // 居中偏上：底部让给字幕；竖屏更靠上避开画面主体。
-          top: isPortrait ? "24%" : "32%",
+          top: isPortrait ? OVERLAY_TEXT_TOP_PORTRAIT : OVERLAY_TEXT_TOP_LANDSCAPE,
           transform: "translateX(-50%)",
           display: "flex",
           flexDirection: "column",

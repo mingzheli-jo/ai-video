@@ -6,7 +6,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { FONT_STACK, KeywordPopProps } from "../schema";
+import { FONT_STACK, KeywordPopProps, OVERLAY_TEXT_TOP_LANDSCAPE, OVERLAY_TEXT_TOP_PORTRAIT } from "../schema";
 
 // 关键词弹出（博主风格升级）：占屏宽 60-80% 的大字，黑色描边提可读性，
 // 三色轮换填字（红/黄/白，由 Python 侧按全片动效序号写入 color prop），
@@ -40,8 +40,8 @@ export const KeywordPop: React.FC<KeywordPopProps> = ({ keyword, color }) => {
         style={{
           position: "absolute",
           left: "50%",
-          top: isPortrait ? "30%" : "26%",
-          transform: `translate(-50%, -50%) scale(${scale})`,
+          top: isPortrait ? OVERLAY_TEXT_TOP_PORTRAIT : OVERLAY_TEXT_TOP_LANDSCAPE,
+          transform: `translateX(-50%) scale(${scale})`,
           transformOrigin: "center",
           opacity: Math.min(opacityIn, opacityOut),
           fontSize,

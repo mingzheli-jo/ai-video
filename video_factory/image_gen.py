@@ -508,6 +508,59 @@ def plan_beats(
     return beats
 
 
+# 二级检索参数：每拍粗排候选数 / 喂给 LLM 的总候选上限 / 冷启动兜底条数。
+# 库 ≤CAP 时不粗排（全量直喂，行为与小库时代完全一致）；千级库粗排为毫秒级纯本地计算。
+_PREFILTER_PER_BEAT = 20
+_PREFILTER_CAP = 150
+_PREFILTER_COLD_FALLBACK = 50
+
+_BIGRAM_CLEAN_RE = re.compile(r"[^\w一-鿿]")
+
+
+def _text_bigrams(text: str) -> set[str]:
+    """中文二元组集合（去标点/空白）：粗排的文本相似度基元。"""
+    chars = _BIGRAM_CLEAN_RE.sub("", str(text or ""))
+    return {chars[i : i + 2] for i in range(len(chars) - 1)}
+
+
+def _prefilter_library(beats: list, entries: list[dict]) -> list[dict]:
+    """二级检索第一级：本地粗排出与本片各拍相关的库图候选（喂 LLM 精选用）。
+
+    评分：条目标签在拍文案中出现 +3/个；条目提示词与拍文案的中文二元组重合 +1/个。
+    每拍取分数>0 的前 _PREFILTER_PER_BEAT 条，全片并集（同图取最高分）按分排序
+    截到 _PREFILTER_CAP。全片零相关（冷启动/题材全新）时回退**最新入库**的 50 张
+    ——新图的风格/质量最贴近当前生产，绝不能像旧实现那样取最老的。
+    """
+    valid = [e for e in entries if e.get("file")]
+    if len(valid) <= _PREFILTER_CAP:
+        return valid  # 小库全量直喂，无信息损失
+    entry_bigrams = [_text_bigrams(str(e.get("prompt") or "")) for e in valid]
+    best: dict[str, tuple[int, dict]] = {}
+    for beat in beats:
+        text = f"{getattr(beat, 'section_title', '')} {getattr(beat, 'narration_slice', '')}"
+        beat_bg = _text_bigrams(text)
+        scored: list[tuple[int, dict]] = []
+        for entry, ebg in zip(valid, entry_bigrams):
+            score = 0
+            for tag in entry.get("tags") or []:
+                tag_text = str(tag or "")
+                if tag_text and tag_text in text:
+                    score += 3
+            score += len(beat_bg & ebg)
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda pair: -pair[0])
+        for score, entry in scored[:_PREFILTER_PER_BEAT]:
+            key = str(entry["file"])
+            if key not in best or score > best[key][0]:
+                best[key] = (score, entry)
+    if not best:
+        recent = sorted(valid, key=lambda e: float(e.get("created") or 0.0), reverse=True)
+        return recent[:_PREFILTER_COLD_FALLBACK]
+    ranked = sorted(best.values(), key=lambda pair: -pair[0])
+    return [entry for _score, entry in ranked[:_PREFILTER_CAP]]
+
+
 def match_beats_to_library(
     beats: list[Beat],
     library_index: list[dict],
@@ -528,16 +581,18 @@ def match_beats_to_library(
     except RuntimeError:
         return None  # 无 LLM 凭据
 
-    # 给 LLM 看的库图列表（最多 50 条，避免超 token）
+    # 二级检索（2026-07-15，库将涨到千级）：先本地粗排出与本片各拍相关的候选，
+    # 再喂 LLM 精选。旧实现直接切 [:50]——取的还是登记簿最老的 50 张，库一大
+    # LLM 就对 95% 的库存失明，复用率崩塌。
+    candidates = _prefilter_library(beats, library_index or [])
     lib_entries = [
         {
             "file": str(e.get("file") or ""),
             "tags": (e.get("tags") or [])[:5],
             "prompt": str(e.get("prompt") or "")[:50],
         }
-        for e in (library_index or [])
-        if e.get("file")
-    ][:50]
+        for e in candidates
+    ]
 
     beats_payload = [
         {

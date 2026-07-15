@@ -6,7 +6,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { FONT_STACK, NumberPopProps } from "../schema";
+import { FONT_STACK, NumberPopProps, OVERLAY_TEXT_TOP_LANDSCAPE, OVERLAY_TEXT_TOP_PORTRAIT } from "../schema";
 
 // 数字强调：文案里的关键数字（"3步"“80%”）大字弹出，带过冲回弹，短促淡出。
 // 摆在竖屏中上部偏右（避开章节卡的左上与底部字幕）。
@@ -33,7 +33,7 @@ export const NumberPop: React.FC<NumberPopProps> = ({ value, accent }) => {
         style={{
           position: "absolute",
           right: isPortrait ? "8%" : "12%",
-          top: isPortrait ? "34%" : "24%",
+          top: isPortrait ? OVERLAY_TEXT_TOP_PORTRAIT : OVERLAY_TEXT_TOP_LANDSCAPE,
           transform: `scale(${scale})`,
           transformOrigin: "center",
           opacity: Math.min(opacityIn, opacityOut),

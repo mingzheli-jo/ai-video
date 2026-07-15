@@ -75,6 +75,12 @@ export type HookOpenerProps = z.infer<typeof hookOpenerSchema>;
 // 开屏钩子序列的三色轮换（对标博主：红/黄/白，粗黑描边浮在画面上）。
 export const HOOK_LINE_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"];
 
+// 叠加文字统一垂直锚点（2026-07-15 用户反馈"特效文字不在同一位置"：此前四个组件
+// 四个锚点 24%~34% 各自为政，文字跳来跳去）。所有浮层文字特效共用这一条带，
+// 顶部边缘对齐：底部留给字幕、中部留给画面主体。
+export const OVERLAY_TEXT_TOP_PORTRAIT = "28%";
+export const OVERLAY_TEXT_TOP_LANDSCAPE = "30%";
+
 // 要点行的循环配色（首色由 accent 覆盖）：金、青、玫红、草绿——深底上都够亮。
 export const LINE_PALETTE = ["#e8b84b", "#7ec8e3", "#e37e9c", "#9ce37e"];
 

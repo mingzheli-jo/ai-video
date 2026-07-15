@@ -6,7 +6,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { FONT_STACK, HOOK_LINE_COLORS, HookOpenerProps } from "../schema";
+import { FONT_STACK, HOOK_LINE_COLORS, HookOpenerProps, OVERLAY_TEXT_TOP_LANDSCAPE, OVERLAY_TEXT_TOP_PORTRAIT } from "../schema";
 
 // 开屏 5 秒钩子序列（2026-07-15 用户点名，替代冷开场黑卡）：
 // 透明背景叠在正片画面上，2~3 条钩子短句自下而上堆叠、逐条 spring 弹入，
@@ -42,7 +42,7 @@ export const HookOpener: React.FC<HookOpenerProps> = ({ lines, offsets, accent }
           position: "absolute",
           left: "50%",
           // 居中偏上：底部留给字幕，中心留给画面主体。
-          top: isPortrait ? "30%" : "34%",
+          top: isPortrait ? OVERLAY_TEXT_TOP_PORTRAIT : OVERLAY_TEXT_TOP_LANDSCAPE,
           transform: "translateX(-50%)",
           display: "flex",
           flexDirection: "column",

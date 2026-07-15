@@ -490,7 +490,8 @@ def test_overlay_mixes_sfx_at_effect_starts_when_enabled(tmp_path):
         base,
         [
             {"path": e0, "start": 0.0, "type": "intro"},
-            {"path": e1, "start": 6.0, "type": "chapter_card"},
+            # chapter_card 已静音（2026-07-15 用户点名），换仍带音效的 keyword_pop 测混音管线
+            {"path": e1, "start": 6.0, "type": "keyword_pop"},
         ],
         tmp_path / "out.mp4",
         runner=runner,
@@ -509,9 +510,16 @@ def test_overlay_mixes_sfx_at_effect_starts_when_enabled(tmp_path):
     # 音轨重编码为 aac 并映射混音输出，不再直通 copy
     assert "aac" in cmd and "[aout]" in cmd
     assert "copy" not in cmd
-    # 对应音效作为额外输入（intro→whoosh、chapter_card→pop）
+    # 对应音效作为额外输入（intro→whoosh、keyword_pop→pop）
     assert str(sfx_dir / "whoosh.wav") in cmd
     assert str(sfx_dir / "pop.wav") in cmd
+
+
+def test_chapter_card_has_no_sfx():
+    """章节大字纯视觉浮现（2026-07-15 用户点名去掉章节文字的"啵"声）。"""
+    from video_factory.sfx import SFX_BY_TYPE
+
+    assert "chapter_card" not in SFX_BY_TYPE
 
 
 def test_overlay_copies_audio_when_sfx_disabled(tmp_path):

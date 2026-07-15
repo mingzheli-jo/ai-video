@@ -388,3 +388,73 @@ def test_generate_image_persistent_network_failure_raises_imagegenerror(monkeypa
     with pytest.raises(ImageGenError, match="网络失败"):
         image_gen.generate_image("城市夜景")
     assert isinstance(ImageGenError("x"), RuntimeError)  # batch 的 except RuntimeError 接得住
+
+
+# ---------- 二级检索：本地粗排 → LLM 精选（P15：库将涨到千级） ----------
+
+def _mk_entries(n, tag="无关", prompt="无关画面描述", created_base=1000.0):
+    return [
+        {"file": f"场景/img_{i:04d}.png", "category": "场景", "tags": [f"{tag}{i}"],
+         "prompt": prompt, "size": "2560x1440", "created": created_base + i}
+        for i in range(n)
+    ]
+
+
+def test_prefilter_passthrough_when_library_small():
+    from video_factory.image_gen import _PREFILTER_CAP, _prefilter_library, plan_beats
+
+    beats = plan_beats(_beats_rewrite(), [5.0, 5.0])
+    entries = _mk_entries(100)  # ≤150：全量直喂，顺序不动
+    assert _prefilter_library(beats, entries) == entries
+    assert len(entries) < _PREFILTER_CAP + 1
+
+
+def test_prefilter_surfaces_relevant_entry_from_large_library():
+    from video_factory.image_gen import _PREFILTER_CAP, _prefilter_library, plan_beats
+
+    rewrite = {"hook": "钩子", "sections": [
+        {"title": "情绪", "narration": "情绪失控的深夜加班场景让人崩溃", "visual_hint": ""}]}
+    beats = plan_beats(rewrite, [5.0, 10.0])
+    entries = _mk_entries(400)  # 400 张无关图
+    hit = {"file": "情绪氛围/img_hit.png", "category": "情绪氛围", "tags": ["深夜加班", "情绪"],
+           "prompt": "深夜办公室情绪崩溃的男人", "size": "2560x1440", "created": 1.0}
+    entries.insert(0, hit)  # 放最前（旧实现只取最老 50 条时它反而能中——放哪都该中才对）
+    result = _prefilter_library(beats, entries)
+    assert len(result) <= _PREFILTER_CAP           # 上限收口
+    assert any(e["file"] == "情绪氛围/img_hit.png" for e in result)  # 相关图必须浮出
+    assert result[0]["file"] == "情绪氛围/img_hit.png"  # 且按分数排第一（标签+双字重合最高）
+
+
+def test_prefilter_cold_start_falls_back_to_most_recent():
+    from video_factory.image_gen import _PREFILTER_COLD_FALLBACK, _prefilter_library, plan_beats
+
+    rewrite = {"hook": "钩子", "sections": [{"title": "甲", "narration": "乙丙", "visual_hint": ""}]}
+    beats = plan_beats(rewrite, [5.0, 5.0])
+    entries = _mk_entries(300, tag="XYZW", prompt="qqqq")  # 全部与文案零相关
+    result = _prefilter_library(beats, entries)
+    assert len(result) == _PREFILTER_COLD_FALLBACK
+    # 必须是最新入库的（created 最大），绝不能像旧实现取最老的
+    assert result[0]["created"] == max(e["created"] for e in entries)
+
+
+def test_match_beats_feeds_prefiltered_candidates_to_llm(monkeypatch):
+    import json as _json
+
+    from video_factory.image_gen import _PREFILTER_CAP, match_beats_to_library, plan_beats
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    beats = plan_beats(_beats_rewrite(), [5.0, 5.0])
+    captured = {}
+
+    def fake_chat(system, user, config):
+        captured["payload"] = _json.loads(user)
+        return _json.dumps([
+            {"beat_index": b.global_index, "action": "generate", "file": "",
+             "prompt": "画面", "category": "场景", "tags": []}
+            for b in beats
+        ])
+
+    monkeypatch.setattr("video_factory.llm.chat_completion", fake_chat)
+    result = match_beats_to_library(beats, _mk_entries(500))  # 500 张库
+    assert result is not None
+    assert len(captured["payload"]["library"]) <= _PREFILTER_CAP  # LLM 只看到粗排候选

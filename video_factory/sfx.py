@@ -24,7 +24,8 @@ DEFAULT_SFX_DIR = Path(__file__).resolve().parent / "assets" / "sfx"
 # 特效类型 → 音效文件名。键与 effects_manifest 的 type 对齐。
 SFX_BY_TYPE = {
     "intro": "whoosh.wav",
-    "chapter_card": "pop.wav",
+    # chapter_card 无音效（2026-07-15 用户点名去掉章节文字出现时的"啵"声）：
+    # 不在映射里 = resolve_sfx_path 返回 None = 静默跳过，章节大字纯视觉浮现。
     "lower_third": "swoosh.wav",
     "key_points": "whoosh.wav",
     "quote_card": "pop.wav",
