@@ -590,6 +590,72 @@ def test_build_rewrite_prompts_includes_emphasis_guidance():
     assert "golden" in system_prompt
 
 
+def test_build_rewrite_prompts_emphasis_guidance_requires_atleast_golden():
+    """强化后的 emphasis 引导：含「至少」正向引导语 + 每节 1~2 条 + 至少一条 golden 金句。
+
+    背景：旧「宁缺勿滥」把 DeepSeek 吓得干脆全不标，导致金句卡从未触发。
+    """
+    system_prompt, _ = build_rewrite_prompts("原始文案", target_duration_seconds=90)
+    assert "至少" in system_prompt          # 正向引导语（不再是宁缺勿滥）
+    assert "1~2 条" in system_prompt        # 每节应标注 1~2 条
+    assert "宁缺勿滥" not in system_prompt   # 旧的抑制性措辞已移除
+
+
+def test_build_rewrite_prompts_includes_opening_hooks_field():
+    """system_prompt 说明可选的 opening_hooks 开屏钩子序列（≤12字、悬念/反问/数字冲击力）。"""
+    system_prompt, _ = build_rewrite_prompts("原始文案", target_duration_seconds=90)
+    assert "opening_hooks" in system_prompt
+    assert "开屏" in system_prompt
+
+
+# ---------- opening_hooks：开屏钩子序列解析兼容性 ----------
+
+from video_factory.rewrite import _parse_opening_hooks  # noqa: E402
+
+
+def test_parse_opening_hooks_tolerates_none():
+    """旧 rewrite.json 无 opening_hooks 字段 → 空元组（向后兼容）。"""
+    assert _parse_opening_hooks(None) == ()
+
+
+def test_parse_opening_hooks_tolerates_non_list():
+    """opening_hooks 是非列表（字符串/数字）→ 空元组（宽容处理）。"""
+    assert _parse_opening_hooks("钩子") == ()
+    assert _parse_opening_hooks(42) == ()
+
+
+def test_parse_opening_hooks_parses_and_truncates_and_caps():
+    """短句去空、每条截断到 12 字、最多保留 3 条。"""
+    raw = ["你敢信吗？", "  ", "这是一条超过十二个字的超长开屏钩子短句", "第三条", "第四条超额"]
+    result = _parse_opening_hooks(raw)
+    assert result[0] == "你敢信吗？"                       # 正常短句保留
+    assert result[1] == "这是一条超过十二个字的超"          # 截断到 12 字
+    assert len(result) == 3                                 # 空串跳过 + 上限 3 条
+    assert all(len(x) <= 12 for x in result)
+
+
+def test_rewrite_copy_parses_opening_hooks_and_serializes(monkeypatch, tmp_path):
+    """LLM 回复带 opening_hooks 时解析进 RewriteResult 并写入 rewrite.json；缺失时为空。"""
+    reply = dict(VALID_REPLY, opening_hooks=["3秒看懂", "你亏在哪？"])
+    monkeypatch.setattr(
+        "video_factory.rewrite.chat_completion",
+        lambda system, user, config: json.dumps(reply, ensure_ascii=False),
+    )
+    result = rewrite_copy("原始文案", LLMConfig(provider="openai"), target_duration_seconds=60)
+    assert result.opening_hooks == ("3秒看懂", "你亏在哪？")
+    saved = rewrite_result_to_dict(result)
+    assert saved["opening_hooks"] == ["3秒看懂", "你亏在哪？"]
+
+    # 缺 opening_hooks（旧回复）→ 空元组、序列化为空数组
+    monkeypatch.setattr(
+        "video_factory.rewrite.chat_completion",
+        lambda system, user, config: json.dumps(VALID_REPLY, ensure_ascii=False),
+    )
+    legacy = rewrite_copy("原始文案", LLMConfig(provider="openai"), target_duration_seconds=60)
+    assert legacy.opening_hooks == ()
+    assert rewrite_result_to_dict(legacy)["opening_hooks"] == []
+
+
 # ---------- 改写文风指令（P14：DeepSeek 提示词自定义，仿生图 IMAGE_STYLE_PROMPT 机制） ----------
 
 def test_rewrite_style_prompt_priority_env_over_settings(monkeypatch, tmp_path):

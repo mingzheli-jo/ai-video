@@ -554,7 +554,8 @@ def match_beats_to_library(
         "1. 输出 JSON 数组，与输入拍数等长同序。每个元素：\n"
         '   {"beat_index": 数字, "action": "reuse"|"generate", '
         '"file": "库图文件名（action=reuse 时填库中 file 字段原值；否则填空串）", '
-        '"prompt": "中文生图提示词（generate 时 60 字内描述画面主体+构图，禁止画风词；reuse 时填空串）", '
+        '"prompt": "中文生图提示词（generate 时 60 字内描述画面主体+构图；禁止画风词——画风由系统统一追加；'
+        '禁止画面中出现任何文字/对话气泡/字幕/水印/logo；reuse 时填空串）", '
         f'"category": "generate 时从：{"、".join(CATEGORIES)} 中选一（reuse 时填空串）", '
         '"tags": ["generate 时给 3~6 个中文标签（主体/场景/情绪，供图库日后检索复用）；reuse 时空数组"]}\n'
         "2. reuse 要求 file 是图片库里 file 字段的原值；无把握时选 generate。\n"

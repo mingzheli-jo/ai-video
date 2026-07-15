@@ -12,9 +12,13 @@ import pytest
 
 from video_factory.subtitles import (
     ASS_FILENAME,
+    DEFAULT_SUBTITLE_FONT,
     MAX_CUE_CHARS,
     MIN_CUE_DURATION,
     RELEASE_FILENAME,
+    SUBTITLE_FONT_NAME_ENV,
+    SUBTITLE_FONT_OPTIONS,
+    SUBTITLE_FONT_SIZE_ENV,
     Cue,
     SubtitlesError,
     build_cue_timeline_align,
@@ -23,6 +27,8 @@ from video_factory.subtitles import (
     burn_subtitles,
     ensure_libass,
     generate_subtitles,
+    get_subtitle_font_name,
+    get_subtitle_font_scale,
     main,
     prepare_single_line_cues,
     render_ass,
@@ -267,15 +273,18 @@ def test_render_ass_style_line_fields():
     cues = [Cue(0.0, 2.0, "你好")]
     ass = render_ass(cues, 1920, 1080)
     style = next(line for line in ass.splitlines() if line.startswith("Style: Default"))
-    assert "Microsoft YaHei" in style
-    # 白字（PrimaryColour &H00FFFFFF）+ 细黑描边（OutlineColour 不透明黑）；
+    assert "Microsoft YaHei" in style  # 默认字体族
+    # 对标爆款博主：粗体白字（PrimaryColour &H00FFFFFF）+ 厚黑描边（OutlineColour 不透明纯黑）；
     # 用户点名去掉黑色底板（旧版 BorderStyle=3 半透明底板已废弃，别改回去）。
     assert "&H00FFFFFF" in style
     assert "&H60000000" not in style  # 底板色不复存在
     fields = style[len("Style: "):].split(",")
-    assert fields[5] == "&H00000000"  # OutlineColour：不透明黑描边
+    assert fields[5] == "&H00000000"  # OutlineColour：不透明纯黑描边
+    assert fields[7] == "1"    # Bold=1 粗体（新默认）
     assert fields[15] == "1"   # BorderStyle=1 描边样式（无底板）
-    assert int(fields[16]) > 0  # Outline 描边宽度
+    font_size = int(fields[2])
+    # 新默认描边加厚：系数 0.10（约旧值 0.05 的 2 倍），与字号联动。
+    assert int(fields[16]) == max(4, round(font_size * 0.10))
     assert int(fields[17]) > 0  # Shadow 轻阴影（可读性最后防线）
     assert fields[18] == "2"   # Alignment 底部居中
 
@@ -928,3 +937,91 @@ def test_english_defaults_off_everywhere(monkeypatch):
     subs_mod.main(["--video", "v.mp4", "--text", "你好", "--mode", "ratio", "--output", "o"])
     subs_mod.main(["--video", "v.mp4", "--text", "你好", "--mode", "ratio", "--output", "o", "--english"])
     assert called == [False, True]
+
+
+# --- 字幕字号缩放 / 字体族（用户可调设置项） -------------------------------
+
+
+@pytest.fixture
+def _clean_subtitle_env(monkeypatch, tmp_path):
+    """隔离字幕设置：清 env + 把 settings.yaml 指向不存在的 tmp 路径（load_settings 返回 {}）。
+    这样 get_subtitle_font_scale/name 只看默认值，测试可逐一注入 env 或写临时 settings.yaml。"""
+    from video_factory import settings_store
+
+    monkeypatch.delenv(SUBTITLE_FONT_SIZE_ENV, raising=False)
+    monkeypatch.delenv(SUBTITLE_FONT_NAME_ENV, raising=False)
+    settings_file = tmp_path / "settings.yaml"
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", settings_file)
+    return settings_file
+
+
+def test_subtitle_font_scale_default_is_one(_clean_subtitle_env):
+    assert get_subtitle_font_scale() == 1.0
+
+
+def test_subtitle_font_scale_env_overrides_settings(_clean_subtitle_env, monkeypatch):
+    # settings.yaml 写 1.2，env 写 0.8 → env 优先。
+    _clean_subtitle_env.write_text('SUBTITLE_FONT_SIZE: "1.2"\n', encoding="utf-8")
+    monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "0.8")
+    assert get_subtitle_font_scale() == 0.8
+
+
+def test_subtitle_font_scale_reads_settings_when_no_env(_clean_subtitle_env):
+    _clean_subtitle_env.write_text('SUBTITLE_FONT_SIZE: "1.3"\n', encoding="utf-8")
+    assert get_subtitle_font_scale() == 1.3
+
+
+def test_subtitle_font_scale_clamps_out_of_range(_clean_subtitle_env, monkeypatch):
+    monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "5.0")
+    assert get_subtitle_font_scale() == 1.5   # 上界钳位
+    monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "0.1")
+    assert get_subtitle_font_scale() == 0.7   # 下界钳位
+
+
+def test_subtitle_font_scale_invalid_falls_back_to_one(_clean_subtitle_env, monkeypatch):
+    for bad in ("abc", "", "  ", "1.0x", "nan"):
+        monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, bad)
+        assert get_subtitle_font_scale() == 1.0
+
+
+def test_subtitle_font_name_default(_clean_subtitle_env):
+    assert get_subtitle_font_name() == DEFAULT_SUBTITLE_FONT == "Microsoft YaHei"
+
+
+def test_subtitle_font_name_whitelist_accepted(_clean_subtitle_env, monkeypatch):
+    for font in SUBTITLE_FONT_OPTIONS:
+        monkeypatch.setenv(SUBTITLE_FONT_NAME_ENV, font)
+        assert get_subtitle_font_name() == font
+
+
+def test_subtitle_font_name_rejects_arbitrary(_clean_subtitle_env, monkeypatch):
+    # 任意非白名单字体一律回落默认（写进 .ass 前的最后防线）。
+    for bad in ("Comic Sans", "'; DROP", "Arial", ""):
+        monkeypatch.setenv(SUBTITLE_FONT_NAME_ENV, bad)
+        assert get_subtitle_font_name() == DEFAULT_SUBTITLE_FONT
+
+
+def test_subtitle_font_name_from_settings_reflected_in_ass(_clean_subtitle_env):
+    _clean_subtitle_env.write_text('SUBTITLE_FONT_NAME: "SimHei"\n', encoding="utf-8")
+    ass = render_ass([Cue(0, 1, "你好")], 1080, 1920)
+    style = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
+    assert style[len("Style: "):].split(",")[1] == "SimHei"
+
+
+def test_subtitle_font_name_arbitrary_settings_falls_back_in_ass(_clean_subtitle_env):
+    _clean_subtitle_env.write_text('SUBTITLE_FONT_NAME: "Comic Sans"\n', encoding="utf-8")
+    ass = render_ass([Cue(0, 1, "你好")], 1080, 1920)
+    style = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
+    assert style[len("Style: "):].split(",")[1] == "Microsoft YaHei"
+
+
+def test_render_ass_font_scale_multiplies_zh_font(_clean_subtitle_env, monkeypatch):
+    # 默认字号（scale=1.0）对比放大 1.5 倍：中文主字号应显著变大。
+    base = render_ass([Cue(0, 1, "a")], 1920, 1080)
+    base_size = int(next(l for l in base.splitlines() if l.startswith("Style: Default")).split(",")[2])
+    monkeypatch.setenv(SUBTITLE_FONT_SIZE_ENV, "1.5")
+    big = render_ass([Cue(0, 1, "a")], 1920, 1080)
+    big_size = int(next(l for l in big.splitlines() if l.startswith("Style: Default")).split(",")[2])
+    assert base_size == 54                     # 旧默认不变
+    assert big_size == round(54 * 1.5) == 81   # 系数乘在基准字号上
+    assert big_size > base_size

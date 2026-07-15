@@ -101,6 +101,8 @@ class RewriteResult:
     style: str = DEFAULT_STYLE_KEY
     # 时长闭环：实际触发的扩写轮数（0=首轮字数即达标）。
     expand_rounds: int = 0
+    # 开屏 5 秒钩子序列（2~3 条短句，每条≤12字）；旧 rewrite.json 无此字段时默认空元组。
+    opening_hooks: tuple[str, ...] = ()
 
     @property
     def full_voiceover(self) -> str:
@@ -158,15 +160,20 @@ def build_rewrite_prompts(
         f"5. 全部口播文字总量控制在约 {target_chars} 字（对应 {target_duration_seconds} 秒口播，允许上下 10%）。\n"
         "6. 只输出一个 JSON 对象，不要输出任何其他文字或代码块标记。字段：\n"
         '{"hook": "前3秒钩子口播", '
+        '"opening_hooks": ["开屏钩子短句1", "短句2"], '
         '"sections": [{"title": "小节标题", "narration": "该小节口播文案", "visual_hint": "画面/素材建议", '
         '"emphasis": [{"text": "弹出词/短句≤10字", "kind": "keyword|number|golden"}]}], '
         '"publish_titles": ["发布标题候选1", "候选2", "候选3"], '
         '"notes": "改写思路与合规提醒"}\n'
         f"7. sections 至少 {MIN_SECTIONS} 个，按叙事顺序排列。\n"
-        "8. 每个 section 可选填 emphasis 数组（0~3 条/节），标注本节最值得屏幕弹字的内容：\n"
-        "   keyword=动作/概念关键词（≤8字）、number=关键数字（带单位，如'3倍''5步'）、"
+        "8. 每个 section 用 emphasis 数组标注本节最值得屏幕弹字的内容："
+        "keyword=动作/概念关键词（≤8字）、number=关键数字（带单位，如'3倍''5步'）、"
         "golden=金句精华（≤10字）。\n"
-        "   没有值得强调的就省略 emphasis 字段或填空数组——宁缺勿滥，每节最多 3 条。"
+        "   每节应标注 1~2 条最有分量的强调（除非该节确实平淡可留空）；"
+        "全片至少要有 1 条 kind=golden 的金句作为视频的记忆点；"
+        "keyword/number 用于关键概念与数字。每节最多 3 条。\n"
+        "9. opening_hooks（可选）：2~3 条开屏 5 秒钩子短句，每条≤12字，"
+        "悬念/反问/数字冲击力优先，用于视频开屏的钩子序列；没有好钩子可省略该字段。"
     )
     # 用户自定义文风指令（全局生效）：压过内容类型模板的文风约定，
     # 但 JSON 输出格式硬性要求不可违反；单条 job 的 brief 优先级仍最高。
@@ -235,6 +242,21 @@ def _parse_emphasis_items(raw) -> tuple[dict, ...]:
     return tuple(result[:3])  # 每节最多 3 条
 
 
+def _parse_opening_hooks(raw) -> tuple[str, ...]:
+    """宽容解析开屏钩子序列：缺失/非列表 → 空元组（向后兼容旧 rewrite.json）。
+
+    每条去空白后截断到 12 字，跳过空串，最多保留 3 条。
+    """
+    if not isinstance(raw, list):
+        return ()
+    result: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()[:12]  # 每条≤12字
+        if text:
+            result.append(text)
+    return tuple(result[:3])  # 最多 3 条
+
+
 def _result_from_body(
     body: dict,
     config: LLMConfig,
@@ -263,6 +285,7 @@ def _result_from_body(
         notes=str(body.get("notes") or "").strip(),
         style=style_key,
         expand_rounds=expand_rounds,
+        opening_hooks=_parse_opening_hooks(body.get("opening_hooks")),
     )
 
 
@@ -280,6 +303,7 @@ def build_expand_prompts(result: RewriteResult, style: RewriteStyle) -> tuple[st
     )
     payload = {
         "hook": result.hook,
+        "opening_hooks": list(result.opening_hooks),
         "sections": [
             {"title": s.title, "narration": s.narration, "visual_hint": s.visual_hint}
             for s in result.sections
@@ -340,6 +364,7 @@ def rewrite_result_to_dict(result: RewriteResult) -> dict:
         "estimated_duration_seconds": result.estimated_duration_seconds,
         "expand_rounds": result.expand_rounds,
         "hook": result.hook,
+        "opening_hooks": list(result.opening_hooks),
         "sections": [
             {
                 "index": s.index,

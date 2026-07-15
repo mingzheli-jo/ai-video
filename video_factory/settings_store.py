@@ -14,7 +14,12 @@ from video_factory.credentials_store import _parse_flat_yaml, save_credential as
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.yaml"
 
 # 设置白名单：新增设置项时在这里登记（studio 的 /api/settings 只认白名单）。
-SETTING_NAMES = ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT")
+SETTING_NAMES = (
+    "IMAGE_STYLE_PROMPT",
+    "REWRITE_STYLE_PROMPT",
+    "SUBTITLE_FONT_SIZE",
+    "SUBTITLE_FONT_NAME",
+)
 
 _HEADER = (
     "# King-AI-video 偏好设置（不含密钥，可随意备份/分享）\n"
@@ -27,6 +32,13 @@ _HEADER = (
     "# 改写文风指令：追加进 DeepSeek 改写的 system prompt，全局定制口吻/句式/禁忌词；\n"
     "# 留空 = 只用内置七种内容类型模板。\n"
     'REWRITE_STYLE_PROMPT: ""\n'
+    "#\n"
+    "# 字幕字号缩放系数：合法 0.7~1.5，留空 = 默认 1.0；乘在自适应基准字号上。\n"
+    'SUBTITLE_FONT_SIZE: ""\n'
+    "#\n"
+    "# 字幕字体族：只认白名单（Microsoft YaHei / SimHei / Source Han Sans SC / KaiTi / SimSun），\n"
+    "# 留空或非白名单 = 默认 Microsoft YaHei。\n"
+    'SUBTITLE_FONT_NAME: ""\n'
 )
 
 

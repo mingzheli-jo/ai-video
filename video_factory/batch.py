@@ -434,6 +434,10 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
     # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
     style = image_gen.get_style_prompt()
+    # 第二道禁文字保险：除了上游 LLM 写提示词时的约束，最终喂给 Seedream 的提示词里
+    # 也钉死（实测拍级图冒出"苦涩/回甘"贴字和乱码气泡——生图模型对提示词内的
+    # 负向约束服从度远高于指望上游转述）。
+    no_text_guard = "画面中不得出现任何文字、字母、数字、对话气泡、字幕、水印"
 
     for match in beat_matches:
         beat_idx = match.get("beat_index", copied)
@@ -465,7 +469,7 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             if not prompt:
                 continue
             try:
-                img_bytes = image_gen.generate_image(f"{prompt}。{style}", size=size)
+                img_bytes = image_gen.generate_image(f"{prompt}。{style}。{no_text_guard}", size=size)
             except RuntimeError as exc:
                 print(f"生图告警：拍 {beat_idx} 生成失败（{exc}），跳过。")
                 continue

@@ -31,6 +31,11 @@ from urllib.parse import parse_qs, urlparse
 from video_factory import batch, credentials_store, settings_store, studio_ui
 from video_factory.image_gen import DEFAULT_STYLE_PROMPT, get_style_prompt
 from video_factory.rewrite import get_rewrite_style_prompt
+from video_factory.subtitles import (
+    SUBTITLE_FONT_OPTIONS,
+    get_subtitle_font_name,
+    get_subtitle_font_scale,
+)
 from video_factory.assemble import ASPECT_PRESETS, FIT_MODES
 from video_factory.batch import PLATFORM_PRESETS, resolve_job, validate_job
 from video_factory.pipeline import DOUBAO_DEFAULT_VOICE, EDGE_DEFAULT_VOICE
@@ -128,6 +133,10 @@ def build_meta() -> dict:
         "image_style_prompt_default": DEFAULT_STYLE_PROMPT,
         # 改写文风指令（DeepSeek 提示词自定义，同款机制）：空=只用内置内容类型模板。
         "rewrite_style_prompt": get_rewrite_style_prompt(),
+        # 字幕样式（用户可调）：当前生效字号系数、字体族，以及字体白名单（前端下拉用）。
+        "subtitle_font_size": get_subtitle_font_scale(),
+        "subtitle_font_name": get_subtitle_font_name(),
+        "subtitle_font_options": list(SUBTITLE_FONT_OPTIONS),
     }
 
 
@@ -609,6 +618,9 @@ def make_handler(store: TaskStore):
             effective = {
                 "IMAGE_STYLE_PROMPT": get_style_prompt,
                 "REWRITE_STYLE_PROMPT": get_rewrite_style_prompt,
+                # 字号回显生效系数（钳位/回落后的数字，字符串化便于前端 number 输入回填）。
+                "SUBTITLE_FONT_SIZE": lambda: str(get_subtitle_font_scale()),
+                "SUBTITLE_FONT_NAME": get_subtitle_font_name,
             }.get(name, lambda: value)()
             self._send_json({"name": name, "value": effective, "persisted": persisted})
 

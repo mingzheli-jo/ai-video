@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -72,6 +73,62 @@ _EN_FONT_RATIO = 0.55
 _EN_FONT_RATIO_SHRUNK = 0.45
 _EN_CHAR_WIDTH_EM = 0.55
 _EN_FONT_MIN = 12
+
+# 字幕字号缩放系数（用户可调）：合法区间 [0.7, 1.5]，空/非法回落默认 1.0。
+# 优先级：环境变量 SUBTITLE_FONT_SIZE > settings.yaml > 默认值（仿 image_gen.get_style_prompt）。
+SUBTITLE_FONT_SIZE_ENV = "SUBTITLE_FONT_SIZE"
+_SUBTITLE_FONT_SCALE_DEFAULT = 1.0
+_SUBTITLE_FONT_SCALE_MIN = 0.7
+_SUBTITLE_FONT_SCALE_MAX = 1.5
+
+# 字幕字体族（用户可调，白名单制）：非白名单/空值回落默认 Microsoft YaHei。
+# 优先级：环境变量 SUBTITLE_FONT_NAME > settings.yaml > 默认值。
+SUBTITLE_FONT_NAME_ENV = "SUBTITLE_FONT_NAME"
+DEFAULT_SUBTITLE_FONT = "Microsoft YaHei"
+SUBTITLE_FONT_OPTIONS = (
+    "Microsoft YaHei",
+    "SimHei",
+    "Source Han Sans SC",
+    "KaiTi",
+    "SimSun",
+)
+
+
+def _read_setting(env_name: str) -> str:
+    """按「环境变量 > settings.yaml」取一个白名单设置的原始字符串（缺失=空串）。
+    惰性导入 settings_store 避免模块级环依赖。"""
+    env_value = (os.getenv(env_name) or "").strip()
+    if env_value:
+        return env_value
+    from video_factory.settings_store import load_settings
+
+    return (load_settings().get(env_name) or "").strip()
+
+
+def get_subtitle_font_scale() -> float:
+    """当前生效的字幕字号缩放系数：环境变量 > settings.yaml > 默认 1.0。
+
+    宽容策略：空值/非数字回落 1.0；数字但越界钳位到 [0.7, 1.5] 边界。
+    """
+    raw = _read_setting(SUBTITLE_FONT_SIZE_ENV)
+    if not raw:
+        return _SUBTITLE_FONT_SCALE_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _SUBTITLE_FONT_SCALE_DEFAULT
+    if value != value:  # NaN 宽容回落
+        return _SUBTITLE_FONT_SCALE_DEFAULT
+    return max(_SUBTITLE_FONT_SCALE_MIN, min(_SUBTITLE_FONT_SCALE_MAX, value))
+
+
+def get_subtitle_font_name() -> str:
+    """当前生效的字幕字体族：环境变量 > settings.yaml > 默认 Microsoft YaHei。
+
+    只认白名单 SUBTITLE_FONT_OPTIONS，非白名单/空值一律回落默认（写进 .ass 前的最后防线）。
+    """
+    raw = _read_setting(SUBTITLE_FONT_NAME_ENV)
+    return raw if raw in SUBTITLE_FONT_OPTIONS else DEFAULT_SUBTITLE_FONT
 
 
 class SubtitlesError(RuntimeError):
@@ -279,7 +336,10 @@ def _compute_layout(width: int, height: int) -> dict:
     usable_width = max(1, width - 2 * side_margin)
     # 字号取三者最小：高度自适应、宽度可容 _CHARS_PER_LINE_BUDGET 个字、绝对上限。
     width_font = usable_width // _CHARS_PER_LINE_BUDGET
-    font_size = max(1, min(_FONT_SIZE_CAP, round(height * _FONT_RATIO), width_font))
+    base_font = min(_FONT_SIZE_CAP, round(height * _FONT_RATIO), width_font)
+    # 用户可调字号系数：乘在自适应基准字号上（默认 1.0 与旧行为完全一致）。
+    # chars_per_line 也随缩放后的字号重算，字放大时自动少排字、不溢出宽度。
+    font_size = max(1, round(base_font * get_subtitle_font_scale()))
     margin_v = max(0, round(height * _MARGIN_RATIO))
     return {
         "side_margin": side_margin,
@@ -416,14 +476,16 @@ def _ass_header(
     en_font: int = 0,
     en_margin_v: int = 0,
 ) -> str:
-    # Alignment=2 底部居中。BorderStyle=1=白字+细黑描边+轻阴影（用户点名去掉黑色底板；
-    # 纯白无描边在亮背景会看不清，细描边是可读性的最后防线）。OutlineColour 是描边色
-    # （不透明黑），BackColour 是阴影色（半透明黑）。描边/阴影随字号缩放。
-    outline = max(2, round(font_size * 0.05))
+    # Alignment=2 底部居中。BorderStyle=1=白字+厚黑描边+轻阴影（用户点名去掉黑色底板；
+    # 纯白无描边在亮背景会看不清，厚描边是可读性主力）。OutlineColour 是描边色
+    # （不透明纯黑），BackColour 是阴影色（半透明黑）。描边/阴影随字号缩放。
+    # 默认样式对标爆款博主：Bold=1 粗体白字 + 加厚黑描边（描边系数 0.10 约为旧值 2 倍）。
+    outline = max(4, round(font_size * 0.10))
     shadow = max(1, round(font_size * 0.03))
+    font_name = get_subtitle_font_name()
     styles = (
-        f"Style: Default,Microsoft YaHei,{font_size},&H00FFFFFF,&H000000FF,"
-        f"&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
+        f"Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,"
+        f"&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
         f"{side_margin},{side_margin},{margin_v},1\n"
     )
     if en_font > 0:

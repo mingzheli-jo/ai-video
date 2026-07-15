@@ -667,6 +667,13 @@ function renderCredPage(meta) {
   if (sp) sp.value = meta.image_style_prompt || '';
   const rp = h('#rewritePrompt');
   if (rp) rp.value = meta.rewrite_style_prompt || '';
+  const sfs = h('#subFontSize');
+  if (sfs) sfs.value = (meta.subtitle_font_size != null ? meta.subtitle_font_size : '');
+  const sfn = h('#subFontName');
+  if (sfn && meta.subtitle_font_options) {
+    sfn.innerHTML = meta.subtitle_font_options.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
+    sfn.value = meta.subtitle_font_name || '';
+  }
   const deps = { ffmpeg: 'ffmpeg — 缺失则无法拼装与转码', node: 'node — 缺失则特效渲染不可用', faster_whisper: 'faster-whisper — 缺失则本地字幕转写降级', edge_tts: 'edge-tts — 缺失则 edge 配音不可用' };
   h('#depList').innerHTML = Object.keys(meta.dependencies).map(k =>
     `<div class="dep-item"><span class="dot ${meta.dependencies[k]?'on':'off'}"></span><span>${esc(deps[k]||k)}</span></div>`).join('');
@@ -700,6 +707,26 @@ async function saveRewritePrompt() {
   setTimeout(() => { msg.textContent = ''; }, 4000);
 }
 
+async function saveSubtitleStyle() {
+  const size = h('#subFontSize').value.trim();
+  const name = h('#subFontName').value;
+  const msg = h('#subStyleMsg');
+  // 端点一次一项：字号、字体分两次保存（都走白名单校验）。
+  const r1 = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'SUBTITLE_FONT_SIZE', value: size }) });
+  const r2 = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'SUBTITLE_FONT_NAME', value: name }) });
+  if (r1.status === 200 && r2.status === 200) {
+    h('#subFontSize').value = r1.data.value || '';
+    h('#subFontName').value = r2.data.value || '';
+    S.meta.subtitle_font_size = r1.data.value;
+    S.meta.subtitle_font_name = r2.data.value;
+    msg.textContent = '已保存并生效';
+  } else {
+    const err = (r1.data && r1.data.error) || (r2.data && r2.data.error) || (r1.status + '/' + r2.status);
+    msg.textContent = '保存失败：' + esc(err);
+  }
+  setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
 async function saveCred(name) {
   const val = h('#ci_' + name).value;
   if (!val) return;
@@ -724,6 +751,7 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#batchAddBtn').addEventListener('click', () => addBatchJob());
   h('#stylePromptSave').addEventListener('click', saveStylePrompt);
   h('#rewritePromptSave').addEventListener('click', saveRewritePrompt);
+  h('#subStyleSave').addEventListener('click', saveSubtitleStyle);
   // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
   h('#compareClose').addEventListener('click', closeCompare);
   h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
@@ -895,6 +923,17 @@ def _body() -> str:
         <div class="batch-actions">
           <button type="button" class="btn" id="rewritePromptSave">保存指令</button>
           <span id="rewritePromptMsg" class="task-meta"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>字幕样式</h2>
+        <p class="desc">烧录字幕的字号与字体族。字号为缩放系数（0.7~1.5，留空 = 默认 1.0），字体从下拉白名单选择。
+        默认即对标爆款博主样式：<b>粗体白字 + 厚黑描边</b>；改完点保存立即生效并写入 settings.yaml。</p>
+        <div class="batch-actions">
+          <label>字号系数 <input type="number" id="subFontSize" min="0.7" max="1.5" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
+          <label>字体 <select id="subFontName"></select></label>
+          <button type="button" class="btn" id="subStyleSave">保存样式</button>
+          <span id="subStyleMsg" class="task-meta"></span>
         </div>
       </div>
       <div class="card">

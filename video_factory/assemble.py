@@ -14,6 +14,7 @@ import hashlib
 import json
 import subprocess
 from dataclasses import asdict, dataclass
+from itertools import groupby
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -171,8 +172,11 @@ def build_ordered_assembly_plan(
     """拍级配图模式下的分配计划：第 k 拍使用第 k 张图，时长=该拍目标时长。
 
     图片数少于拍数时尾部循环（取最后一张），打印告警但不中断。
-    与普通路径不同，这里每个「allocation」对应一拍而非一节；section_titles 同步
-    细化为拍粒度（如「hook-拍1」），供 effects/字幕阶段参考。
+    分段渲染仍是「第 k 拍第 k 图」（切片按拍序排列，与图序一致），但**按 beat.section_index
+    归组为真实节**：每个真实节一个 SectionAllocation（duration=该节各拍时长求和，slices=该节
+    各拍图片切片按拍序排列），section_titles=真实节标题（hook / 各正题节，绝无「-拍N」）。
+    如此特效层的章节卡只在真实节边界出现，内部标签不再泄漏进成片；转场「跨节必转」也回到
+    真实节边界。
     """
     # 懒惰导入：避免 assemble 与 image_gen 循环依赖（image_gen 会 import llm/rewrite）。
     from video_factory.image_gen import compute_section_durations, plan_beats
@@ -197,28 +201,36 @@ def build_ordered_assembly_plan(
             "尾部循环最后一张图片补足。"
         )
 
-    # 为每拍建一个单切片的 SectionAllocation，路径直接指向该拍对应图片。
+    # 按真实节归组：beats 已按 (section_index, beat_index) 升序，同节的拍连续排列，
+    # 故 groupby(section_index) 即可把每节聚成一个 SectionAllocation。节内切片仍按拍序
+    # 排列（第 k 拍第 k 图），跨节顺序不变，摊平后的渲染顺序与旧的逐拍分配完全一致。
     allocations: list[SectionAllocation] = []
     section_titles: list[str] = []
     seen_clips: dict[Path, AssetClip] = {}  # 去重，只建一个 AssetClip per 文件
 
-    for beat in beats:
-        img_path = image_paths[min(beat.global_index, n_images - 1)]
-        if img_path not in seen_clips:
-            seen_clips[img_path] = AssetClip(
-                path=img_path,
-                duration=IMAGE_VIRTUAL_DURATION,
-                width=width,
-                height=height,
-                is_image=True,
-            )
-        slice_ = ClipSlice(path=img_path, start=0.0, duration=beat.duration)
+    for section_pos, (_sec_idx, group) in enumerate(
+        groupby(beats, key=lambda b: b.section_index)
+    ):
+        group_beats = list(group)
+        slices: list[ClipSlice] = []
+        for beat in group_beats:
+            img_path = image_paths[min(beat.global_index, n_images - 1)]
+            if img_path not in seen_clips:
+                seen_clips[img_path] = AssetClip(
+                    path=img_path,
+                    duration=IMAGE_VIRTUAL_DURATION,
+                    width=width,
+                    height=height,
+                    is_image=True,
+                )
+            slices.append(ClipSlice(path=img_path, start=0.0, duration=beat.duration))
         allocations.append(SectionAllocation(
-            index=beat.global_index,
-            duration=beat.duration,
-            slices=(slice_,),
+            index=section_pos,
+            duration=round(sum(b.duration for b in group_beats), 3),
+            slices=tuple(slices),
         ))
-        section_titles.append(f"{beat.section_title}-拍{beat.beat_index + 1}")
+        # 真实节标题（hook / 正题各节），绝无「-拍N」内部标签。
+        section_titles.append(group_beats[0].section_title)
 
     return AssemblyPlan(
         target_duration=round(duration, 3),

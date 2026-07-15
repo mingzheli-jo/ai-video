@@ -47,13 +47,13 @@ LOWER_THIRD_MAX_DURATION = 4.0
 # manifest.type -> remotion composition id
 _COMPOSITION_BY_TYPE = {
     "intro": "Intro",
+    "hook_opener": "HookOpener",
     "chapter_card": "ChapterCard",
     "lower_third": "LowerThird",
     "key_points": "KeyPoints",
     "quote_card": "QuoteCard",
     "number_pop": "NumberPop",
     "keyword_pop": "KeywordPop",
-    "opening_card": "OpeningCard",
     "golden_card": "GoldenCard",
 }
 
@@ -86,12 +86,11 @@ KEYWORD_POP_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"]
 DENSITY_MIN_GAP_S = 8.0    # 间隔 < 8s → 抽稀（删后出现的事件）
 DENSITY_VACUUM_S = 20.0    # 间隔 > 20s → 补填一个规则抽取的 keyword_pop
 
-# 冷开场卡（复刻对标博主）：视频最开头 1.2s 全屏黑卡，盖住底片开头但不改底片时长。
-OPENING_CARD_DURATION = 1.2
-OPENING_TITLE_MAX_CHARS = 8
-OPENING_POINT_LINES = 2          # 下方要点取第 1、2 节 title
-# 开场卡结尾硬切（2026-07-15 用户点名，对标博主同款）：intro 紧接开场卡结束，无交叠淡入。
-INTRO_START_AFTER_OPENING = OPENING_CARD_DURATION
+# 开屏钩子序列（2026-07-15 用户点名，替代已退役的冷开场黑卡）：透明叠层在画面上、
+# start=0，2~3 条 LLM 钩子短句逐条弹入。时长 min(5s, 首节×0.9)，避免盖过正片开头。
+HOOK_OPENER_MAX_DURATION = 5.0
+HOOK_OPENER_FIRST_SECTION_RATIO = 0.9
+HOOK_OPENER_MAX_LINES = 3        # 最多 3 行钩子短句
 
 # 金句全屏卡（kind=golden emphasis 升级形态）：时长与密度控制。
 GOLDEN_CARD_DURATION = 2.4       # 全屏卡时长（秒，比开场卡更充裕，金句要读完）
@@ -132,14 +131,11 @@ def build_effects_manifest(
     starts = _section_starts(sections)
     effects: list[EffectSpec] = []
 
-    # 冷开场卡放最前（仅当有 publish_titles[0] 主题词时）。它是盖住底片开头 1.2s 的不透明
-    # 黑底 overlay（start=0），不改底片时长；有它时 intro 后移到 1.0s 与开场卡尾部交叠淡入。
-    opening = _build_opening_card(rewrite, sections, fps, accent)
-    if opening is not None:
-        effects.append(opening)
-    intro_start = INTRO_START_AFTER_OPENING if opening is not None else 0.0
-    intro = _build_intro(sections[0], rewrite, fps, accent, start=intro_start)
-    effects.append(intro)
+    # 开屏动效放最前（start=0）：rewrite 有 opening_hooks 时派生透明叠层的 hook_opener
+    # （5 秒钩子序列），否则回落传统 intro（兼容旧 rewrite.json）。二者均占 [0, opener 时长]，
+    # 不改底片时长。
+    opener = _build_opener(sections[0], rewrite, fps, accent)
+    effects.append(opener)
 
     for i, section in enumerate(sections):
         if i == 0:
@@ -163,10 +159,10 @@ def build_effects_manifest(
                 effects.append(_frame_aligned(lt, fps))
 
     total_duration = sum(_section_duration(s) for s in sections)
-    # 富化特效的开屏要点卡紧接 intro 结束落点（intro 后移后要点卡随之顺延，避免与片头重叠）。
+    # 富化特效的开屏要点卡紧接开屏动效结束落点（hook_opener/intro 终点，避免与片头重叠）。
     effects.extend(
         _build_rich_effects(
-            sections, rewrite, intro.start + intro.duration, total_duration, fps, accent
+            sections, rewrite, opener.start + opener.duration, total_duration, fps, accent
         )
     )
 
@@ -233,33 +229,39 @@ def _build_intro(
     )
 
 
-def _opening_theme(rewrite: dict | None) -> str:
-    """开场卡主题词：取 rewrite.publish_titles[0] 截 8 字（无则返回空串=不出开场卡）。"""
+def _opening_hooks(rewrite: dict | None) -> list[str]:
+    """取 rewrite.opening_hooks：去空、截断到 3 条的短句列表；无/非列表返回空列表。"""
     if isinstance(rewrite, dict):
-        titles = rewrite.get("publish_titles")
-        if isinstance(titles, list) and titles and str(titles[0] or "").strip():
-            return _clip_title(str(titles[0]).strip(), OPENING_TITLE_MAX_CHARS)
-    return ""
+        raw = rewrite.get("opening_hooks")
+        if isinstance(raw, list):
+            lines = [str(x).strip() for x in raw if str(x or "").strip()]
+            return lines[:HOOK_OPENER_MAX_LINES]
+    return []
 
 
-def _build_opening_card(
-    rewrite: dict | None, sections: list[dict], fps: int, accent: str
-) -> EffectSpec | None:
-    """冷开场卡：仅当有 publish_titles[0] 主题词时出现。全屏黑底大字（红描边由组件出）+
-    分隔线 + 两行小字要点（取第 1、2 节 title）。start=0、盖住底片开头 1.2s。"""
-    theme = _opening_theme(rewrite)
-    if not theme:
-        return None
-    points = [_section_title(s, i) for i, s in enumerate(sections) if i >= 1][:OPENING_POINT_LINES]
-    return _frame_aligned(
-        EffectSpec(
-            type="opening_card",
-            start=0.0,
-            duration=OPENING_CARD_DURATION,
-            props={"title": theme, "points": points, "accent": accent},
-        ),
-        fps,
-    )
+def _build_opener(
+    first_section: dict, rewrite: dict | None, fps: int, accent: str
+) -> EffectSpec:
+    """开屏动效：opening_hooks 非空 → hook_opener（透明叠层钩子序列，start=0，
+    时长 min(5s, 首节×0.9)）；否则回落传统 intro（旧 rewrite.json 兼容）。"""
+    hooks = _opening_hooks(rewrite)
+    if hooks:
+        first_duration = _section_duration(first_section)
+        duration = min(
+            HOOK_OPENER_MAX_DURATION, first_duration * HOOK_OPENER_FIRST_SECTION_RATIO
+        )
+        if duration <= 0:
+            duration = HOOK_OPENER_MAX_DURATION
+        return _frame_aligned(
+            EffectSpec(
+                type="hook_opener",
+                start=0.0,
+                duration=duration,
+                props={"lines": hooks, "accent": accent},
+            ),
+            fps,
+        )
+    return _build_intro(first_section, rewrite, fps, accent, start=0.0)
 
 
 # 标题截断的标点边界：句末标点保留在标题里，子句标点本身丢弃。
@@ -647,15 +649,12 @@ def _build_rich_effects(
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
     # 金句全屏卡：kind=golden emphasis 单独派生，密度控制 + 保护窗口碰撞检查。
-    # 保护窗口：opening_card / intro / 各章节卡（避免全屏卡与这些固定特效叠加）。
+    # 保护窗口：开屏动效（hook_opener/intro，占 [0, key_points_start]）/ 各章节卡
+    # （避免全屏卡与这些固定特效叠加）。
     golden_events = _derive_golden_events(sections, rewrite_sections, starts)
-    opening_exists = bool(_opening_theme(rewrite))
-    intro_start_t = INTRO_START_AFTER_OPENING if opening_exists else 0.0
     protected: list[tuple[float, float]] = [
-        (intro_start_t, key_points_start),  # intro 时间窗
+        (0.0, key_points_start),  # 开屏动效时间窗
     ]
-    if opening_exists:
-        protected.append((0.0, OPENING_CARD_DURATION))
     for i in range(1, len(sections)):
         protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
     golden_events = _apply_golden_density_control(golden_events, protected, total_duration)

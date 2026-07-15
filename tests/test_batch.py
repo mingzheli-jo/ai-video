@@ -893,7 +893,9 @@ def test_beat_image_gen_appends_style_and_ingests_to_library(tmp_path, monkeypat
                         lambda img, **kw: ingested.append(kw) or (tmp_path / "lib.png"))
 
     assert batch._run_image_gen(job, job_dir) == 0
-    assert gen_prompts == ["城市夜景。测试美漫风"]          # 风格已拼接
+    assert len(gen_prompts) == 1
+    assert gen_prompts[0].startswith("城市夜景。测试美漫风")   # 风格已拼接
+    assert "不得出现任何文字" in gen_prompts[0]              # 禁文字保险已钉进最终提示词
     assert len(ingested) == 1                              # 新图已入库
     assert ingested[0]["category"] == "场景" and ingested[0]["tags"] == ["城市"]
     assert (job_dir / "gen_assets" / "img_00.png").exists()  # gen_assets 照常产出

@@ -53,6 +53,11 @@ export const goldenCardSchema = z.object({
   accent: z.string().default("#e8b84b"),
 });
 
+export const hookOpenerSchema = z.object({
+  lines: z.array(z.string()).min(1),
+  accent: z.string().default("#e8b84b"),
+});
+
 export type IntroProps = z.infer<typeof introSchema>;
 export type ChapterCardProps = z.infer<typeof chapterCardSchema>;
 export type LowerThirdProps = z.infer<typeof lowerThirdSchema>;
@@ -62,6 +67,10 @@ export type NumberPopProps = z.infer<typeof numberPopSchema>;
 export type KeywordPopProps = z.infer<typeof keywordPopSchema>;
 export type OpeningCardProps = z.infer<typeof openingCardSchema>;
 export type GoldenCardProps = z.infer<typeof goldenCardSchema>;
+export type HookOpenerProps = z.infer<typeof hookOpenerSchema>;
+
+// 开屏钩子序列的三色轮换（对标博主：红/黄/白，粗黑描边浮在画面上）。
+export const HOOK_LINE_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"];
 
 // 要点行的循环配色（首色由 accent 覆盖）：金、青、玫红、草绿——深底上都够亮。
 export const LINE_PALETTE = ["#e8b84b", "#7ec8e3", "#e37e9c", "#9ce37e"];

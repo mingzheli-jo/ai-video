@@ -1176,3 +1176,32 @@ def test_build_ordered_assembly_plan_tail_loops_when_images_short(tmp_path):
     slices = [s for a in plan.allocations for s in a.slices]
     assert len(slices) >= 2
     assert all(s.path == only for s in slices)  # 图不足 → 尾部循环用最后一张
+
+
+def test_build_ordered_assembly_plan_groups_beats_into_real_sections(tmp_path):
+    """拍归组回真实节：节数=真实节数（hook+正题），标题无「-拍N」，切片仍按拍序。"""
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    imgs = []
+    for i in range(20):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+    plan = build_ordered_assembly_plan(REWRITE, imgs, target_duration=20.0)
+
+    # 真实节：hook + 第一节 + 第二节 = 3 个 allocation（不再是每拍一个 SectionAllocation）
+    assert len(plan.allocations) == 3
+    assert list(plan.section_titles) == ["hook", "第一节", "第二节"]
+    # 内部「-拍N」标签绝不泄漏进节标题（项目红线）
+    assert all("-拍" not in t for t in plan.section_titles)
+    # index 与节序一一对应（供 _write_plan_json 取 section_titles[index]）
+    assert [a.index for a in plan.allocations] == [0, 1, 2]
+    # 每节至少 1 拍；摊平后第 k 拍仍用第 k 图（分段渲染顺序与图序不变）
+    assert all(len(a.slices) >= 1 for a in plan.allocations)
+    slices = [s for a in plan.allocations for s in a.slices]
+    for k, s in enumerate(slices):
+        assert s.path == imgs[k]
+    # 每节时长 = 该节各拍时长之和；全片总时长守恒
+    for a in plan.allocations:
+        assert a.duration == pytest.approx(sum(s.duration for s in a.slices), abs=1e-6)
+    assert sum(a.duration for a in plan.allocations) == pytest.approx(20.0, abs=0.1)

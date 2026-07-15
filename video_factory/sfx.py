@@ -33,6 +33,8 @@ SFX_BY_TYPE = {
     "keyword_pop": "pop.wav",
     "opening_card": "whoosh.wav",
     "golden_card": "impact.wav",
+    # 开屏钩子序列（替代已退役的冷开场卡）：低频冲击音砸出开场落点。
+    "hook_opener": "impact.wav",
 }
 
 DEFAULT_SFX_VOLUME = 0.35  # 混音时相对主口播的音量（0~1，宁小勿大，避免盖住人声）

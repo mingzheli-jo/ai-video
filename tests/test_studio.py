@@ -12,6 +12,7 @@ batch.STAGE_RUNNERS 使任务瞬时完成/失败，绝不真跑任何阶段模�
 
 import http.client
 import json
+import os
 import threading
 import time
 from http.server import ThreadingHTTPServer
@@ -35,7 +36,8 @@ def server(monkeypatch, tmp_path):
     # 凭据/设置 YAML 都重定向到 tmp，绝不写到项目真实文件
     monkeypatch.setattr(credentials_store, "CREDENTIALS_PATH", tmp_path / "credentials.yaml")
     monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.yaml")
-    monkeypatch.delenv("IMAGE_STYLE_PROMPT", raising=False)
+    for _env in ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
+        monkeypatch.delenv(_env, raising=False)
     for d in (studio_root, studio_root / "uploads", studio_root / "jobs"):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +52,11 @@ def server(monkeypatch, tmp_path):
     finally:
         httpd.shutdown()
         httpd.server_close()
+        # /api/settings 处理器直接写 os.environ（绕过 monkeypatch），而 monkeypatch.delenv
+        # 对「原本不存在」的 env 不注册 undo → 会泄漏到后续测试文件（例如污染 test_subtitles
+        # 读到的 SUBTITLE_FONT_NAME）。这里显式清掉本套设置项 env，保证测试隔离。
+        for _env in ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
+            os.environ.pop(_env, None)
 
 
 def _request(port, method, path, body=None, headers=None):
@@ -523,3 +530,58 @@ def test_page_has_rewrite_prompt_card():
 
     html = studio_ui.render_page()
     assert 'id="rewritePrompt"' in html and 'id="rewritePromptSave"' in html
+
+
+# ---------- 字幕样式设置（字号系数 / 字体族） ----------
+
+def test_meta_exposes_subtitle_font_defaults_and_options(server):
+    _, meta = _json(server["port"], "GET", "/api/meta")
+    assert meta["subtitle_font_size"] == 1.0                 # 默认字号系数
+    assert meta["subtitle_font_name"] == "Microsoft YaHei"   # 默认字体族
+    # 字体白名单暴露给前端下拉（五款中文字体，顺序固定）。
+    assert meta["subtitle_font_options"] == [
+        "Microsoft YaHei", "SimHei", "Source Han Sans SC", "KaiTi", "SimSun",
+    ]
+
+
+def test_settings_save_subtitle_font_size_roundtrip_and_meta(server):
+    port = server["port"]
+    # 保存 1.3 → 立即生效 + 持久化；回显自己的生效系数。
+    status, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_SIZE", "value": "1.3"})
+    assert status == 200 and data["persisted"] is True and data["value"] == "1.3"
+    assert settings_store.load_settings(server["tmp"] / "settings.yaml")["SUBTITLE_FONT_SIZE"] == "1.3"
+    _, meta = _json(port, "GET", "/api/meta")
+    assert meta["subtitle_font_size"] == 1.3
+    # 越界值 5.0 → 钳位到 1.5 回显；清空 → 恢复默认 1.0。
+    _, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_SIZE", "value": "5.0"})
+    assert data["value"] == "1.5"
+    _, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_SIZE", "value": ""})
+    assert data["value"] == "1.0"
+
+
+def test_settings_save_subtitle_font_name_roundtrip_and_meta(server):
+    port = server["port"]
+    status, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_NAME", "value": "SimHei"})
+    assert status == 200 and data["persisted"] is True and data["value"] == "SimHei"
+    assert settings_store.load_settings(server["tmp"] / "settings.yaml")["SUBTITLE_FONT_NAME"] == "SimHei"
+    _, meta = _json(port, "GET", "/api/meta")
+    assert meta["subtitle_font_name"] == "SimHei"
+
+
+def test_settings_subtitle_font_name_arbitrary_falls_back_on_read(server):
+    """白名单拒绝任意字体：存进去的非白名单值在读取（meta/回显）时回落默认。"""
+    port = server["port"]
+    status, data = _json(port, "POST", "/api/settings", {"name": "SUBTITLE_FONT_NAME", "value": "Comic Sans"})
+    assert status == 200
+    assert data["value"] == "Microsoft YaHei"     # 回显已回落默认
+    _, meta = _json(port, "GET", "/api/meta")
+    assert meta["subtitle_font_name"] == "Microsoft YaHei"
+
+
+def test_page_has_subtitle_style_card():
+    from video_factory import studio_ui
+
+    html = studio_ui.render_page()
+    assert 'id="subFontSize"' in html
+    assert 'id="subFontName"' in html
+    assert 'id="subStyleSave"' in html

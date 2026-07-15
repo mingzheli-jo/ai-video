@@ -9,9 +9,11 @@ import { NumberPop } from "./compositions/NumberPop";
 import { KeywordPop } from "./compositions/KeywordPop";
 import { OpeningCard } from "./compositions/OpeningCard";
 import { GoldenCard } from "./compositions/GoldenCard";
+import { HookOpener } from "./compositions/HookOpener";
 import {
   chapterCardSchema,
   goldenCardSchema,
+  hookOpenerSchema,
   introSchema,
   keyPointsSchema,
   keywordPopSchema,
@@ -150,6 +152,19 @@ export const RemotionRoot: React.FC = () => {
         schema={goldenCardSchema}
         defaultProps={{
           text: "核心金句示例",
+          accent: "#e8b84b",
+        }}
+      />
+      <Composition
+        id="HookOpener"
+        component={HookOpener}
+        durationInFrames={150}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={hookOpenerSchema}
+        defaultProps={{
+          lines: ["钩子短句一", "钩子短句二", "钩子短句三"],
           accent: "#e8b84b",
         }}
       />
