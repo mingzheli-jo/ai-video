@@ -149,24 +149,34 @@ def chat_completion(system_prompt: str, user_prompt: str, config: LLMConfig) -> 
             f"不支持的 LLM provider：{provider}（可选 openai / anthropic / deepseek）"
         )
 
-    try:
-        with urlopen(request, timeout=config.timeout_seconds) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = ""
+    # 瞬时网络故障（连接被掐 RemoteDisconnected、半途断连 IncompleteRead、超时、
+    # 连接重置）重试一次再放弃——2026-07-15 真实事故：用户网络单次毛刺杀掉 135s 任务。
+    # 语义错误（HTTP 401/402/429/5xx）不重试：重试无意义且可能重复计费。
+    body = None
+    last_error: Exception | None = None
+    for _attempt in range(2):
         try:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-        except OSError:
-            pass
-        raise LLMProviderError(f"{provider} HTTP {exc.code}：{detail or exc.reason}") from exc
-    except URLError as exc:
-        raise LLMProviderError(f"{provider} 连接失败：{exc.reason}。请检查网络或代理设置。") from exc
-    except (HTTPException, OSError) as exc:
-        # 含 IncompleteRead（响应体半途断连）等：不转掉会裸异常击穿各调用方的
-        # LLMProviderError 降级路径（翻译分块回退、选图回落、改写报错文案）。
-        raise LLMProviderError(f"{provider} 网络传输中断：{exc}。请检查网络后重试。") from exc
-    except json.JSONDecodeError as exc:
-        raise LLMProviderError(f"{provider} 返回了非 JSON 响应。") from exc
+            with urlopen(request, timeout=config.timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except OSError:
+                pass
+            raise LLMProviderError(f"{provider} HTTP {exc.code}：{detail or exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise LLMProviderError(f"{provider} 返回了非 JSON 响应。") from exc
+        except (URLError, HTTPException, OSError) as exc:
+            # 含 RemoteDisconnected/IncompleteRead/超时/重置：不转掉会裸异常击穿各调用方的
+            # LLMProviderError 降级路径（翻译分块回退、选图回落、改写报错文案）。
+            last_error = exc
+    if body is None:
+        reason = getattr(last_error, "reason", None) or last_error
+        raise LLMProviderError(
+            f"{provider} 网络传输中断（已重试 1 次）：{reason}。请检查网络后重试。"
+        ) from last_error
 
     if not isinstance(body, dict):
         raise LLMProviderError(f"{provider} 返回了非预期的 JSON 结构：{str(body)[:200]}")

@@ -147,5 +147,40 @@ def test_chat_completion_converts_incomplete_read_to_provider_error(monkeypatch)
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setattr(llm_mod, "urlopen", lambda req, timeout: _BrokenResponse())
-    with pytest.raises(LLMProviderError, match="网络传输中断"):
+    with pytest.raises(LLMProviderError, match="网络传输中断（已重试 1 次）"):
         chat_completion("s", "u", LLMConfig(provider="deepseek"))
+
+
+def test_chat_completion_retries_once_on_transient_network_error(monkeypatch):
+    """瞬时网络故障（连接被掐）重试一次成功 → 正常返回，不再一次毛刺杀整单
+    （2026-07-15 真实事故：135s 任务死于单次 RemoteDisconnected）。"""
+    import json as _json
+    from http.client import RemoteDisconnected
+
+    from video_factory import llm as llm_mod
+
+    class _GoodResponse:
+        def read(self):
+            return _json.dumps(
+                {"choices": [{"message": {"content": "改写结果"}}]}
+            ).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    calls = []
+
+    def flaky_urlopen(req, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RemoteDisconnected("Remote end closed connection without response")
+        return _GoodResponse()
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(llm_mod, "urlopen", flaky_urlopen)
+    result = chat_completion("s", "u", LLMConfig(provider="deepseek"))
+    assert result == "改写结果"
+    assert len(calls) == 2  # 首次失败 + 重试成功
