@@ -285,3 +285,48 @@ def test_match_beats_count_mismatch_falls_back_none(monkeypatch):
     beats = plan_beats(_beats_rewrite(), [5.0, 5.0])
     monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: "[]")  # 条数不符
     assert match_beats_to_library(beats, []) is None
+
+
+# ---------- 拍级生图入库 + 元数据（2026-07-15 修复回归） ----------
+
+def test_ingest_generated_image_stores_and_registers(tmp_path):
+    from video_factory.image_gen import ingest_generated_image, load_index
+
+    path = ingest_generated_image(
+        b"fake-png-bytes", prompt="城市夜景", category="场景", tags=["城市", "夜晚"],
+        size="1440x2560", library_root=tmp_path,
+    )
+    assert path.exists() and path.parent.name == "场景"     # 落到类目文件夹
+    entries = load_index(tmp_path)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["category"] == "场景" and entry["tags"] == ["城市", "夜晚"]
+    assert entry["size"] == "1440x2560" and entry["prompt"] == "城市夜景"
+
+
+def test_ingest_generated_image_normalizes_bad_category(tmp_path):
+    from video_factory.image_gen import ingest_generated_image, load_index
+
+    ingest_generated_image(b"x", prompt="p", category="不存在的类目", tags=None,
+                           size="1440x2560", library_root=tmp_path)
+    assert load_index(tmp_path)[0]["category"] == "场景"    # 非法类目回落"场景"
+
+
+def test_beat_match_parser_passes_category_and_tags(monkeypatch):
+    import json as _json
+
+    from video_factory.image_gen import match_beats_to_library, plan_beats
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    rewrite = {"hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 10, "visual_hint": ""}]}
+    beats = plan_beats(rewrite, [5.0, 5.0])
+    reply = _json.dumps([
+        {"beat_index": 0, "action": "generate", "file": "", "prompt": "画面A",
+         "category": "人物", "tags": ["西装", "办公室"]},
+        {"beat_index": 1, "action": "generate", "file": "", "prompt": "画面B",
+         "category": "瞎写的", "tags": "不是数组"},
+    ])
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: reply)
+    result = match_beats_to_library(beats, [])
+    assert result[0]["category"] == "人物" and result[0]["tags"] == ["西装", "办公室"]
+    assert result[1]["category"] == "场景" and result[1]["tags"] == []  # 宽容归一

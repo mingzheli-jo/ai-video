@@ -431,6 +431,9 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     generated = 0
     reused = 0
     capped = False
+    # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
+    # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
+    style = image_gen.get_style_prompt()
 
     for match in beat_matches:
         beat_idx = match.get("beat_index", copied)
@@ -462,7 +465,7 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             if not prompt:
                 continue
             try:
-                img_bytes = image_gen.generate_image(prompt, size=size)
+                img_bytes = image_gen.generate_image(f"{prompt}。{style}", size=size)
             except RuntimeError as exc:
                 print(f"生图告警：拍 {beat_idx} 生成失败（{exc}），跳过。")
                 continue
@@ -470,6 +473,19 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             dst.write_bytes(img_bytes)
             copied += 1
             generated += 1
+            # 新图写回图片库并登记 index（库越大命中率越高）；入库失败只告警不阻断
+            # ——图已进 gen_assets，成片不受影响。
+            try:
+                image_gen.ingest_generated_image(
+                    img_bytes,
+                    prompt=prompt,
+                    category=match.get("category") or "",
+                    tags=match.get("tags") or (),
+                    size=size,
+                    library_root=library_root,
+                )
+            except OSError as exc:
+                print(f"生图告警：拍 {beat_idx} 入库失败（{exc}），本单不受影响但该图未积累进图库。")
 
     if copied == 0:
         print("生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）")

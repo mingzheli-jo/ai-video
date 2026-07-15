@@ -864,3 +864,36 @@ def test_voice_speed_garbage_marks_invalid(tmp_path):
     """voice_speed 写成非数字不许击穿整批：resolve_all 记 invalid 继续。"""
     jobs = resolve_all([{"name": "bad", "source": "s", "assets": "a", "voice_speed": "fast"}])
     assert validate_job(jobs[0]) != []
+
+
+# ---------- 拍级生图：风格拼接 + 入库（2026-07-15 修复回归） ----------
+
+def test_beat_image_gen_appends_style_and_ingests_to_library(tmp_path, monkeypatch):
+    """回归两个真实事故：①拍级生成漏拼风格提示词（成片画风跑偏）；
+    ②新图只进 gen_assets 不入库（库养不肥、每单全额重新生图）。"""
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "output": str(job_dir)}, 0)
+
+    matches = [{"beat_index": 0, "action": "generate", "file": None, "prompt": "城市夜景",
+                "category": "场景", "tags": ["城市"]}]
+    gen_prompts, ingested = [], []
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "测试美漫风")
+    monkeypatch.setattr(image_gen, "generate_image",
+                        lambda prompt, size: gen_prompts.append(prompt) or b"png-bytes")
+    monkeypatch.setattr(image_gen, "ingest_generated_image",
+                        lambda img, **kw: ingested.append(kw) or (tmp_path / "lib.png"))
+
+    assert batch._run_image_gen(job, job_dir) == 0
+    assert gen_prompts == ["城市夜景。测试美漫风"]          # 风格已拼接
+    assert len(ingested) == 1                              # 新图已入库
+    assert ingested[0]["category"] == "场景" and ingested[0]["tags"] == ["城市"]
+    assert (job_dir / "gen_assets" / "img_00.png").exists()  # gen_assets 照常产出

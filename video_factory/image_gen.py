@@ -307,6 +307,33 @@ def _store_image(
     return path
 
 
+def ingest_generated_image(
+    image_bytes: bytes,
+    prompt: str,
+    category: str,
+    tags,
+    size: str,
+    library_root: Path | str = LIBRARY_ROOT,
+) -> Path:
+    """拍级路径新生成的图写回图片库并登记 index（与节级共用 _store_image 存储逻辑）。
+
+    2026-07-15 修复：拍级配图上线时只把新图写进任务的 gen_assets/，没有入库——
+    库永远养不肥、每单都全额重新生图，违背「生成入库、下次复用省钱」的既定原则。
+    单图读写一次 index（26 拍量级开销可忽略），换实现简单与幂等（同 hash 不重复落盘）。
+    """
+    root = Path(library_root)
+    entries = load_index(root)
+    item = ImagePlanItem(
+        section_index=-1,  # 拍级图不属于特定节；-1 仅占位，index 登记不含此字段
+        prompt=str(prompt or "").strip(),
+        category=_normalize_category(str(category or "")),
+        tags=_normalize_tags(list(tags) if tags else []),
+    )
+    path = _store_image(image_bytes, item, size, entries, root)
+    save_index(entries, root)
+    return path
+
+
 # --- 编排：先查库、再生图 ----------------------------------------------------
 
 
@@ -515,7 +542,9 @@ def match_beats_to_library(
         "1. 输出 JSON 数组，与输入拍数等长同序。每个元素：\n"
         '   {"beat_index": 数字, "action": "reuse"|"generate", '
         '"file": "库图文件名（action=reuse 时填库中 file 字段原值；否则填空串）", '
-        '"prompt": "中文生图提示词（generate 时 60 字内描述画面主体+构图，禁止画风词；reuse 时填空串）"}\n'
+        '"prompt": "中文生图提示词（generate 时 60 字内描述画面主体+构图，禁止画风词；reuse 时填空串）", '
+        f'"category": "generate 时从：{"、".join(CATEGORIES)} 中选一（reuse 时填空串）", '
+        '"tags": ["generate 时给 3~6 个中文标签（主体/场景/情绪，供图库日后检索复用）；reuse 时空数组"]}\n'
         "2. reuse 要求 file 是图片库里 file 字段的原值；无把握时选 generate。\n"
         "3. 每张库图最多用一次（不同拍要用不同 file）。\n"
         "4. 只输出 JSON 数组，不要其他文字或代码块标记。"
@@ -581,6 +610,9 @@ def _parse_beat_match_response(
             "action": action,
             "file": file_val if action == "reuse" else None,
             "prompt": prompt,
+            # generate 时的入库元数据（缺失/非法宽容归一）：类目回落"场景"、标签可空。
+            "category": _normalize_category(str(item.get("category") or "")),
+            "tags": list(_normalize_tags(item.get("tags"))),
         })
     return results
 
