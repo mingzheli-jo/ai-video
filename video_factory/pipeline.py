@@ -46,6 +46,10 @@ class TTSConfig:
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: int = 120
     edge_rate: str = "+20%"
+    # 用户可调语速（1.0=原速；None=各 provider 默认）。统一钳到 0.5~2.0 后按各家
+    # 契约换算：豆包 v1 speed_ratio 直传、v3 speech_rate=(r-1)*100、openai speed 直传、
+    # edge 覆盖 edge_rate 为 ±N%。
+    speed: float | None = None
     doubao_appid_env: str = "VOLC_TTS_APPID"
     doubao_token_env: str = "VOLC_TTS_TOKEN"
     doubao_cluster: str = "volcano_tts"
@@ -591,14 +595,46 @@ def build_tone_track(plan: VideoPlan, output_path: Path | str) -> Path:
     return output
 
 
+# 语速安全区间：各家 TTS 的共同交集（豆包 v1 0.2~3、v3 ±50%~+100%、openai 0.25~4、
+# edge 无硬限），超出后语音质量/自然度断崖式下滑，统一钳位。
+_TTS_SPEED_MIN = 0.5
+_TTS_SPEED_MAX = 2.0
+
+
+def _tts_speed(tts_config: TTSConfig) -> float | None:
+    """归一化用户语速：None/非法/非正 → None（用各 provider 默认），其余钳到安全区间。"""
+    if tts_config.speed is None:
+        return None
+    try:
+        value = float(tts_config.speed)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return max(_TTS_SPEED_MIN, min(_TTS_SPEED_MAX, value))
+
+
+def _edge_rate_for(tts_config: TTSConfig) -> str:
+    """edge-tts 的 --rate 参数：显式语速换算成 ±N%，未设时沿用 edge_rate 默认。"""
+    speed = _tts_speed(tts_config)
+    if speed is None:
+        return tts_config.edge_rate
+    pct = round((speed - 1) * 100)
+    return f"{'+' if pct >= 0 else ''}{pct}%"
+
+
 def build_openai_speech_payload(source: "VideoPlan | str", tts_config: TTSConfig) -> Dict[str, str]:
-    return {
+    payload = {
         "model": tts_config.model,
         "voice": tts_config.voice,
         "input": _resolve_narration(source),
         "instructions": tts_config.voice_instructions,
         "response_format": "wav",
     }
+    speed = _tts_speed(tts_config)
+    if speed is not None:
+        payload["speed"] = speed
+    return payload
 
 
 DOUBAO_TTS_ENDPOINT = "https://openspeech.bytedance.com/api/v1/tts"
@@ -644,7 +680,7 @@ def build_doubao_speech_payload(source: "VideoPlan | str", tts_config: TTSConfig
         "audio": {
             "voice_type": tts_config.voice,
             "encoding": "mp3",
-            "speed_ratio": 1.0,
+            "speed_ratio": _tts_speed(tts_config) or 1.0,
         },
         "request": {
             "reqid": str(uuid.uuid4()),
@@ -656,12 +692,17 @@ def build_doubao_speech_payload(source: "VideoPlan | str", tts_config: TTSConfig
 
 def build_doubao_v3_payload(source: "VideoPlan | str", tts_config: TTSConfig) -> Dict:
     """v3 单向流式请求体（官方契约：user + req_params.text/speaker/audio_params）。"""
+    audio_params: Dict = {"format": "mp3", "sample_rate": 24000}
+    speed = _tts_speed(tts_config)
+    if speed is not None:
+        # v3 语速契约：speech_rate ∈ [-50, 100]，0=原速、100=2倍、-50=0.5倍。
+        audio_params["speech_rate"] = max(-50, min(100, round((speed - 1) * 100)))
     return {
         "user": {"uid": "video_factory"},
         "req_params": {
             "text": _resolve_narration(source),
             "speaker": tts_config.voice,
-            "audio_params": {"format": "mp3", "sample_rate": 24000},
+            "audio_params": audio_params,
         },
     }
 
@@ -999,7 +1040,7 @@ def _synthesize_edge_voiceover(
         "--voice",
         voice,
         "--rate",
-        config.edge_rate,
+        _edge_rate_for(config),
         "--text",
         narration,
         "--write-media",

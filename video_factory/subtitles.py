@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from video_factory import credentials_store, stage_report
+
 Runner = Callable[..., subprocess.CompletedProcess]
 
 DEFAULT_WIDTH = 1920
@@ -739,33 +741,62 @@ def _audio_duration(audio: Path | None, runner: Runner) -> float:
     return duration
 
 
-def translate_texts_to_english(texts: list[str], char_budget: int) -> list[str]:
-    """把切好行的中文字幕批量翻成英文：一次 LLM 调用、JSON 数组保序返回。
+# 分块翻译参数。一次塞上百条（如 115 条）时 LLM 合并/漏行概率显著升高（2026-07-14
+# 真实事故：115 进 111 出，整批降级纯中文）；小块 + 块级重试把爆炸半径缩到单块。
+_TRANSLATE_CHUNK_SIZE = 24
+_TRANSLATE_ATTEMPTS = 2  # 每块最多尝试次数（首次 + 1 次重试）
 
-    条数不匹配 / 解析失败 / 无凭据都抛异常，由调用方决定降级（生产链路里是
-    降级为纯中文字幕，绝不阻断成片）。惰性导入 llm/rewrite，避免顶层依赖。
+
+def translate_texts_to_english(texts: list[str], char_budget: int) -> tuple[list[str], list[str]]:
+    """把切好行的中文字幕分块翻成英文，返回 (英文行, 告警)。
+
+    每块 ≤_TRANSLATE_CHUNK_SIZE 条、独立 LLM 调用；条数不匹配/解析失败重试一次，
+    仍失败则**该块**回退空串（对应 cue 只显示中文）并留告警——绝不再因个别块失败
+    把整片英文一起拖下水。无 LLM 凭据在进块前就抛异常，由调用方整体降级。
+    惰性导入 llm/rewrite，避免顶层依赖。
     """
     if not texts:
-        return []
-    from video_factory.llm import LLMConfig, chat_completion
+        return [], []
+    from video_factory.llm import LLMConfig, LLMProviderError, chat_completion
     from video_factory.rewrite import resolve_llm_provider
 
     provider = resolve_llm_provider("auto")
     system_prompt = (
         "你是短视频双语字幕翻译。把用户给出的 JSON 数组里的每条中文字幕翻成口语化英文。\n"
         "硬性要求：\n"
-        "1. 输出一个 JSON 字符串数组，与输入等长、同序、逐条对应；\n"
+        "1. 输出一个 JSON 字符串数组，与输入等长、同序、逐条对应，绝不合并或拆分任何一条；\n"
         f"2. 每条尽量不超过 {char_budget} 个字符（含空格），宁可意译精简也不要长句；\n"
         "3. 只输出 JSON 数组本身，不要输出任何其他文字或代码块标记。"
     )
-    user_prompt = json.dumps(texts, ensure_ascii=False)
-    raw = chat_completion(system_prompt, user_prompt, LLMConfig(provider=provider))
-    translated = _parse_json_string_array(raw)
-    if len(translated) != len(texts):
-        raise SubtitlesError(
-            f"翻译条数不匹配：期望 {len(texts)} 条，LLM 返回 {len(translated)} 条。"
-        )
-    return translated
+    lines: list[str] = []
+    warnings: list[str] = []
+    for start in range(0, len(texts), _TRANSLATE_CHUNK_SIZE):
+        chunk = texts[start : start + _TRANSLATE_CHUNK_SIZE]
+        translated: list[str] | None = None
+        last_error = ""
+        for _attempt in range(_TRANSLATE_ATTEMPTS):
+            try:
+                raw = chat_completion(
+                    system_prompt,
+                    json.dumps(chunk, ensure_ascii=False),
+                    LLMConfig(provider=provider),
+                )
+                parsed = _parse_json_string_array(raw)
+            except (SubtitlesError, LLMProviderError) as exc:
+                last_error = str(exc)
+                continue
+            if len(parsed) == len(chunk):
+                translated = parsed
+                break
+            last_error = f"期望 {len(chunk)} 条，LLM 返回 {len(parsed)} 条"
+        if translated is None:
+            chunk_no = start // _TRANSLATE_CHUNK_SIZE + 1
+            warnings.append(
+                f"英文字幕第 {chunk_no} 块（{len(chunk)} 条）翻译失败，该块回退纯中文：{last_error}"
+            )
+            translated = [""] * len(chunk)
+        lines.extend(translated)
+    return lines, warnings
 
 
 def _parse_json_string_array(raw_text: str) -> list[str]:
@@ -799,7 +830,7 @@ def generate_subtitles(
     mode: str = "auto",
     audio: Path | str | None = None,
     runner: Runner | None = None,
-    english: bool = True,
+    english: bool = False,
 ) -> dict:
     """编排：分句 → 定字号 → 生成时间轴 → （可选）翻译英文 → 写 .ass → 烧录 → 落 report。
 
@@ -827,9 +858,13 @@ def generate_subtitles(
     english_lines: list[str] | None = None
     if english:
         try:
-            english_lines = translate_texts_to_english(
+            english_lines, translate_warnings = translate_texts_to_english(
                 [cue.text for cue in single], _english_char_budget(width, height)
             )
+            warnings.extend(translate_warnings)
+            if english_lines and not any(english_lines):
+                # 所有块都失败 → 等价于整体降级，别让全空英文行占排版位置。
+                english_lines = None
         except Exception as exc:  # noqa: BLE001 - 翻译失败必须降级纯中文，不阻断成片
             warnings.append(f"英文字幕翻译失败，已降级为纯中文：{exc}")
 
@@ -880,19 +915,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--mode", default="auto", choices=["auto", "align", "ratio"], help="时间轴模式")
     parser.add_argument(
+        "--english",
+        dest="english",
+        action="store_true",
+        help="开启英文副字幕（中上英下双语，翻译失败自动降级纯中文）。"
+        "2026-07-15 起默认关闭（用户决定不再需要英文），能力保留。",
+    )
+    parser.add_argument(
         "--no-english",
         dest="english",
         action="store_false",
-        help="关闭英文副字幕（默认开：中上英下双语，翻译失败自动降级纯中文）",
+        help="显式关闭英文副字幕（当前默认即关，此开关为兼容保留）",
     )
-    parser.set_defaults(english=True)
+    parser.set_defaults(english=False)
     parser.add_argument("--output", default="video_factory/output/subtitles", help="输出目录")
     args = parser.parse_args(argv)
+    # 补齐凭据（英文副字幕的 LLM 翻译等）：credentials.yaml → 空缺的环境变量。
+    credentials_store.ensure_env_loaded()
 
     try:
         report = _run_cli(args)
     except (SubtitlesError, OSError) as exc:
         print(f"字幕生成失败：{exc}")
+        stage_report.write_stage_error(args.output, "subtitles", f"字幕生成失败：{exc}")
         return 1
 
     print(f"字幕烧录完成：mode={report['mode']}，{report['cue_count']} 条")

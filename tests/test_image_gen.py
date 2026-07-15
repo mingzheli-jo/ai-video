@@ -217,3 +217,71 @@ def test_ensure_section_images_appends_style_prompt(tmp_path, monkeypatch):
     ensure_section_images(REWRITE, size="1080x1920", library_root=tmp_path / "图片")
     assert prompts and all(p.endswith("测试风格XYZ") for p in prompts)  # 风格统一追加在主体之后
     assert all("手机屏幕特写" in prompts[0] for _ in [0])  # 主体提示词仍在
+
+
+# ---------- 拍级配图（P13 任务B：plan_beats / match_beats_to_library） ----------
+
+def _beats_rewrite():
+    return {
+        "hook": "四字钩子",
+        "sections": [{"title": "第一节", "narration": "这一节口播文案正好二十个字用来切拍测试", "visual_hint": ""}],
+    }
+
+
+def test_plan_beats_math_and_narration_coverage():
+    from video_factory.image_gen import plan_beats
+
+    beats = plan_beats(_beats_rewrite(), [8.0, 12.0], beat_seconds=5.0)
+    # hook ceil(8/5)=2 拍×4s；第一节 ceil(12/5)=3 拍×4s → 共 5 拍
+    assert len(beats) == 5
+    assert [b.global_index for b in beats] == [0, 1, 2, 3, 4]
+    assert all(abs(b.duration - 4.0) < 1e-6 for b in beats)
+    # 节文案按字符均分到拍：拼回去必须无丢字
+    sec_beats = [b for b in beats if b.section_index == 1]
+    assert "".join(b.narration_slice for b in sec_beats) == "这一节口播文案正好二十个字用来切拍测试"
+
+
+def test_plan_beats_zero_duration_section_gets_one_beat():
+    from video_factory.image_gen import plan_beats
+
+    beats = plan_beats(_beats_rewrite(), [0.0, 10.0], beat_seconds=5.0)
+    hook_beats = [b for b in beats if b.section_index == 0]
+    assert len(hook_beats) == 1  # 0 秒节退化 1 拍
+
+
+def test_match_beats_returns_none_without_credentials(monkeypatch):
+    from video_factory.image_gen import match_beats_to_library, plan_beats
+
+    for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    beats = plan_beats(_beats_rewrite(), [5.0, 5.0])
+    assert match_beats_to_library(beats, []) is None  # 无凭据 → 回落每节1图
+
+
+def test_match_beats_dedupes_repeated_library_file(monkeypatch):
+    """硬约束：LLM 把同一张库图分给两拍时，后出现的一拍必须改为 generate。"""
+    import json as _json
+
+    from video_factory.image_gen import match_beats_to_library, plan_beats
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    beats = plan_beats(_beats_rewrite(), [5.0, 5.0])  # 2 拍
+    reply = _json.dumps([
+        {"beat_index": 0, "action": "reuse", "file": "场景/img_a.png", "prompt": ""},
+        {"beat_index": 1, "action": "reuse", "file": "场景/img_a.png", "prompt": ""},
+    ])
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: reply)
+    lib = [{"file": "场景/img_a.png", "tags": ["测试"], "prompt": "x"}]
+    result = match_beats_to_library(beats, lib)
+    assert result is not None
+    assert result[0]["action"] == "reuse"
+    assert result[1]["action"] == "generate"  # 重复被代码端强制改生成
+
+
+def test_match_beats_count_mismatch_falls_back_none(monkeypatch):
+    from video_factory.image_gen import match_beats_to_library, plan_beats
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    beats = plan_beats(_beats_rewrite(), [5.0, 5.0])
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: "[]")  # 条数不符
+    assert match_beats_to_library(beats, []) is None

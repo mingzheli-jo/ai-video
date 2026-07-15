@@ -335,19 +335,55 @@ def test_translate_texts_to_english_batch_ordered(monkeypatch):
         return json.dumps(["Line one", "Line two"])
 
     monkeypatch.setattr("video_factory.llm.chat_completion", fake_chat)
-    result = translate_texts_to_english(["第一句", "第二句"], char_budget=40)
-    assert result == ["Line one", "Line two"]
+    lines, warnings = translate_texts_to_english(["第一句", "第二句"], char_budget=40)
+    assert lines == ["Line one", "Line two"]
+    assert warnings == []
     assert "40" in captured["system"]          # 字符预算写进提示词
     assert "第一句" in captured["user"]         # 批量 JSON 输入
 
 
-def test_translate_texts_to_english_count_mismatch_raises(monkeypatch):
+def test_translate_count_mismatch_falls_back_per_chunk(monkeypatch):
+    """回归（2026-07-14 事故：115 进 111 出整批降级）：条数不匹配重试一次后，
+    只有该块回退空串（纯中文），不再抛异常拖垮整片英文。"""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    calls = []
     monkeypatch.setattr(
-        "video_factory.llm.chat_completion", lambda s, u, c: json.dumps(["only one"])
+        "video_factory.llm.chat_completion",
+        lambda s, u, c: calls.append(u) or json.dumps(["only one"]),
     )
-    with pytest.raises(SubtitlesError, match="不匹配"):
-        translate_texts_to_english(["第一句", "第二句"], char_budget=40)
+    lines, warnings = translate_texts_to_english(["第一句", "第二句"], char_budget=40)
+    assert lines == ["", ""]                    # 失败块回退空串
+    assert len(calls) == 2                      # 首次 + 重试一次
+    assert warnings and "回退纯中文" in warnings[0]
+
+
+def test_translate_retry_succeeds_second_attempt(monkeypatch):
+    """首次条数不齐、重试成功 → 无告警、结果完整。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    replies = iter([json.dumps(["bad"]), json.dumps(["One", "Two"])])
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: next(replies))
+    lines, warnings = translate_texts_to_english(["第一句", "第二句"], char_budget=40)
+    assert lines == ["One", "Two"]
+    assert warnings == []
+
+
+def test_translate_chunks_large_input(monkeypatch):
+    """超过块大小的输入按块独立调用：50 条 → 3 次调用（24+24+2），失败只影响所在块。"""
+    from video_factory.subtitles import _TRANSLATE_CHUNK_SIZE
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    sizes = []
+
+    def fake_chat(system, user, config):
+        chunk = json.loads(user)
+        sizes.append(len(chunk))
+        return json.dumps([f"en{i}" for i in range(len(chunk))])
+
+    monkeypatch.setattr("video_factory.llm.chat_completion", fake_chat)
+    texts = [f"第{i}句" for i in range(50)]
+    lines, warnings = translate_texts_to_english(texts, char_budget=40)
+    assert len(lines) == 50 and warnings == []
+    assert sizes == [_TRANSLATE_CHUNK_SIZE, _TRANSLATE_CHUNK_SIZE, 50 - 2 * _TRANSLATE_CHUNK_SIZE]
 
 
 def test_prepare_single_line_cues_idempotent():
@@ -871,3 +907,24 @@ def test_align_collapsed_windows_redistributed():
     # 整体仍被约束在 ASR 时间线范围内
     assert cues[0].start == 0.0
     assert cues[-1].end <= 1.0 + 1e-6
+
+
+def test_english_defaults_off_everywhere(monkeypatch):
+    """2026-07-15 用户决定取消英文字幕：generate_subtitles 与 CLI 默认都必须是关。
+    能力保留（--english 显式开启），默认路径不再发起任何翻译调用。"""
+    import inspect
+
+    from video_factory.subtitles import generate_subtitles
+
+    assert inspect.signature(generate_subtitles).parameters["english"].default is False
+    # CLI 默认：--english 未传 → False；传了 → True
+    import argparse
+
+    from video_factory import subtitles as subs_mod
+
+    called = []
+    monkeypatch.setattr(subs_mod, "_run_cli", lambda args: called.append(args.english) or {
+        "mode": "ratio", "cue_count": 1, "ass": "a.ass", "release": "r.mp4"})
+    subs_mod.main(["--video", "v.mp4", "--text", "你好", "--mode", "ratio", "--output", "o"])
+    subs_mod.main(["--video", "v.mp4", "--text", "你好", "--mode", "ratio", "--output", "o", "--english"])
+    assert called == [False, True]

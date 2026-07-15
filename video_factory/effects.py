@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from video_factory import stage_report
 from video_factory.sfx import (
     DEFAULT_SFX_VOLUME,
     SfxError,
@@ -51,6 +52,8 @@ _COMPOSITION_BY_TYPE = {
     "key_points": "KeyPoints",
     "quote_card": "QuoteCard",
     "number_pop": "NumberPop",
+    "keyword_pop": "KeywordPop",
+    "opening_card": "OpeningCard",
 }
 
 # 开屏要点卡：片头结束后逐行浮现各节标题。
@@ -68,6 +71,26 @@ NUMBER_POP_MAX = 2
 _NUMBER_RE = re.compile(
     r"\d+(?:\.\d+)?%|\d+(?:\.\d+)?(?:步|倍|年|个|条|招|天|分钟|小时|万|亿)"
 )
+
+# 关键词弹出：每节（跳过第 0 节 hook）在节内 40% 处弹一个关键词，1.6s，全片不设上限。
+KEYWORD_POP_OFFSET_RATIO = 0.4
+KEYWORD_POP_DURATION = 1.6
+KEYWORD_MAX_CHARS = 8            # 引号内长词截断上限，太长弹不下
+KEYWORD_TITLE_FALLBACK_CHARS = 6  # 无引号无数字时取节标题头 4-6 字兜底（取上限 6）
+_KEYWORD_QUOTE_RE = re.compile(r"「([^」]+)」")
+
+# 关键词弹出三色轮换（博主风格：红/黄/白，按全片 keyword_pop 序号循环）。
+KEYWORD_POP_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"]
+# 密度控制阈值（秒）：相邻 keyword_pop 事件最小间隔 / 真空补填触发间隔。
+DENSITY_MIN_GAP_S = 8.0    # 间隔 < 8s → 抽稀（删后出现的事件）
+DENSITY_VACUUM_S = 20.0    # 间隔 > 20s → 补填一个规则抽取的 keyword_pop
+
+# 冷开场卡（复刻对标博主）：视频最开头 1.2s 全屏黑卡，盖住底片开头但不改底片时长。
+OPENING_CARD_DURATION = 1.2
+OPENING_TITLE_MAX_CHARS = 8
+OPENING_POINT_LINES = 2          # 下方要点取第 1、2 节 title
+# 开场卡结尾硬切（2026-07-15 用户点名，对标博主同款）：intro 紧接开场卡结束，无交叠淡入。
+INTRO_START_AFTER_OPENING = OPENING_CARD_DURATION
 
 
 class EffectsError(RuntimeError):
@@ -104,7 +127,15 @@ def build_effects_manifest(
     starts = _section_starts(sections)
     effects: list[EffectSpec] = []
 
-    effects.append(_build_intro(sections[0], rewrite, fps, accent))
+    # 冷开场卡放最前（仅当有 publish_titles[0] 主题词时）。它是盖住底片开头 1.2s 的不透明
+    # 黑底 overlay（start=0），不改底片时长；有它时 intro 后移到 1.0s 与开场卡尾部交叠淡入。
+    opening = _build_opening_card(rewrite, sections, fps, accent)
+    if opening is not None:
+        effects.append(opening)
+    intro_start = INTRO_START_AFTER_OPENING if opening is not None else 0.0
+    intro = _build_intro(sections[0], rewrite, fps, accent, start=intro_start)
+    effects.append(intro)
+
     for i, section in enumerate(sections):
         if i == 0:
             continue  # 首节不出章节卡（片头已覆盖开场）。
@@ -127,8 +158,11 @@ def build_effects_manifest(
                 effects.append(_frame_aligned(lt, fps))
 
     total_duration = sum(_section_duration(s) for s in sections)
+    # 富化特效的开屏要点卡紧接 intro 结束落点（intro 后移后要点卡随之顺延，避免与片头重叠）。
     effects.extend(
-        _build_rich_effects(sections, rewrite, effects[0].duration, total_duration, fps, accent)
+        _build_rich_effects(
+            sections, rewrite, intro.start + intro.duration, total_duration, fps, accent
+        )
     )
 
     return {
@@ -176,7 +210,7 @@ def _section_title(section: dict, index: int) -> str:
 
 
 def _build_intro(
-    first_section: dict, rewrite: dict | None, fps: int, accent: str
+    first_section: dict, rewrite: dict | None, fps: int, accent: str, start: float = 0.0
 ) -> EffectSpec:
     first_duration = _section_duration(first_section)
     duration = min(INTRO_MAX_DURATION, first_duration * INTRO_FIRST_SECTION_RATIO)
@@ -186,7 +220,7 @@ def _build_intro(
     return _frame_aligned(
         EffectSpec(
             type="intro",
-            start=0.0,
+            start=start,
             duration=duration,
             props={"title": title, "subtitle": "", "accent": accent},
         ),
@@ -194,17 +228,71 @@ def _build_intro(
     )
 
 
+def _opening_theme(rewrite: dict | None) -> str:
+    """开场卡主题词：取 rewrite.publish_titles[0] 截 8 字（无则返回空串=不出开场卡）。"""
+    if isinstance(rewrite, dict):
+        titles = rewrite.get("publish_titles")
+        if isinstance(titles, list) and titles and str(titles[0] or "").strip():
+            return _clip_title(str(titles[0]).strip(), OPENING_TITLE_MAX_CHARS)
+    return ""
+
+
+def _build_opening_card(
+    rewrite: dict | None, sections: list[dict], fps: int, accent: str
+) -> EffectSpec | None:
+    """冷开场卡：仅当有 publish_titles[0] 主题词时出现。全屏黑底大字（红描边由组件出）+
+    分隔线 + 两行小字要点（取第 1、2 节 title）。start=0、盖住底片开头 1.2s。"""
+    theme = _opening_theme(rewrite)
+    if not theme:
+        return None
+    points = [_section_title(s, i) for i, s in enumerate(sections) if i >= 1][:OPENING_POINT_LINES]
+    return _frame_aligned(
+        EffectSpec(
+            type="opening_card",
+            start=0.0,
+            duration=OPENING_CARD_DURATION,
+            props={"title": theme, "points": points, "accent": accent},
+        ),
+        fps,
+    )
+
+
+# 标题截断的标点边界：句末标点保留在标题里，子句标点本身丢弃。
+_TITLE_SENTENCE_END = "？！。?!"
+_TITLE_CLAUSE_BREAK = "，、；：,;:"
+
+
+def _clip_title(text: str, max_chars: int = INTRO_TITLE_MAX_CHARS) -> str:
+    """标题截断（防悬挂残字）：超预算时优先切到预算内最后一个标点边界。
+
+    2026-07-14 用户红框反馈：hook「…有多牛？一句话…」被 [:12] 硬截成「…有多牛？一」，
+    句尾挂着下一子句的首字「一」，观感像误加的横杠。改为：句末标点（？！。）切在其后
+    保留语气；子句标点（，；：）切在其前丢标点；预算内无任何标点才退回硬截。
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    for i in range(len(head) - 1, 0, -1):
+        ch = head[i]
+        if ch in _TITLE_SENTENCE_END:
+            return head[: i + 1]
+        if ch in _TITLE_CLAUSE_BREAK:
+            return head[:i]
+    return head
+
+
 def _intro_title(rewrite: dict | None) -> str:
     if isinstance(rewrite, dict):
         hook = str(rewrite.get("hook") or "").strip()
         if hook:
-            return hook[:INTRO_TITLE_MAX_CHARS]
+            return _clip_title(hook)
         titles = rewrite.get("publish_titles")
         if isinstance(titles, list):
             for title in titles:
                 text = str(title or "").strip()
                 if text:
-                    return text
+                    return _clip_title(text)
     return "开场"
 
 
@@ -222,17 +310,171 @@ def _build_lower_third(
     )
 
 
+def _section_narration(section: dict, rewrite_sections: list, index: int) -> str:
+    """取某节口播文本：优先计划节自带 narration，缺失则回退 rewrite 对应节
+    （计划把 hook 计为第 0 节，故计划第 i 节对应 rewrite 第 i-1 节）。"""
+    narration = str(section.get("narration") or "")
+    if not narration and index - 1 < len(rewrite_sections) and isinstance(
+        rewrite_sections[index - 1], dict
+    ):
+        narration = str(rewrite_sections[index - 1].get("narration") or "")
+    return narration
+
+
+def _extract_keyword(narration: str, title: str) -> str:
+    """规则抽取本节关键词：「」引号内词 > 数字短语 > 节标题头 4-6 字兜底。"""
+    match = _KEYWORD_QUOTE_RE.search(narration or "")
+    if match and match.group(1).strip():
+        return match.group(1).strip()[:KEYWORD_MAX_CHARS]
+    match = _NUMBER_RE.search(narration or "")
+    if match:
+        return match.group(0)
+    return (title or "").strip()[:KEYWORD_TITLE_FALLBACK_CHARS]
+
+
+def _derive_keyword_events(
+    sections: list[dict],
+    rewrite_sections: list,
+    starts: list[float],
+) -> list[tuple[float, str]]:
+    """为每个非 hook 节生成候选 keyword_pop 落点列表 [(abs_time, text), ...]。
+
+    - 有 emphasis（kind 为 keyword/number/golden）时按均匀分布取落点，最多 3 条/节。
+    - 无 emphasis 时回落现有规则（节内 40% 处），与原逻辑完全一致（向后兼容）。
+    """
+    events: list[tuple[float, str]] = []
+    for i, section in enumerate(sections):
+        if i == 0:
+            continue  # hook 节片头已充分覆盖，跳过
+        sec_start = starts[i]
+        sec_dur = _section_duration(section)
+
+        # plan 第 i 节对应 rewrite 第 i-1 节（plan 把 hook 计为第 0 节）
+        rw_idx = i - 1
+        rw_section = (
+            rewrite_sections[rw_idx]
+            if isinstance(rewrite_sections, list)
+            and rw_idx < len(rewrite_sections)
+            and isinstance(rewrite_sections[rw_idx], dict)
+            else None
+        )
+
+        # 取所有 emphasis 条目（三种 kind 均映射为 keyword_pop，text 即弹出内容）
+        em_texts: list[str] = []
+        if rw_section is not None:
+            for em in (rw_section.get("emphasis") or []):
+                if isinstance(em, dict):
+                    text = str(em.get("text") or "").strip()
+                    if text:
+                        em_texts.append(text)
+        em_texts = em_texts[:3]
+
+        if em_texts:
+            # 均匀分布：N 条 emphasis → 节内 1/(N+1), 2/(N+1), …, N/(N+1) 处
+            n = len(em_texts)
+            for idx, text in enumerate(em_texts):
+                offset = (idx + 1) / (n + 1) * sec_dur
+                events.append((sec_start + offset, text))
+        else:
+            # 回落原有规则：节内 40% 处抽关键词
+            narration = _section_narration(section, rewrite_sections, i)
+            keyword = _extract_keyword(narration, _section_title(section, i))
+            if keyword:
+                events.append((sec_start + sec_dur * KEYWORD_POP_OFFSET_RATIO, keyword))
+
+    return events
+
+
+def _find_fill_event(
+    target_time: float,
+    sections: list[dict],
+    rewrite_sections: list,
+    starts: list[float],
+    existing_events: list[tuple[float, str]],
+) -> tuple[float, str] | None:
+    """在 target_time 附近找一个还没有 keyword_pop 的非 hook 节，规则抽取关键词作真空填充。
+
+    选取「40% 落点与 target_time 最近」且「该落点未被 existing_events 覆盖（容差 1s）」的节。
+    """
+    existing_times = [e[0] for e in existing_events]
+    best_dist = float("inf")
+    best_ev: tuple[float, str] | None = None
+
+    for i, section in enumerate(sections):
+        if i == 0:
+            continue
+        sec_start = starts[i]
+        sec_dur = _section_duration(section)
+        center = sec_start + sec_dur * KEYWORD_POP_OFFSET_RATIO
+        # 跳过该节已有落点的（1s 容差）
+        if any(abs(center - et) < 1.0 for et in existing_times):
+            continue
+        dist = abs(center - target_time)
+        if dist < best_dist:
+            narration = _section_narration(section, rewrite_sections, i)
+            keyword = _extract_keyword(narration, _section_title(section, i))
+            if keyword:
+                best_dist = dist
+                best_ev = (center, keyword)
+
+    return best_ev
+
+
+def _apply_density_control(
+    events: list[tuple[float, str]],
+    sections: list[dict],
+    rewrite_sections: list,
+    starts: list[float],
+) -> list[tuple[float, str]]:
+    """密度控制：抽稀过密事件（< DENSITY_MIN_GAP_S），并补填真空区间（> DENSITY_VACUUM_S）。
+
+    抽稀规则：按时间升序，与前一保留事件间隔 < DENSITY_MIN_GAP_S 的事件被跳过。
+    补填规则：单轮扫描 kept 中所有相邻对，> DENSITY_VACUUM_S 时在中点插入规则抽取的词。
+    关键设计：补填时把整个 kept 列表（全部保留事件）一起传给 _find_fill_event，
+    确保已被 kept 覆盖的节不会被重复选中，只有真正没有事件的节才被填入。
+    """
+    if not events:
+        return events
+
+    # 按时间升序排列
+    events = sorted(events, key=lambda e: e[0])
+
+    # Pass 1：抽稀（保留间隔 >= DENSITY_MIN_GAP_S 的事件）
+    kept: list[tuple[float, str]] = [events[0]]
+    for ev in events[1:]:
+        if ev[0] - kept[-1][0] >= DENSITY_MIN_GAP_S:
+            kept.append(ev)
+
+    # Pass 2：单轮真空补填。
+    # 把全部 kept 事件传给 _find_fill_event，让它跳过所有已被覆盖的节，
+    # 只在没有任何事件的节里找填充点——避免填出与 kept 重复的位置。
+    fills: list[tuple[float, str]] = []
+    for i in range(1, len(kept)):
+        prev_time = kept[i - 1][0]
+        cur_time = kept[i][0]
+        if cur_time - prev_time > DENSITY_VACUUM_S:
+            mid = (prev_time + cur_time) / 2
+            # 让 _find_fill_event 看到所有已有事件（kept + 本轮已收集的 fills）
+            fill = _find_fill_event(mid, sections, rewrite_sections, starts, kept + fills)
+            if fill is not None:
+                fills.append(fill)
+
+    # 合并 kept + fills，按时间升序
+    return sorted(kept + fills, key=lambda e: e[0])
+
+
 def _build_rich_effects(
     sections: list[dict],
     rewrite: dict | None,
-    intro_duration: float,
+    key_points_start: float,
     total_duration: float,
     fps: int,
     accent: str,
 ) -> list[EffectSpec]:
-    """三个"丰富化"特效的派生（2026-07-14 用户点名新增，默认全开）：
-    开屏要点卡（片头结束后逐行浮现各节标题）、金句卡（55% 进度、避开章节卡窗口）、
-    数字强调（每节口播首个关键数字，全片最多 2 个）。"""
+    """"丰富化"特效派生（默认全开）：开屏要点卡（intro 结束后逐行浮现各节标题）、
+    金句卡（55% 进度、避开章节卡窗口）、数字强调（每节首个关键数字，全片最多 2 个）、
+    关键词弹出（emphasis 均匀分布优先；无 emphasis 回落节内 40% 规则；密度控制+三色轮换）。
+    """
     rich: list[EffectSpec] = []
 
     # 开屏要点卡：至少 2 节才有"要点列表"的意义。第 0 节是开场 hook（片头已覆盖，
@@ -248,7 +490,7 @@ def _build_rich_effects(
         rich.append(_frame_aligned(
             EffectSpec(
                 type="key_points",
-                start=intro_duration,
+                start=key_points_start,
                 duration=duration,
                 props={"lines": lines, "accent": accent},
             ),
@@ -293,9 +535,7 @@ def _build_rich_effects(
             break
         if i == 0:
             continue
-        narration = str(section.get("narration") or "")
-        if not narration and i - 1 < len(rewrite_sections) and isinstance(rewrite_sections[i - 1], dict):
-            narration = str(rewrite_sections[i - 1].get("narration") or "")
+        narration = _section_narration(section, rewrite_sections, i)
         match = _NUMBER_RE.search(narration)
         if not match:
             continue
@@ -309,6 +549,22 @@ def _build_rich_effects(
             fps,
         ))
         count += 1
+
+    # 关键词弹出：emphasis 均匀分布优先，无 emphasis 回落规则抽取，密度控制，三色轮换。
+    keyword_events = _derive_keyword_events(sections, rewrite_sections, starts)
+    keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
+    for color_idx, (kw_start, keyword) in enumerate(keyword_events):
+        color = KEYWORD_POP_COLORS[color_idx % len(KEYWORD_POP_COLORS)]
+        rich.append(_frame_aligned(
+            EffectSpec(
+                type="keyword_pop",
+                start=kw_start,
+                duration=KEYWORD_POP_DURATION,
+                props={"keyword": keyword, "accent": accent, "color": color},
+            ),
+            fps,
+        ))
+
     return rich
 
 
@@ -445,6 +701,7 @@ def overlay_effects(
     sfx_enabled: bool = False,
     sfx_volume: float = DEFAULT_SFX_VOLUME,
     sfx_dir: Path | str | None = None,
+    transition_points: list[float] | None = None,
 ) -> Path:
     """把若干带 alpha 的特效片段逐层级联 overlay 到原片上。
 
@@ -454,6 +711,8 @@ def overlay_effects(
 
     effects: [{"path": Path, "start": float, "type": str}]，每条按 enable='between(t,start,end)'
     限定显示窗口。end 由片段自身时长决定（ffprobe 探测；探测不到则退化为长窗口）。
+    transition_points: 来自 assembly_plan 的转场时刻列表；sfx_enabled 时给每个转场点混一声
+    transition whoosh（复用同一 adelay 混音管线）。
     """
     base_video = Path(base_video)
     output = Path(output)
@@ -482,6 +741,7 @@ def overlay_effects(
     audio_filter, sfx_inputs, sfx_warnings = _build_sfx_audio(
         base_video, kept, sfx_enabled, sfx_volume, sfx_dir,
         base_input_offset=1 + len(kept), runner=runner,
+        transition_points=transition_points,
     )
     if sfx_warnings:
         _append_warnings(output.parent, sfx_warnings)
@@ -524,11 +784,13 @@ def _build_sfx_audio(
     sfx_dir: Path | str | None,
     base_input_offset: int,
     runner: Runner,
+    transition_points: list[float] | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """构造特效音的音频 filter 片段与额外 ffmpeg 输入。
 
     返回 (audio_filter, extra_inputs, warnings)。audio_filter 为空串表示不混音效
     （未开启 / 无音效文件 / 底片无音轨），调用方回退到 -c:a copy 直通。
+    转场点也并进同一 items 列表（type=transition），复用后续的 adelay/amix 管线。
     """
     warnings: list[str] = []
     if not sfx_enabled:
@@ -538,6 +800,11 @@ def _build_sfx_audio(
         path = resolve_sfx_path(effect.get("type"), sfx_dir)
         if path is not None:
             items.append((float(effect.get("start") or 0.0), path))
+    # 转场 whoosh：assembly_plan 的每个转场点混一声（音效文件缺失就跳过这一声，不阻断）。
+    for point in transition_points or []:
+        path = resolve_sfx_path("transition", sfx_dir)
+        if path is not None:
+            items.append((float(point), path))
     if not items:
         warnings.append("特效音已开启但未找到任何音效文件（assets/sfx/ 缺失或类型无对应），已跳过。")
         return "", [], warnings
@@ -876,9 +1143,12 @@ def main(argv: list[str] | None = None) -> int:
             release,
             sfx_enabled=args.sfx,
             sfx_volume=args.sfx_volume,
+            # 转场点来自 P2 的 assembly_plan.json（xfade 时写入），给每个转场配一声 whoosh。
+            transition_points=plan.get("transition_points") or [],
         )
     except (EffectsError, OSError) as exc:
         print(f"特效层失败：{exc}")
+        stage_report.write_stage_error(args.output, "effects", f"特效层失败：{exc}")
         return 1
 
     print(f"特效层完成：渲染 {len(rendered)} 条特效")

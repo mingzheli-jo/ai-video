@@ -399,3 +399,192 @@ def test_resolve_llm_provider_auto_without_any_key_raises(monkeypatch):
         monkeypatch.delenv(env, raising=False)
     with pytest.raises(RewriteError, match="未配置任何 LLM 凭据"):
         resolve_llm_provider("auto")
+
+
+def test_main_loads_credentials_yaml_before_llm(monkeypatch, tmp_path):
+    """回归（2026-07-14 事故）：CLI 必须在解析 LLM provider 前加载 credentials.yaml——
+    此前 CLI 完全不读 yaml，服务启动后才配的 key 在阶段进程里不可见，
+    rewrite 白跑 150s whisper 转写后报「未配置任何 LLM 凭据」。"""
+    from video_factory import credentials_store
+    from video_factory import rewrite as rewrite_mod
+
+    for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    called = []
+    monkeypatch.setattr(credentials_store, "ensure_env_loaded", lambda: called.append(True) or [])
+    # 无凭据时 main 会在 resolve_llm_provider 处失败返回 1——但 ensure_env_loaded 必须已被调用。
+    code = rewrite_mod.main(["--text", "原始文案内容", "--output", str(tmp_path)])
+    assert code == 1
+    assert called == [True]
+
+
+def test_main_writes_stage_error_file_on_failure(monkeypatch, tmp_path):
+    """回归：rewrite 失败时要把原因落盘 rewrite_error.txt，供 batch 带进任务看板。"""
+    from video_factory import rewrite as rewrite_mod
+
+    for env in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    code = rewrite_mod.main(["--text", "原始文案内容", "--output", str(tmp_path)])
+    assert code == 1
+    body = (tmp_path / "rewrite_error.txt").read_text(encoding="utf-8")
+    assert "未配置任何 LLM 凭据" in body
+
+
+def test_main_writes_source_transcript_before_llm(monkeypatch, tmp_path):
+    """rewrite 阶段落盘原文案 source_transcript.txt：供核查 AI 改写质量的对照物，
+    也保住昂贵的转写成果。即便 LLM 失败也应已落盘（调 LLM 之前先写）。"""
+    from video_factory.llm import LLMProviderError
+    from video_factory import rewrite as rewrite_mod
+
+    def boom(system, user, config):
+        raise LLMProviderError("模拟 LLM 失败")
+
+    monkeypatch.setattr("video_factory.rewrite.chat_completion", boom)
+    code = rewrite_mod.main(
+        ["--text", "原始视频文案内容", "--provider", "openai", "--output", str(tmp_path)]
+    )
+
+    assert code == 1  # LLM 失败，主流程返回 1
+    saved = (tmp_path / "source_transcript.txt").read_text(encoding="utf-8")
+    assert saved == "原始视频文案内容"  # 但原文案已在调 LLM 之前落盘
+
+
+# ============================================================
+# 任务A：LLM 强调计划 - emphasis 解析兼容性
+# ============================================================
+
+
+from video_factory.rewrite import _parse_emphasis_items  # noqa: E402
+
+
+def test_parse_emphasis_items_tolerates_none():
+    """旧 rewrite.json 无 emphasis 字段 → 空元组（向后兼容）。"""
+    assert _parse_emphasis_items(None) == ()
+
+
+def test_parse_emphasis_items_tolerates_non_list():
+    """emphasis 是非列表（如字符串/数字）→ 空元组（宽容处理）。"""
+    assert _parse_emphasis_items("keyword") == ()
+    assert _parse_emphasis_items(42) == ()
+
+
+def test_parse_emphasis_items_empty_list():
+    """空列表 → 空元组。"""
+    assert _parse_emphasis_items([]) == ()
+
+
+def test_parse_emphasis_items_all_kinds():
+    """三种 kind 均被接受，text 正确保留。"""
+    raw = [
+        {"text": "核心动作", "kind": "keyword"},
+        {"text": "3倍收益", "kind": "number"},
+        {"text": "坚持就是胜利", "kind": "golden"},
+    ]
+    result = _parse_emphasis_items(raw)
+    assert len(result) == 3
+    assert result[0] == {"text": "核心动作", "kind": "keyword"}
+    assert result[1] == {"text": "3倍收益", "kind": "number"}
+    assert result[2] == {"text": "坚持就是胜利", "kind": "golden"}
+
+
+def test_parse_emphasis_items_truncates_text_to_10():
+    """text 超过 10 字时截断到 10 字（Remotion 弹字空间有限）。"""
+    raw = [{"text": "这是一段超长的强调文字超过十个字符", "kind": "keyword"}]
+    result = _parse_emphasis_items(raw)
+    assert len(result) == 1
+    assert len(result[0]["text"]) <= 10
+
+
+def test_parse_emphasis_items_caps_at_3():
+    """超过 3 条时只保留前 3 条（每节最多 3 个弹字动效）。"""
+    raw = [{"text": f"词{i}", "kind": "keyword"} for i in range(6)]
+    result = _parse_emphasis_items(raw)
+    assert len(result) == 3
+    assert result[0]["text"] == "词0"
+    assert result[2]["text"] == "词2"
+
+
+def test_parse_emphasis_items_normalizes_unknown_kind():
+    """未知 kind（如 'special'）→ 回落为 'keyword'。"""
+    raw = [{"text": "重点词", "kind": "special_unknown"}]
+    result = _parse_emphasis_items(raw)
+    assert result[0]["kind"] == "keyword"
+
+
+def test_parse_emphasis_items_skips_non_dict_elements():
+    """列表里的非 dict 元素直接跳过（宽容解析）。"""
+    raw = ["字符串", None, {"text": "有效词", "kind": "keyword"}, 42]
+    result = _parse_emphasis_items(raw)
+    assert len(result) == 1
+    assert result[0]["text"] == "有效词"
+
+
+def test_parse_emphasis_items_skips_empty_text():
+    """text 为空字符串时跳过该条（空弹字无意义）。"""
+    raw = [{"text": "", "kind": "keyword"}, {"text": "  ", "kind": "golden"}, {"text": "好", "kind": "keyword"}]
+    result = _parse_emphasis_items(raw)
+    assert len(result) == 1
+    assert result[0]["text"] == "好"
+
+
+def test_rewrite_section_emphasis_defaults_to_empty_tuple():
+    """RewriteSection 默认 emphasis 为空元组（旧代码创建的 section 向后兼容）。"""
+    from video_factory.rewrite import RewriteSection
+
+    section = RewriteSection(index=0, title="标题", narration="口播", visual_hint="画面")
+    assert section.emphasis == ()
+
+
+def test_rewrite_copy_parses_emphasis_from_llm_reply(monkeypatch):
+    """LLM 回复带 emphasis 时，解析进 RewriteSection 并可通过 rewrite_result_to_dict 序列化。"""
+    reply_with_emphasis = {
+        "hook": "三秒钩子。",
+        "sections": [
+            {
+                "title": "第一步",
+                "narration": "先把选题定死在一个问题上。",
+                "visual_hint": "操作录屏",
+                "emphasis": [
+                    {"text": "选题定死", "kind": "keyword"},
+                    {"text": "1个问题", "kind": "number"},
+                ],
+            },
+            {
+                "title": "第二步",
+                "narration": "开头直接给结果，不做铺垫。",
+                "visual_hint": "数据截图",
+                # 无 emphasis 字段 → 向后兼容，应等同于空
+            },
+        ],
+        "publish_titles": ["标题一"],
+        "notes": "",
+    }
+    monkeypatch.setattr(
+        "video_factory.rewrite.chat_completion",
+        lambda system, user, config: json.dumps(reply_with_emphasis, ensure_ascii=False),
+    )
+    result = rewrite_copy("原始文案", LLMConfig(provider="openai"), target_duration_seconds=60)
+
+    # 第一节 emphasis 解析正确
+    assert len(result.sections[0].emphasis) == 2
+    assert result.sections[0].emphasis[0] == {"text": "选题定死", "kind": "keyword"}
+    assert result.sections[0].emphasis[1] == {"text": "1个问题", "kind": "number"}
+    # 第二节无 emphasis → 空元组（向后兼容）
+    assert result.sections[1].emphasis == ()
+
+    # rewrite_result_to_dict 序列化包含 emphasis
+    d = rewrite_result_to_dict(result)
+    assert d["sections"][0]["emphasis"] == [
+        {"text": "选题定死", "kind": "keyword"},
+        {"text": "1个问题", "kind": "number"},
+    ]
+    assert d["sections"][1]["emphasis"] == []
+
+
+def test_build_rewrite_prompts_includes_emphasis_guidance():
+    """system_prompt 包含 emphasis 字段说明（keyword/number/golden 三种 kind）。"""
+    system_prompt, _ = build_rewrite_prompts("原始文案", target_duration_seconds=90)
+    assert "emphasis" in system_prompt
+    assert "keyword" in system_prompt
+    assert "number" in system_prompt
+    assert "golden" in system_prompt

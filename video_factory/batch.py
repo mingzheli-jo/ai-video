@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from video_factory import credentials_store, stage_report
 from video_factory.assemble import ASPECT_PRESETS, FIT_MODES
 from video_factory.rewrite_styles import STYLES
 
@@ -91,6 +92,9 @@ class ResolvedJob:
     # 特效音总开关（默认开：为片头/章节卡/花字条配音效）与音量（None=用 effects 默认 0.35）。
     sfx: bool = True
     sfx_volume: float | None = None
+    # 配音语速（None=默认；0.5~2.0，1.0=原速）。仅对现场 TTS 生效；分镜/字幕以
+    # 音频时长为轴自动跟随，无需额外字段。
+    voice_speed: float | None = None
     # 视觉来源：video=用上传的视频素材目录（默认，向后兼容）；ai_image=豆包生图为每节配图。
     visual_source: str = "video"
     # resolve 阶段字段解析失败的错误（如 duration 非数字）；非空即整个 job 记 invalid。
@@ -107,6 +111,9 @@ _GEN_SIZE_BY_ASPECT = {
     "1:1": "2048x2048",
     "3:4": "1536x2048",
 }
+
+# 拍级配图模式：单次批量最多生成图片数（生成超出部分截断并告警，复用库图不计入此限）。
+MAX_GENERATED_PER_JOB = 60
 
 
 def _normalize_visual_source(value) -> str:
@@ -165,6 +172,7 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         sfx=bool(_pick(raw, "sfx", None, True)),
         sfx_volume=raw.get("sfx_volume"),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
+        voice_speed=float(raw["voice_speed"]) if raw.get("voice_speed") not in (None, "") else None,
     )
 
 
@@ -200,6 +208,8 @@ def validate_job(job: ResolvedJob) -> list[str]:
         errors.append(f"style 非法：{job.style}。可选值：{options}。")
     if job.llm and job.llm not in ("auto", "openai", "anthropic", "deepseek"):
         errors.append(f"llm 非法：{job.llm}。可选值：auto、anthropic、deepseek、openai。")
+    if job.voice_speed is not None and not (0.5 <= job.voice_speed <= 2.0):
+        errors.append(f"voice_speed 非法：{job.voice_speed}。有效范围 0.5~2.0（1.0=原速）。")
     if job.aspect not in VALID_ASPECTS:
         options = "、".join(sorted(VALID_ASPECTS))
         errors.append(f"aspect 非法：{job.aspect}。可选值：{options}。")
@@ -244,10 +254,16 @@ def build_assemble_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
             argv += ["--tts", job.tts]
         if job.voice:
             argv += ["--voice", job.voice]
+        if job.voice_speed is not None:
+            # 语速只对现场 TTS 有意义（复用现成配音 --audio 时变速会毁成品，不传）。
+            argv += ["--voice-speed", str(job.voice_speed)]
     if job.bgm:
         argv += ["--bgm", job.bgm]
         if job.bgm_volume is not None:
             argv += ["--bgm-volume", str(job.bgm_volume)]
+    # 拍级配图模式：让 assemble 按拍序分配图片（而非扫描池随机对应）。
+    if job.visual_source == "ai_image":
+        argv += ["--ordered-assets"]
     argv += ["--output", str(job_dir)]
     return argv
 
@@ -319,26 +335,24 @@ def _run_rewrite(job: ResolvedJob, job_dir: Path) -> int:
     return rewrite.main(build_rewrite_argv(job, job_dir))
 
 
-def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
-    """ai_image 模式的生图阶段：按 rewrite 各节生图（库命中复用），拷进 gen_assets/
-    按节序命名 img_NN，供 assemble 当素材池扫描。无 ARK/LLM 凭据等硬失败返回非 0。"""
+def _run_image_gen_section_fallback(
+    rewrite: dict, size: str, gen_dir: Path, job_dir: Path
+) -> int:
+    """节级配图回落路径：每节 1 张，按 ensure_section_images 选库/生图后按序拷贝。
+
+    当拍级路径（match_beats_to_library）无凭据或解析失败时调用，行为与原实现完全一致。
+    """
     from video_factory import image_gen
 
     try:
-        rewrite = json.loads((job_dir / "rewrite.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"生图失败：无法读取 rewrite.json（{exc}）")
-        return 1
-    size = _GEN_SIZE_BY_ASPECT.get(job.aspect, image_gen.DEFAULT_SIZE)
-    try:
         report = image_gen.ensure_section_images(rewrite, size=size)
-    except RuntimeError as exc:  # ImageGenError / RewriteError（缺 ARK/LLM 凭据、条数不齐等）
+    except RuntimeError as exc:
         print(f"生图失败：{exc}")
+        stage_report.write_stage_error(job_dir, "image_gen", f"生图失败：{exc}")
         return 1
 
-    gen_dir = job_dir / "gen_assets"
     gen_dir.mkdir(parents=True, exist_ok=True)
-    for old in gen_dir.glob("img_*"):  # 重跑幂等：清掉上轮拷贝
+    for old in gen_dir.glob("img_*"):
         try:
             old.unlink()
         except OSError:
@@ -356,8 +370,114 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
         print(f"生图告警：{warning}")
     if copied == 0:
         print("生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）")
+        stage_report.write_stage_error(
+            job_dir, "image_gen", "生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）"
+        )
         return 1
-    print(f"生图完成：{copied} 张（新生成 {report.get('generated', 0)}、库复用 {report.get('reused', 0)}）")
+    print(f"生图完成（节级模式）：{copied} 张（新生成 {report.get('generated', 0)}、库复用 {report.get('reused', 0)}）")
+    return 0
+
+
+def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
+    """ai_image 模式生图阶段：优先走拍级路径（plan_beats → match_beats_to_library），
+    无凭据或解析失败时自动回落节级路径（ensure_section_images）。
+
+    拍级路径产出 gen_assets/img_NN（N=全局拍序），供 assemble --ordered-assets 按序分配；
+    节级回落产出同样文件名前缀，assemble --ordered-assets 仍可读取（拍数缩减为节数）。
+    超过 MAX_GENERATED_PER_JOB 的生成请求截断并告警（库复用不计入此限）。
+    """
+    from video_factory import image_gen
+
+    try:
+        rewrite_data = json.loads((job_dir / "rewrite.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"生图失败：无法读取 rewrite.json（{exc}）")
+        stage_report.write_stage_error(job_dir, "image_gen", f"生图失败：无法读取 rewrite.json（{exc}）")
+        return 1
+
+    size = _GEN_SIZE_BY_ASPECT.get(job.aspect, image_gen.DEFAULT_SIZE)
+    gen_dir = job_dir / "gen_assets"
+
+    # 尝试拍级路径（需要 LLM 凭据 + image_gen 新接口）。
+    try:
+        from video_factory.image_gen import (
+            compute_section_durations,
+            match_beats_to_library,
+            plan_beats,
+        )
+
+        section_durs = compute_section_durations(rewrite_data, float(job.duration))
+        beats = plan_beats(rewrite_data, section_durs)
+        library_root = image_gen.LIBRARY_ROOT
+        library_index = image_gen.load_index(library_root)
+        beat_matches = match_beats_to_library(beats, library_index, library_root)
+    except Exception:
+        beat_matches = None  # 任何异常均回落节级
+
+    if beat_matches is None:
+        # 无凭据 / 解析失败：回落节级配图（每节 1 张）。
+        print("生图：拍级匹配不可用（无凭据或解析失败），回落到节级配图模式。")
+        return _run_image_gen_section_fallback(rewrite_data, size, gen_dir, job_dir)
+
+    # 拍级路径：生成 / 复用图片并拷到 gen_assets/img_NN。
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    for old in gen_dir.glob("img_*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    copied = 0
+    generated = 0
+    reused = 0
+    capped = False
+
+    for match in beat_matches:
+        beat_idx = match.get("beat_index", copied)
+        action = match.get("action", "generate")
+        dst_prefix = gen_dir / f"img_{beat_idx:02d}"
+
+        if action == "reuse":
+            file_rel = match.get("file") or ""
+            src = Path(library_root) / file_rel if file_rel else None
+            if src and src.exists():
+                dst = dst_prefix.with_suffix(src.suffix.lower() or ".png")
+                dst.write_bytes(src.read_bytes())
+                copied += 1
+                reused += 1
+                continue
+            # 文件缺失：降级为 generate（下面接着处理）。
+            action = "generate"
+
+        if action == "generate":
+            if generated >= MAX_GENERATED_PER_JOB:
+                if not capped:
+                    print(
+                        f"生图告警：生成张数达上限 {MAX_GENERATED_PER_JOB}，"
+                        "后续拍位图片截断（不影响 assemble 运行，尾部循环最后一张）。"
+                    )
+                    capped = True
+                continue
+            prompt = match.get("prompt") or ""
+            if not prompt:
+                continue
+            try:
+                img_bytes = image_gen.generate_image(prompt, size=size)
+            except RuntimeError as exc:
+                print(f"生图告警：拍 {beat_idx} 生成失败（{exc}），跳过。")
+                continue
+            dst = dst_prefix.with_suffix(".png")
+            dst.write_bytes(img_bytes)
+            copied += 1
+            generated += 1
+
+    if copied == 0:
+        print("生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）")
+        stage_report.write_stage_error(
+            job_dir, "image_gen", "生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）"
+        )
+        return 1
+    print(f"生图完成（拍级模式）：{copied} 张（新生成 {generated}、库复用 {reused}，共 {len(beats)} 拍）")
     return 0
 
 
@@ -466,6 +586,8 @@ def _clear_stale_outputs(job_dir: Path) -> None:
             (job_dir / name).unlink()
         except OSError:  # 含 FileNotFoundError：不存在即无需清
             pass
+    # 上一轮的 <stage>_error.txt 也要清，防旧错误串进本轮报告。
+    stage_report.clear_stage_errors(job_dir)
 
 
 def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> JobReport:
@@ -513,12 +635,18 @@ def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> 
                 elapsed_seconds=time.monotonic() - started,
             )
         if code != 0:
+            # 阶段失败时回读它落盘的 <stage>_error.txt，把真实原因带进报告/任务看板
+            # （阶段的 print 只在服务终端可见，光给退出码用户无从排障）。
+            detail = stage_report.read_stage_error(job_dir, stage)
+            error = f"{stage} 阶段返回非 0 退出码：{code}"
+            if detail:
+                error = f"{error}——{detail}"
             return JobReport(
                 name=job.name,
                 status="failed",
                 platform=job.platform,
                 stage_failed=stage,
-                error=f"{stage} 阶段返回非 0 退出码：{code}",
+                error=error,
                 outputs=_collect_outputs(job, job_dir),
                 elapsed_seconds=time.monotonic() - started,
             )
@@ -686,6 +814,9 @@ def main(argv: list[str] | None = None) -> int:
         help="batch_report.json 输出目录",
     )
     args = parser.parse_args(argv)
+    # 补齐凭据：credentials.yaml → 空缺的环境变量。各阶段 main 也各自兜底，
+    # 这里再兜一层是让 dry-run 等 batch 自身路径也有一致的环境视角。
+    credentials_store.ensure_env_loaded()
 
     try:
         raw_jobs = load_jobs(args.jobs)

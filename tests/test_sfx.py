@@ -52,7 +52,8 @@ def test_ensure_default_pack_skips_existing_generates_missing(tmp_path, monkeypa
     monkeypatch.setattr("video_factory.sfx.shutil.which", lambda name: "/usr/bin/ffmpeg")
     generated = ensure_default_pack(d, runner=fake_run)
 
-    assert {p.name for p in generated} == {"pop.wav", "swoosh.wav"}  # 只补缺失
+    # 只补缺失：whoosh 已存在不动，pop/swoosh/transition 三个缺失的都补上。
+    assert {p.name for p in generated} == {"pop.wav", "swoosh.wav", "transition.wav"}
     assert (d / "whoosh.wav").read_bytes() == b"already"  # 尊重用户替换，不覆盖
 
 
@@ -60,3 +61,23 @@ def test_ensure_default_pack_raises_without_ffmpeg(tmp_path, monkeypatch):
     monkeypatch.setattr("video_factory.sfx.shutil.which", lambda name: None)
     with pytest.raises(SfxError, match="ffmpeg"):
         ensure_default_pack(tmp_path / "sfx")
+
+
+def test_transition_type_maps_to_transition_wav(tmp_path):
+    # 转场 whoosh：新增的 transition 类型映射到独立的 transition.wav。
+    assert SFX_BY_TYPE["transition"] == "transition.wav"
+    d = tmp_path / "sfx"
+    d.mkdir()
+    (d / "transition.wav").write_bytes(b"x")
+    assert resolve_sfx_path("transition", d) == d / "transition.wav"
+
+
+def test_ensure_default_pack_synthesizes_transition(tmp_path, monkeypatch):
+    # 空目录 → 应把 transition.wav 也合成出来（转场特效音开箱即用）。
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"generated")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("video_factory.sfx.shutil.which", lambda name: "/usr/bin/ffmpeg")
+    generated = ensure_default_pack(tmp_path / "sfx", runner=fake_run)
+    assert "transition.wav" in {p.name for p in generated}

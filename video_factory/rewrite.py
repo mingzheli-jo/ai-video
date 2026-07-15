@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from video_factory import credentials_store, stage_report
 from video_factory.llm import (
     ANTHROPIC_DEFAULT_MODEL,
     OPENAI_DEFAULT_MODEL,
@@ -66,6 +67,9 @@ class RewriteSection:
     title: str
     narration: str
     visual_hint: str
+    # LLM 强调计划：0~3 条/节，kind ∈ {keyword, number, golden}。
+    # 旧 rewrite.json 无此字段时默认空元组（向后兼容）。
+    emphasis: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,10 +141,15 @@ def build_rewrite_prompts(
         f"5. 全部口播文字总量控制在约 {target_chars} 字（对应 {target_duration_seconds} 秒口播，允许上下 10%）。\n"
         "6. 只输出一个 JSON 对象，不要输出任何其他文字或代码块标记。字段：\n"
         '{"hook": "前3秒钩子口播", '
-        '"sections": [{"title": "小节标题", "narration": "该小节口播文案", "visual_hint": "画面/素材建议"}], '
+        '"sections": [{"title": "小节标题", "narration": "该小节口播文案", "visual_hint": "画面/素材建议", '
+        '"emphasis": [{"text": "弹出词/短句≤10字", "kind": "keyword|number|golden"}]}], '
         '"publish_titles": ["发布标题候选1", "候选2", "候选3"], '
         '"notes": "改写思路与合规提醒"}\n'
-        f"7. sections 至少 {MIN_SECTIONS} 个，按叙事顺序排列。"
+        f"7. sections 至少 {MIN_SECTIONS} 个，按叙事顺序排列。\n"
+        "8. 每个 section 可选填 emphasis 数组（0~3 条/节），标注本节最值得屏幕弹字的内容：\n"
+        "   keyword=动作/概念关键词（≤8字）、number=关键数字（带单位，如'3倍''5步'）、"
+        "golden=金句精华（≤10字）。\n"
+        "   没有值得强调的就省略 emphasis 字段或填空数组——宁缺勿滥，每节最多 3 条。"
     )
     brief_block = (
         f"创作要求（必须遵守，与内容类型模板冲突时以此为准）：{brief.strip()}\n\n"
@@ -180,6 +189,27 @@ def parse_rewrite_response(raw_text: str) -> dict:
     return body
 
 
+_EMPHASIS_ALLOWED_KINDS = frozenset({"keyword", "number", "golden"})
+
+
+def _parse_emphasis_items(raw) -> tuple[dict, ...]:
+    """宽容解析单节 emphasis：缺失/格式错误直接返回空元组（向后兼容旧 rewrite.json）。"""
+    if not isinstance(raw, list):
+        return ()
+    result: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()[:10]  # 截断到 10 字
+        kind = str(item.get("kind") or "keyword").strip()
+        if not text:
+            continue
+        if kind not in _EMPHASIS_ALLOWED_KINDS:
+            kind = "keyword"
+        result.append({"text": text, "kind": kind})
+    return tuple(result[:3])  # 每节最多 3 条
+
+
 def _result_from_body(
     body: dict,
     config: LLMConfig,
@@ -193,6 +223,7 @@ def _result_from_body(
             title=str(item.get("title") or f"第{index + 1}节").strip(),
             narration=str(item.get("narration") or "").strip(),
             visual_hint=str(item.get("visual_hint") or "").strip(),
+            emphasis=_parse_emphasis_items(item.get("emphasis")),
         )
         for index, item in enumerate(body["sections"])
     )
@@ -284,7 +315,17 @@ def rewrite_result_to_dict(result: RewriteResult) -> dict:
         "estimated_duration_seconds": result.estimated_duration_seconds,
         "expand_rounds": result.expand_rounds,
         "hook": result.hook,
-        "sections": [asdict(section) for section in result.sections],
+        "sections": [
+            {
+                "index": s.index,
+                "title": s.title,
+                "narration": s.narration,
+                "visual_hint": s.visual_hint,
+                # emphasis 是 tuple[dict]；显式转 list 保证 JSON 和 in-memory dict 格式一致。
+                "emphasis": list(s.emphasis),
+            }
+            for s in result.sections
+        ],
         "publish_titles": list(result.publish_titles),
         "notes": result.notes,
         "full_voiceover": result.full_voiceover,
@@ -364,6 +405,20 @@ def _load_source_for_cli(args: argparse.Namespace) -> str:
     return load_source_text(args.source)
 
 
+def _write_source_transcript(output_dir: Path | str, source_text: str) -> None:
+    """把原文案落盘 source_transcript.txt（调 LLM 之前）。
+
+    价值：①作为核查 AI 改写质量的对照物；②whisper 转写很贵，改写失败重跑时
+    至少留下了转写成果，不必再转一遍。写盘失败不阻断主流程（宁缺勿废）。
+    """
+    try:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "source_transcript.txt").write_text(source_text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m video_factory.rewrite",
@@ -400,9 +455,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--asr-model", default="", help="ASR 模型，仅媒体转写时生效")
     args = parser.parse_args(argv)
+    # 补齐凭据：credentials.yaml → 空缺的环境变量（真实 env 优先）。必须在
+    # resolve_llm_provider 之前，否则「服务启动后才配的 key」在本进程里不可见。
+    credentials_store.ensure_env_loaded()
 
     try:
         source_text = _load_source_for_cli(args) if args.source else args.text
+        # 调 LLM 之前先把原文案落盘：核查对照物 + 保住昂贵的转写成果（失败重跑不必再转）。
+        _write_source_transcript(args.output, source_text)
         config = LLMConfig(provider=resolve_llm_provider(args.provider), model=args.model)
         result = rewrite_copy(
             source_text,
@@ -414,9 +474,11 @@ def main(argv: list[str] | None = None) -> int:
         outputs = write_rewrite_outputs(result, args.output)
     except (RewriteError, LLMProviderError, OSError) as exc:
         print(f"改写失败：{exc}")
+        stage_report.write_stage_error(args.output, "rewrite", f"改写失败：{exc}")
         return 1
     except RuntimeError as exc:  # 含 asr.ASRError（媒体转写失败）
         print(f"改写失败：{exc}")
+        stage_report.write_stage_error(args.output, "rewrite", f"改写失败：{exc}")
         return 1
     used_style = get_style(result.style)
     expand_note = f"，触发扩写 {result.expand_rounds} 轮" if result.expand_rounds else ""

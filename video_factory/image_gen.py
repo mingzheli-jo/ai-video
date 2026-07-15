@@ -18,6 +18,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -26,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from video_factory import credentials_store
 
 ARK_API_KEY_ENV = "ARK_API_KEY"
 ARK_IMAGE_MODEL_ENV = "ARK_IMAGE_MODEL"
@@ -365,6 +368,223 @@ def _result_row(item: ImagePlanItem, path: Path, reused: bool) -> dict:
     }
 
 
+# --- 配图管家：拍规划 + 拍级匹配（Task B）------------------------------------
+
+# 与 asset_pool.MIN_SECTION_SECONDS 保持一致，确保节时长计算口径统一。
+_MIN_SECTION_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class Beat:
+    """配图拍规划单元：一拍对应一张配图（gen_assets/img_NN）。"""
+
+    section_index: int    # _all_sections_from_rewrite 列表中的节索引（含 hook=0）
+    beat_index: int       # 本节内拍序（0-based）
+    global_index: int     # 全局拍序（即 img_NN 的 NN）
+    narration_slice: str  # 本拍口播文案片段（按字符均分）
+    duration: float       # 该拍目标时长（秒）
+    section_title: str = ""  # 节标题（用于 LLM 匹配提示）
+
+
+def _all_sections_from_rewrite(rewrite: dict) -> list[tuple[str, str]]:
+    """提取 hook + 正文节，返回 [(title, narration), ...] 含 hook 的全量序列。
+
+    与 assemble._sections_from_rewrite 语义完全一致（空 narration 跳过），
+    保证节序与字数分配口径统一，gen_assets 图片数 == --ordered-assets 拍数。
+    """
+    sections: list[tuple[str, str]] = []
+    hook = str(rewrite.get("hook") or "").strip()
+    if hook:
+        sections.append(("hook", hook))
+    for item in rewrite.get("sections") or []:
+        if not isinstance(item, dict):
+            continue
+        narration = str(item.get("narration") or "").strip()
+        if not narration:
+            continue  # 与 assemble._sections_from_rewrite 对齐
+        title = str(item.get("title") or f"第{len(sections) + 1}节").strip()
+        sections.append((title, narration))
+    return sections
+
+
+def _beat_char_count(text: str) -> int:
+    """去掉空白后的字符数（与 assemble._char_count 同口径）。"""
+    return len("".join(str(text or "").split()))
+
+
+def compute_section_durations(rewrite: dict, target_duration: float) -> list[float]:
+    """按各节字数占比把目标时长分配到每节（hook + content）。
+
+    与 asset_pool._split_durations + assemble._char_count 同口径，保证
+    batch._run_image_gen 计算的拍数与 assemble --ordered-assets 重新计算的拍数一致。
+    """
+    sections = _all_sections_from_rewrite(rewrite)
+    if not sections:
+        return []
+    n = len(sections)
+    char_counts = [_beat_char_count(narration) for _, narration in sections]
+    total_chars = sum(char_counts)
+    floor = _MIN_SECTION_SECONDS * n
+    flexible = max(0.0, target_duration - floor)
+    if total_chars <= 0:
+        return [target_duration / n] * n
+    durations = [_MIN_SECTION_SECONDS + flexible * c / total_chars for c in char_counts]
+    # 浮点残差归到最后一节（与 asset_pool._split_durations 一致）
+    durations[-1] += target_duration - sum(durations)
+    return durations
+
+
+def plan_beats(
+    rewrite: dict,
+    section_durations: list[float],
+    beat_seconds: float = 5.0,
+) -> list[Beat]:
+    """每节按时长计算拍数（ceil(节时长/beat_seconds)），节文案按字符均分到每拍。
+
+    section_durations 与 compute_section_durations() 返回值顺序一致（含 hook）。
+    每节至少 1 拍（节时长为 0 时退化为 1 拍 0 秒）。
+    """
+    sections = _all_sections_from_rewrite(rewrite)
+    beats: list[Beat] = []
+    global_idx = 0
+    for sec_idx, (title, narration) in enumerate(sections):
+        if sec_idx >= len(section_durations):
+            break
+        sec_dur = max(0.0, section_durations[sec_idx])
+        n_beats = max(1, math.ceil(sec_dur / beat_seconds) if sec_dur > 0 else 1)
+        beat_dur = sec_dur / n_beats
+        n_chars = len(narration)
+        for b in range(n_beats):
+            c_start = round(n_chars * b / n_beats)
+            c_end = round(n_chars * (b + 1) / n_beats)
+            beats.append(Beat(
+                section_index=sec_idx,
+                beat_index=b,
+                global_index=global_idx,
+                narration_slice=narration[c_start:c_end],
+                duration=round(beat_dur, 3),
+                section_title=title,
+            ))
+            global_idx += 1
+    return beats
+
+
+def match_beats_to_library(
+    beats: list[Beat],
+    library_index: list[dict],
+    library_root: Path | str = LIBRARY_ROOT,
+) -> list[dict] | None:
+    """一次 LLM 调用为每拍选库图或给生成提示词；同拍不重复（同 file 第二次改 generate）。
+
+    无 LLM 凭据、回复无法解析、条数不符时返回 None（调用方回落每节1图路径）。
+    返回列表每项：{"beat_index": int, "action": "reuse"|"generate",
+                   "file": str|None, "prompt": str}
+    """
+    if not beats:
+        return []
+    try:
+        from video_factory.llm import LLMConfig, chat_completion
+        from video_factory.rewrite import resolve_llm_provider
+        provider = resolve_llm_provider("auto")
+    except RuntimeError:
+        return None  # 无 LLM 凭据
+
+    # 给 LLM 看的库图列表（最多 50 条，避免超 token）
+    lib_entries = [
+        {
+            "file": str(e.get("file") or ""),
+            "tags": (e.get("tags") or [])[:5],
+            "prompt": str(e.get("prompt") or "")[:50],
+        }
+        for e in (library_index or [])
+        if e.get("file")
+    ][:50]
+
+    beats_payload = [
+        {
+            "beat_index": b.global_index,
+            "section_title": b.section_title,
+            "narration_slice": b.narration_slice,
+        }
+        for b in beats
+    ]
+
+    system_prompt = (
+        "你是短视频配图导演，为每一拍分配配图。\n"
+        "硬性要求：\n"
+        "1. 输出 JSON 数组，与输入拍数等长同序。每个元素：\n"
+        '   {"beat_index": 数字, "action": "reuse"|"generate", '
+        '"file": "库图文件名（action=reuse 时填库中 file 字段原值；否则填空串）", '
+        '"prompt": "中文生图提示词（generate 时 60 字内描述画面主体+构图，禁止画风词；reuse 时填空串）"}\n'
+        "2. reuse 要求 file 是图片库里 file 字段的原值；无把握时选 generate。\n"
+        "3. 每张库图最多用一次（不同拍要用不同 file）。\n"
+        "4. 只输出 JSON 数组，不要其他文字或代码块标记。"
+    )
+    user_content = json.dumps(
+        {"beats": beats_payload, "library": lib_entries},
+        ensure_ascii=False,
+    )
+    try:
+        raw = chat_completion(system_prompt, user_content, LLMConfig(provider=provider))
+        results = _parse_beat_match_response(raw, beats, library_index)
+    except Exception:  # 网络/解析/条数不符 → 全部回落
+        return None
+
+    # 代码端去重：同一 file 第二次出现 → 改为 generate
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in results:
+        if item["action"] == "reuse":
+            f = item.get("file") or ""
+            if f and f in seen:
+                item = {**item, "action": "generate", "file": None}
+            elif f:
+                seen.add(f)
+        deduped.append(item)
+    return deduped
+
+
+def _parse_beat_match_response(
+    raw_text: str,
+    beats: list[Beat],
+    library_index: list[dict],
+) -> list[dict]:
+    """解析 LLM 对 match_beats_to_library 的回复；条数或格式不符时抛 ImageGenError。"""
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        raise ImageGenError(f"LLM 回复中找不到 JSON 数组：{raw_text[:200]}")
+    try:
+        body = json.loads(text[start: end + 1])
+    except json.JSONDecodeError as exc:
+        raise ImageGenError(f"LLM 回复 JSON 无法解析：{raw_text[:200]}") from exc
+    if not isinstance(body, list) or len(body) != len(beats):
+        raise ImageGenError(
+            f"LLM 返回条数不匹配：期望 {len(beats)}，"
+            f"得到 {len(body) if isinstance(body, list) else '非数组'}。"
+        )
+    valid_files = {str(e.get("file") or "") for e in library_index if e.get("file")}
+    results: list[dict] = []
+    for item, beat in zip(body, beats):
+        if not isinstance(item, dict):
+            raise ImageGenError(f"拍 {beat.global_index} 返回不是对象。")
+        action = str(item.get("action") or "generate").strip()
+        file_val = str(item.get("file") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if action == "reuse" and file_val not in valid_files:
+            action = "generate"  # 文件名不在库里 → 改 generate
+            file_val = ""
+        results.append({
+            "beat_index": beat.global_index,
+            "action": action,
+            "file": file_val if action == "reuse" else None,
+            "prompt": prompt,
+        })
+    return results
+
+
 # --- CLI -----------------------------------------------------------------
 
 
@@ -378,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--library", default=str(LIBRARY_ROOT), help="图片库根目录")
     parser.add_argument("--output", default="", help="报告 JSON 落盘路径（可选）")
     args = parser.parse_args(argv)
+    # 补齐凭据（ARK_API_KEY 生图 + LLM 归类）：credentials.yaml → 空缺的环境变量。
+    credentials_store.ensure_env_loaded()
 
     try:
         rewrite = json.loads(Path(args.rewrite).read_text(encoding="utf-8"))

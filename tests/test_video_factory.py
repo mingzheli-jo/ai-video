@@ -1015,3 +1015,39 @@ def _write_test_wav(path, duration_seconds: int) -> None:
         wav_file.setsampwidth(2)
         wav_file.setframerate(44100)
         wav_file.writeframes(b"\x00\x00" * 44100 * duration_seconds)
+
+
+# ---------- TTS 语速可调（P12：用户要求语速可控、链路随语速自适应） ----------
+
+def test_tts_speed_clamped_and_normalized():
+    from video_factory.pipeline import TTSConfig, _tts_speed
+
+    assert _tts_speed(TTSConfig()) is None                       # 未设 → 各家默认
+    assert _tts_speed(TTSConfig(speed=1.2)) == 1.2               # 正常直传
+    assert _tts_speed(TTSConfig(speed=5.0)) == 2.0               # 超上限钳位
+    assert _tts_speed(TTSConfig(speed=0.1)) == 0.5               # 低于下限钳位
+    assert _tts_speed(TTSConfig(speed=0)) is None                # 非正 → 默认
+
+
+def test_doubao_payloads_carry_speed():
+    from video_factory.pipeline import TTSConfig, build_doubao_speech_payload, build_doubao_v3_payload
+
+    config = TTSConfig(provider="doubao", voice="zh_male_liufei_uranus_bigtts", speed=1.2)
+    v1 = build_doubao_speech_payload("文本", config, appid="a", token="t")
+    assert v1["audio"]["speed_ratio"] == 1.2                     # v1 直传比例
+    v3 = build_doubao_v3_payload("文本", config)
+    assert v3["req_params"]["audio_params"]["speech_rate"] == 20  # v3 换算 (r-1)*100
+    # 未设语速：v1 落默认 1.0、v3 不带 speech_rate 字段（用服务端默认）
+    default = TTSConfig(provider="doubao")
+    assert build_doubao_speech_payload("x", default, appid="a", token="t")["audio"]["speed_ratio"] == 1.0
+    assert "speech_rate" not in build_doubao_v3_payload("x", default)["req_params"]["audio_params"]
+
+
+def test_openai_payload_and_edge_rate_carry_speed():
+    from video_factory.pipeline import TTSConfig, _edge_rate_for, build_openai_speech_payload
+
+    assert build_openai_speech_payload("文本", TTSConfig(speed=1.5))["speed"] == 1.5
+    assert "speed" not in build_openai_speech_payload("文本", TTSConfig())
+    assert _edge_rate_for(TTSConfig(speed=1.2)) == "+20%"        # 显式语速换算 ±N%
+    assert _edge_rate_for(TTSConfig(speed=0.8)) == "-20%"
+    assert _edge_rate_for(TTSConfig()) == "+20%"                 # 未设沿用 edge_rate 默认

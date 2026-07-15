@@ -43,17 +43,8 @@ UPLOAD_ROOT = STUDIO_ROOT / "uploads"
 JOBS_ROOT = STUDIO_ROOT / "jobs"
 DEFAULT_PORT = 56090
 
-# 凭据白名单：只允许设置这四个，且只存进程内存。
-CREDENTIAL_NAMES = (
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "VOLC_TTS_APIKEY",
-    "VOLC_TTS_APPID",
-    "VOLC_TTS_TOKEN",
-    "PEXELS_API_KEY",
-    "ARK_API_KEY",
-)
+# 凭据白名单（唯一权威名单在 credentials_store，与各阶段 CLI 的自动加载共用）。
+CREDENTIAL_NAMES = credentials_store.ALL_CREDENTIAL_NAMES
 
 TTS_PROVIDERS = ("doubao", "openai", "edge")
 VOICE_DEFAULTS = {
@@ -264,7 +255,7 @@ def _build_raw_job(form: dict) -> dict:
         value = form.get(key)
         if value not in (None, ""):
             raw[key] = value
-    for key in ("duration", "bgm_volume", "sfx_volume"):
+    for key in ("duration", "bgm_volume", "sfx_volume", "voice_speed"):
         value = form.get(key)
         if value not in (None, ""):
             raw[key] = value
@@ -693,16 +684,37 @@ def make_handler(store: TaskStore):
 
 # ---------- 启动 ----------
 
-def run_server(port: int = DEFAULT_PORT) -> None:
+class _SingleInstanceServer(ThreadingHTTPServer):
+    """端口独占版 HTTP 服务。
+
+    HTTPServer 默认 allow_reuse_address=True（SO_REUSEADDR），在 Windows 上这允许
+    第二个实例静默绑到同一端口——两个进程各有各的环境变量和任务表，请求随机落到
+    其中一个，表现为「网页保存的凭据时灵时不灵」（2026-07-14 真实事故：凭据保存进了
+    A 进程，任务却在没凭据的 B 进程里跑，rewrite 白跑 150s 后报无凭据）。
+    禁用后第二个实例会响亮地 bind 失败，由 run_server 转成一句人话。
+    """
+
+    allow_reuse_address = False
+
+
+def run_server(port: int = DEFAULT_PORT) -> int:
     for directory in (STUDIO_ROOT, UPLOAD_ROOT, JOBS_ROOT):
         directory.mkdir(parents=True, exist_ok=True)
-    loaded = credentials_store.load_into_env(frozenset(CREDENTIAL_NAMES))
+    loaded = credentials_store.ensure_env_loaded()
     if loaded:
         print(f"已从 credentials.yaml 加载凭据：{'、'.join(loaded)}")
     store = TaskStore()
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(store))
+    try:
+        server = _SingleInstanceServer(("127.0.0.1", port), make_handler(store))
+    except OSError:
+        print(
+            f"端口 {port} 已被占用：可能已有一个创作工作台在运行。"
+            f"请先关闭旧窗口（或用 --port 换端口）再启动。"
+        )
+        return 1
     print(f"创作工作台已启动：http://127.0.0.1:{port}/")
     server.serve_forever()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -712,8 +724,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="监听端口（默认 56090）")
     args = parser.parse_args(argv)
-    run_server(port=args.port)
-    return 0
+    return run_server(port=args.port)
 
 
 if __name__ == "__main__":

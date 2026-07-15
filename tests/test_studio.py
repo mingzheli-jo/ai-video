@@ -430,6 +430,33 @@ def test_page_contains_style_prompt_card():
     assert 'id="stylePrompt"' in html and 'id="stylePromptSave"' in html
 
 
+def test_page_has_transcript_compare_button_and_modal():
+    """任务卡「文案对比」入口 + 模态框骨架都在页面里；按钮走事件委托 data 属性，无内联 onclick。"""
+    from video_factory import studio_ui
+
+    html = studio_ui.render_page()
+    # 任务卡的对比按钮（事件委托）：脚本里以 data-compare 携带任务 id
+    assert "data-compare=" in html
+    # 模态框骨架（静态 HTML）：遮罩、左右两栏容器、关闭按钮都要在
+    assert 'id="compareModal"' in html
+    assert 'id="compareSource"' in html and 'id="compareRewrite"' in html
+    assert 'id="compareClose"' in html
+    assert "原视频文案" in html and "AI 改写稿" in html
+    # 安全回归：对比按钮不得用内联 onclick（esc() 防不住 JS 字符串上下文）
+    assert 'onclick="openCompare(' not in html
+
+
+def test_page_has_voice_speed_input():
+    """单条生产表单新增「配音语速」数字输入：范围 0.5~2.0、step 0.1、留空=默认。"""
+    from video_factory import studio_ui
+
+    html = studio_ui.render_page()
+    assert 'id="f_voice_speed"' in html
+    assert "配音语速" in html
+    # 提交时 voice_speed 进 JSON（collectForm 里 put，留空不下发）
+    assert "put('voice_speed'" in html
+
+
 # ---------- CSRF / Origin 防护 ----------
 
 def test_post_rejects_foreign_origin(server):
@@ -458,3 +485,18 @@ def test_post_without_origin_allowed(server):
         server["port"], "POST", "/api/batch/validate", {"jobs": [{"name": "j"}]},
     )
     assert status == 200
+
+
+# ---------- 端口独占（防孪生进程） ----------
+
+def test_single_instance_server_rejects_second_bind():
+    """回归（2026-07-14 事故）：SO_REUSEADDR 在 Windows 上允许两个工作台静默共享端口，
+    请求随机落到其中一个（凭据存 A 进程、任务跑 B 进程）。第二个实例必须响亮失败。"""
+    handler = studio.make_handler(studio.TaskStore())
+    first = studio._SingleInstanceServer(("127.0.0.1", 0), handler)
+    port = first.server_address[1]
+    try:
+        with pytest.raises(OSError):
+            studio._SingleInstanceServer(("127.0.0.1", port), handler)
+    finally:
+        first.server_close()

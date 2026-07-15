@@ -29,6 +29,10 @@ SFX_BY_TYPE = {
     "key_points": "whoosh.wav",
     "quote_card": "pop.wav",
     "number_pop": "pop.wav",
+    # 关键词弹出复用"啵"的 pop；冷开场卡用 whoosh 起势；转场用独立的低频 whoosh。
+    "keyword_pop": "pop.wav",
+    "opening_card": "whoosh.wav",
+    "transition": "transition.wav",
 }
 
 DEFAULT_SFX_VOLUME = 0.35  # 混音时相对主口播的音量（0~1，宁小勿大，避免盖住人声）
@@ -53,6 +57,15 @@ _SYNTH_SPECS = {
         "anoisesrc=d=0.32:c=pink:r=44100:a=0.4",
         "bandpass=f=2000:width_type=h:w=2500,afade=t=in:d=0.1,"
         "afade=t=out:st=0.16:d=0.15,volume=1.8,"
+        "aformat=sample_fmts=s16:channel_layouts=mono",
+    ),
+    "transition.wav": (
+        # 转场 whoosh：0.3s 白噪声经 80~200Hz 带通塑成低频"扫过"声（bandpass 频率固定，
+        # 靠快起快落的淡入淡出造出气流掠过的落点感），比片头 whoosh 更低沉、更短促，
+        # 专给 xfade 翻页/滑动转场配一声。
+        "anoisesrc=d=0.3:c=white:r=44100:a=0.6",
+        "bandpass=f=140:width_type=h:w=120,afade=t=in:d=0.08,"
+        "afade=t=out:st=0.18:d=0.12,volume=2.2,"
         "aformat=sample_fmts=s16:channel_layouts=mono",
     ),
 }

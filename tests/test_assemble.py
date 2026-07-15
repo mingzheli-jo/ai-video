@@ -102,8 +102,13 @@ def test_render_writes_concat_file_with_posix_paths(tmp_path):
     assert concat_text.startswith("file '")
     assert "segment_00.mp4" in concat_text
     assert "\\" not in concat_text  # 用 as_posix，concat 里不能有反斜杠
-    concat_cmd = next(c for c in runner.commands if "concat" in c)
-    assert "-safe" in concat_cmd and "0" in concat_cmd
+    # ≥2 段默认走 xfade 转场（不再是 concat demuxer 硬切）；concat 清单仍写出，作 xfade
+    # 失败时的回退输入。合并命令应是带 xfade 的 filter_complex，不含 -f concat。
+    merge_cmd = next(
+        c for c in runner.commands
+        if "-filter_complex" in c and "xfade" in c[c.index("-filter_complex") + 1]
+    )
+    assert "concat" not in merge_cmd
 
 
 def test_render_escapes_single_quotes_in_concat_paths(tmp_path):
@@ -781,3 +786,393 @@ def test_kenburns_variant_deterministic():
     c1 = _build_image_segment_command(s, Path("o.mp4"), 1080, 1920, 30, "pad")
     c2 = _build_image_segment_command(s, Path("o.mp4"), 1080, 1920, 30, "pad")
     assert c1 == c2  # 同图同起点 → 动效确定（可复现）
+
+
+# ---------- 图片素材：Ken Burns 新增 4 款运镜（variant 4~7，共 8 款） ----------
+
+def _image_vf(path_name, width=1080, height=1920, fps=30, fit="pad", duration=3.0):
+    """按文件名取该图运镜的 -vf 滤镜串（文件名决定命中哪一款 variant）。"""
+    from video_factory.assemble import _build_image_segment_command
+    from video_factory.asset_pool import ClipSlice
+
+    s = ClipSlice(path=Path(path_name), start=0.0, duration=duration)
+    cmd = _build_image_segment_command(s, Path("o.mp4"), width, height, fps, fit)
+    return cmd[cmd.index("-vf") + 1]
+
+
+def test_kenburns_variant_diagonal_push():  # p0.png → variant 4（对角推近）
+    vf = _image_vf("p0.png")
+    assert "zoompan=" in vf
+    # x 与 y 都随 on 变化 → 斜向运动，配合 zoom 推近
+    assert "x='(iw-iw/zoom)*on/90'" in vf
+    assert "y='(ih-ih/zoom)*on/90'" in vf
+    assert "s=1080x1920" in vf
+
+
+def test_kenburns_variant_rotate_drift():  # p14.png → variant 5（旋转漂移）
+    vf = _image_vf("p14.png")
+    assert "rotate=" in vf            # 旋转漂移专属 rotate 滤镜
+    assert "crop=1080:1920" in vf     # 中心裁回目标
+    assert "scale=2160:3840" in vf    # 2 倍超采样
+    assert "zoompan=" in vf           # 仍用 zoompan 生成多帧 + 缓推
+    assert "s=1350x2400" in vf        # 输出到留 25% 余量的画布（黑角被中心裁切吃掉）
+    assert "fillcolor=black@0" in vf  # 兜底填色（正常裁切下看不到）
+
+
+def test_kenburns_variant_punch_in():  # p5.png → variant 6（特写冲击）
+    vf = _image_vf("p5.png")
+    assert "if(lte(on,18)" in vf  # 前 20%（90*0.2=18 帧）分段冲击
+    assert "1.25" in vf            # 冲到 1.25 再回落
+    assert "zoompan=" in vf
+    assert "s=1080x1920" in vf
+
+
+def test_kenburns_variant_breathing():  # p2.png → variant 7（缓慢呼吸）
+    vf = _image_vf("p2.png")
+    assert "cos(2*PI*on/90)" in vf  # 余弦单周期往返（1.0~1.08）
+    assert "s=1080x1920" in vf
+
+
+def test_kenburns_variant_covers_eight():
+    # 8 个文件名应能命中全部 8 款 variant（分布覆盖，非退化到少数几款）。
+    import hashlib
+
+    from video_factory.assemble import _KENBURNS_VARIANTS
+
+    variants = set()
+    for i in range(400):
+        key = f"cover{i}.png:0.0"
+        variants.add(int(hashlib.sha1(key.encode("utf-8")).hexdigest(), 16) % _KENBURNS_VARIANTS)
+    assert variants == set(range(_KENBURNS_VARIANTS))
+
+
+# ---------- 片段转场（xfade）+ 转场点 ----------
+
+def _xfade_cmd(runner):
+    return next(
+        c for c in runner.commands
+        if "-filter_complex" in c and "xfade" in c[c.index("-filter_complex") + 1]
+    )
+
+
+def _make_segments(tmp_path, count):
+    segs = []
+    for i in range(count):
+        p = tmp_path / f"segment_{i:02d}.mp4"
+        p.write_bytes(b"v")
+        segs.append(p)
+    return segs
+
+
+def test_concat_uses_xfade_for_multiple_segments(tmp_path):
+    from video_factory.assemble import _concat_segments, _XFADE_TRANSITIONS
+
+    segs = _make_segments(tmp_path, 3)
+    runner = _Recorder(probe_duration=30.0)
+    points = _concat_segments(
+        segs, tmp_path / "segments.txt", tmp_path / "silent.mp4", 30, runner,
+        segment_durations=[10.0, 8.0, 6.0],
+    )
+    cmd = _xfade_cmd(runner)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    # 未给 transition_flags → 每段自成一块；块尾段渲染期已 +0.4 补偿，恰抵消 xfade 重叠，
+    # 故 offset = 原始累计内容时长：offset1 = 10；offset2 = 10+8 = 18（不再减 i*0.4）。
+    assert "offset=10.000" in fc
+    assert "offset=18.000" in fc
+    assert "duration=0.4" in fc
+    assert "[vout]" in cmd and "-an" in cmd
+    import re as _re
+    used = _re.findall(r"transition=(\w+)", fc)
+    assert used and all(t in _XFADE_TRANSITIONS for t in used)
+    assert points == [10.0, 18.0]  # 返回的转场时刻 = 各 offset = 原始累计内容时长
+
+
+def test_concat_xfade_offset_precise_for_many_segments(tmp_path):
+    from video_factory.assemble import _concat_segments
+
+    durs = [5.0, 4.0, 3.0, 6.0]
+    segs = _make_segments(tmp_path, len(durs))
+    runner = _Recorder(probe_duration=30.0)
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "out.mp4", 30, runner, segment_durations=durs,
+    )
+    # offset_i = Σ(前 i 段原始时长)，逐点核对（错一点就黑帧/画面超前）：块尾段 +0.4 补偿
+    # 恰抵消 xfade 每次重叠的 0.4s，故直接累计原始时长、不再减 i*T。
+    expected, cum = [], 0.0
+    for i in range(1, len(durs)):
+        cum += durs[i - 1]
+        expected.append(round(cum, 3))
+    assert points == expected  # [5.0, 9.0, 12.0]
+
+
+def test_concat_single_segment_uses_demux(tmp_path):
+    from video_factory.assemble import _concat_segments
+
+    segs = _make_segments(tmp_path, 1)
+    runner = _Recorder(probe_duration=30.0)
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "out.mp4", 30, runner, segment_durations=[10.0],
+    )
+    assert points == []
+    demux = next(c for c in runner.commands if "-f" in c and "concat" in c)
+    assert "-safe" in demux and "0" in demux
+    assert not any("xfade" in " ".join(c) for c in runner.commands)
+
+
+def test_concat_short_segment_falls_back_to_demux(tmp_path):
+    from video_factory.assemble import _concat_segments
+
+    segs = _make_segments(tmp_path, 2)
+    runner = _Recorder(probe_duration=30.0)
+    # 第二段 0.3s < 转场时长 0.4s → 不满足 xfade 条件（offset 会算成负），硬切回退
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "out.mp4", 30, runner, segment_durations=[5.0, 0.3],
+    )
+    assert points == []
+    assert not any("xfade" in " ".join(c) for c in runner.commands)
+    assert any("-f" in c and "concat" in c for c in runner.commands)
+
+
+def test_concat_xfade_failure_falls_back_to_demux(tmp_path):
+    from video_factory.assemble import _concat_segments
+
+    segs = _make_segments(tmp_path, 2)
+
+    def _is_xfade(command):
+        # 精确判定 xfade 命令：看 -filter_complex 参数里是否含 xfade（不能用整条命令的
+        # 子串匹配——本用例的 tmp 路径本身就含 "xfade"，会误伤回退的 demux 命令）。
+        return "-filter_complex" in command and "xfade" in command[
+            command.index("-filter_complex") + 1
+        ]
+
+    class XfadeFailRunner(_Recorder):
+        def __call__(self, command, **kwargs):
+            if _is_xfade(command):
+                self.commands.append(command)
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="xfade boom")
+            return super().__call__(command, **kwargs)
+
+    runner = XfadeFailRunner(probe_duration=30.0)
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "out.mp4", 30, runner, segment_durations=[5.0, 4.0],
+    )
+    # xfade 失败 → 降级硬切，不抛错、转场点清空（降级不阻断成片）
+    assert points == []
+    assert any(_is_xfade(c) for c in runner.commands)  # 试过 xfade
+    assert any("-f" in c and "concat" in c for c in runner.commands)  # 回退到 demux
+
+
+def test_render_xfade_records_transition_points_and_stays_aligned(tmp_path):
+    audio = tmp_path / "voiceover.wav"
+    audio.write_bytes(b"audio")
+    plan = build_assembly_plan(REWRITE, _clips(), target_duration=90.0)
+    runner = _Recorder(probe_duration=60.0)
+    outputs = render_assembly(plan, tmp_path, audio_path=audio, runner=runner)
+
+    manifest = json.loads(outputs["assembly_plan"].read_text(encoding="utf-8"))
+    # 3 段 → 2 个转场点写进计划，供特效层配音
+    assert len(manifest["transition_points"]) == 2
+    assert all(p > 0 for p in manifest["transition_points"])
+    # 关键闭环：xfade 吃掉的时长由下游 tpad + -t（截到配音时长）兜底，duration_aligned 仍成立
+    assert manifest["duration_aligned"] is True
+
+
+# ---------- 内容时间轴守恒：块尾段 +0.4s 补偿 + 转场密度（章节边界 + 节内 15s） ----------
+
+def test_segment_command_compensates_duration_before_transition():
+    """后接转场的段渲染时 +0.4s（视频靠 -t、图片靠帧数）；不接转场的段用原始时长。"""
+    from video_factory.assemble import _build_segment_command, _XFADE_DURATION
+    from video_factory.asset_pool import ClipSlice
+
+    vid = ClipSlice(path=Path("a.mp4"), start=2.0, duration=5.0)
+    # 后接转场 → -t 补偿 +0.4（多切 0.4s 供 xfade 重叠吃掉），起点 -ss 不动
+    cmd = _build_segment_command(
+        vid, Path("o.mp4"), 1920, 1080, 30, "pad", extra_duration=_XFADE_DURATION
+    )
+    assert cmd[cmd.index("-t") + 1] == "5.4"
+    assert cmd[cmd.index("-ss") + 1] == "2"
+    # 不接转场（默认 extra=0）→ 原始时长
+    cmd0 = _build_segment_command(vid, Path("o.mp4"), 1920, 1080, 30, "pad")
+    assert cmd0[cmd0.index("-t") + 1] == "5"
+    # 图片切片：帧数按补偿后时长算 round((4+0.4)*30)=132
+    img = ClipSlice(path=Path("p.png"), start=0.0, duration=4.0)
+    cimg = _build_segment_command(
+        img, Path("o.mp4"), 1080, 1920, 30, "pad", extra_duration=_XFADE_DURATION
+    )
+    assert "-frames:v 132" in " ".join(cimg)
+
+
+def test_transition_flags_chapter_boundary_and_15s_rule():
+    """密度规则：①跨节必转场；②同节内累计 ≥15s 转一次并清零；③其余硬切；末段恒 False。"""
+    from video_factory.assemble import (
+        _transition_flags,
+        INTRA_SECTION_TRANSITION_INTERVAL,
+    )
+
+    assert INTRA_SECTION_TRANSITION_INTERVAL == 15.0
+    # sec0 四段各 5s（20s），sec1 两段各 5s（10s）
+    section_indices = [0, 0, 0, 0, 1, 1]
+    durations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+    # i=2：sec0 内累计 15s → 转；i=3：跨节 sec0→sec1 → 必转；其余硬切
+    assert _transition_flags(section_indices, durations) == [
+        False, False, True, True, False, False,
+    ]
+    # 纯短节（无内部满 15s、无跨节）→ 全硬切
+    assert _transition_flags([0, 0, 0], [4.0, 4.0, 4.0]) == [False, False, False]
+
+
+def test_concat_groups_hard_cut_segments_into_block(tmp_path):
+    """连续无转场的段先 concat demuxer 硬切成中间块，再与其他块做 xfade（子组 concat）。"""
+    from video_factory.assemble import _concat_segments
+
+    segs = _make_segments(tmp_path, 3)
+    runner = _Recorder(probe_duration=30.0)
+    # 仅段1后转场 → 块[0,1]（硬切合并）+ 块[2]（单段）
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "silent.mp4", 30, runner,
+        segment_durations=[6.0, 6.0, 6.0],
+        transition_flags=[False, True, False],
+    )
+    # 一次转场：块[0,1] 内容 12s → offset 12（成片时间轴上的节内边界）
+    assert points == [12.0]
+    # 块内硬切：写出 block_00.txt 清单并对块 0 跑 concat demuxer
+    block_manifest = tmp_path / "block_00.txt"
+    assert block_manifest.exists()
+    txt = block_manifest.read_text(encoding="utf-8")
+    assert "segment_00.mp4" in txt and "segment_01.mp4" in txt
+    # 块级 xfade：offset=12
+    xfade = next(
+        c for c in runner.commands
+        if "-filter_complex" in c and "xfade" in c[c.index("-filter_complex") + 1]
+    )
+    assert "offset=12.000" in xfade[xfade.index("-filter_complex") + 1]
+
+
+def test_user_scenario_52_segments_density_and_transition_points(tmp_path):
+    """用户真实成片回归：6 节 52 片、两长节 110s/107s。验证转场次数由旧方案 51 次降到
+    18 次（章节边界 5 + sec0 内部 7 + sec2 内部 6），且每个转场点都落在内容时间轴的正确
+    位置（节边界 + 节内 15s 刻度）——特效音因此自动归位、画面不再逐渐超前口播。"""
+    from video_factory.assemble import _transition_flags, _concat_segments
+
+    # 逐节构造（节索引, 段时长）：时长取整便于 15s 整除；总 279s、共 52 段、两长节 110/107。
+    layout = [
+        (0, [5.0] * 22),          # sec0：110s（22 段）
+        (1, [4.0] * 3),           # sec1：12s（3 段）
+        (2, [5.0] * 20 + [7.0]),  # sec2：107s（21 段）
+        (3, [9.0] * 2),           # sec3：18s
+        (4, [8.0] * 2),           # sec4：16s
+        (5, [8.0] * 2),           # sec5：16s
+    ]
+    section_indices, durations = [], []
+    for sec, durs in layout:
+        for d in durs:
+            section_indices.append(sec)
+            durations.append(d)
+    assert len(durations) == 52
+    assert sum(durations) == pytest.approx(279.0)
+
+    flags = _transition_flags(section_indices, durations)
+    assert sum(flags) == 18  # 旧方案 51 次 → 新方案 18 次（合理密度）
+
+    segs = _make_segments(tmp_path, 52)
+    runner = _Recorder(probe_duration=279.0)
+    points = _concat_segments(
+        segs, tmp_path / "s.txt", tmp_path / "silent.mp4", 30, runner,
+        segment_durations=durations, transition_flags=flags,
+    )
+    expected = [
+        15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0,  # sec0 内部每 15s（7 次）
+        110.0,                                       # sec0→sec1 章节边界
+        122.0,                                       # sec1→sec2 章节边界
+        137.0, 152.0, 167.0, 182.0, 197.0, 212.0,    # sec2 内部每 15s（6 次）
+        229.0,                                       # sec2→sec3 章节边界
+        247.0,                                       # sec3→sec4 章节边界
+        263.0,                                       # sec4→sec5 章节边界
+    ]
+    assert points == expected
+    assert len(points) == 18
+    # 5 个章节边界（各节累计时长）必须都在转场点里，节切换处的特效音才归位
+    for boundary in (110.0, 122.0, 229.0, 247.0, 263.0):
+        assert boundary in points
+    # 转场点递增、且严格落在总时长之内（不越界）
+    assert points == sorted(points)
+    assert points[-1] < sum(durations)
+
+
+# ---------- 配音语速（P12：语速显式时跳过 atempo、分镜跟随实测配音时长） ----------
+
+def test_cli_voice_speed_routes_to_tts_and_follows_audio(tmp_path, monkeypatch):
+    from video_factory import assemble as assemble_mod
+    from video_factory import asset_pool as asset_pool_mod
+
+    rewrite_path = tmp_path / "rewrite.json"
+    rewrite_path.write_text(json.dumps(REWRITE, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    out = tmp_path / "out"
+
+    captured = {}
+
+    def fake_synth(narration, path, config):
+        captured["speed"] = config.speed
+        Path(path).write_bytes(b"wav")
+
+        class _R:
+            pass
+
+        result = _R()
+        result.path = Path(path)
+        return result
+
+    runner = _Recorder(probe_duration=50.0)  # 实测配音 50s（语速加快后变短）
+    real_scan = asset_pool_mod.scan_asset_pool
+    real_render = assemble_mod.render_assembly
+    monkeypatch.setattr(assemble_mod, "synthesize_voiceover_text", fake_synth)
+    monkeypatch.setattr(assemble_mod, "_probe_duration", lambda p, r: 50.0)
+    monkeypatch.setattr(
+        assemble_mod, "scan_asset_pool", lambda directory: real_scan(directory, runner=runner)
+    )
+    monkeypatch.setattr(
+        assemble_mod, "render_assembly",
+        lambda plan, output_dir, **kwargs: real_render(plan, output_dir, runner=runner, **kwargs),
+    )
+
+    code = main([
+        "--rewrite", str(rewrite_path), "--assets", str(tmp_path),
+        "--tts", "doubao", "--voice-speed", "1.3",
+        "--duration", "90", "--output", str(out),
+    ])
+    assert code == 0
+    assert captured["speed"] == 1.3                       # 语速进 TTSConfig
+    plan = json.loads((out / "assembly_plan.json").read_text(encoding="utf-8"))
+    assert plan["target_duration_seconds"] == 50.0        # 分配计划以实测配音时长为轴
+    assert not (out / "voiceover_fitted.wav").exists()    # atempo 微调已让位
+
+
+# ---------- 拍级配图：--ordered-assets 顺序分配（P13 任务B） ----------
+
+def test_build_ordered_assembly_plan_uses_images_in_beat_order(tmp_path):
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    imgs = []
+    for i in range(3):
+        p = tmp_path / f"img_{i:02d}.png"
+        p.write_bytes(b"png")
+        imgs.append(p)
+    plan = build_ordered_assembly_plan(REWRITE, imgs, target_duration=20.0)
+    slices = [s for a in plan.allocations for s in a.slices]
+    assert len(slices) >= 3  # 20s/5s ≈ 4 拍上下（按节字数分配有波动）
+    assert slices[0].path == imgs[0]  # 第 0 拍用第 0 张
+    assert slices[1].path == imgs[1]  # 第 1 拍用第 1 张
+    # 总时长守恒（拍时长求和 = 目标）
+    assert sum(s.duration for s in slices) == pytest.approx(20.0, abs=0.1)
+
+
+def test_build_ordered_assembly_plan_tail_loops_when_images_short(tmp_path):
+    from video_factory.assemble import build_ordered_assembly_plan
+
+    only = tmp_path / "img_00.png"
+    only.write_bytes(b"png")
+    plan = build_ordered_assembly_plan(REWRITE, [only], target_duration=20.0)
+    slices = [s for a in plan.allocations for s in a.slices]
+    assert len(slices) >= 2
+    assert all(s.path == only for s in slices)  # 图不足 → 尾部循环用最后一张

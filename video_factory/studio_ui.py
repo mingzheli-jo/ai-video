@@ -174,6 +174,19 @@ input:focus, textarea:focus, select:focus { border-color: var(--gold); box-shado
 .dep-list { margin-top: 14px; }
 .dep-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .notice { background: rgba(232,184,75,.08); border: 1px solid var(--gold-dim); border-radius: 8px; padding: 12px; color: #e6cf9a; font-size: 12px; margin-top: 16px; }
+.task-actions { margin-top: 10px; }
+.btn-compare { font-size: 12px; padding: 7px 14px; }
+.modal-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,.62); }
+.modal-box { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); width: 100%; max-width: 920px; max-height: 86vh; display: flex; flex-direction: column; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.modal-title { font-weight: 800; font-size: 15px; }
+.modal-close { background: transparent; border: 0; color: var(--muted); font-size: 24px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.modal-close:hover { color: var(--text); }
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 18px; overflow: hidden; }
+@media (max-width: 760px) { .compare-grid { grid-template-columns: 1fr; } }
+.compare-col { display: flex; flex-direction: column; min-width: 0; }
+.compare-col h3 { margin: 0 0 8px; font-size: 13px; color: var(--gold); }
+.compare-content { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 13px; max-height: 60vh; overflow-y: auto; font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; color: var(--text); }
 """
 
 
@@ -329,6 +342,7 @@ function collectForm() {
   put('brief', h('#f_brief').value.trim());
   put('tts', h('#f_tts').value);
   put('voice', h('#f_voice').value.trim());
+  put('voice_speed', h('#f_voice_speed').value.trim());  // 留空不下发 → 后端用默认语速
   put('bgm', h('#f_bgm').value.trim());
   put('bgm_volume', h('#f_bgmvol').value);
   put('duration', h('#f_duration').value.trim());
@@ -398,6 +412,12 @@ function renderTask(t) {
     if (links.length) body += `<div class="links">${links.join('')}</div>`;
   }
   const elapsed = t.elapsed_seconds ? `${t.elapsed_seconds.toFixed(1)}s` : '';
+  // 文案对比：ok/failed 任务都给一个入口（原文案 vs AI 改写稿）。走事件委托 + data 属性，
+  // 不用内联 onclick（HTML 实体进 JS 前已解码，esc() 防不住该上下文）。
+  const canCompare = t.status === 'ok' || t.status === 'failed';
+  const actions = canCompare
+    ? `<div class="task-actions"><button class="btn btn-ghost btn-compare" data-compare="${esc(t.id)}">文案对比</button></div>`
+    : '';
   return `<div class="task">
     <div class="task-head"><span class="task-name">${esc(t.name)}</span>
       <span>${t.platform ? `<span class="badge plat">${esc(t.platform)}</span> ` : ''}<span class="badge">${esc(statusLabel(t.status))}</span></span>
@@ -405,17 +425,61 @@ function renderTask(t) {
     <div class="stage-chips">${chips}</div>
     <div class="task-meta">${esc(t.created_at)} ${elapsed ? '· ' + elapsed : ''}</div>
     ${body}
+    ${actions}
   </div>`;
 }
 
 function statusLabel(s) { return {queued:'排队中',running:'生产中',ok:'完成',failed:'失败',invalid:'非法'}[s] || s; }
 
-// 复制按钮走事件委托 + data 属性：严禁把动态数据插进内联 onclick
+// 复制/文案对比按钮走事件委托 + data 属性：严禁把动态数据插进内联 onclick
 // （HTML 实体在进 JS 解析前已被解码，esc() 防不住 JS 字符串上下文注入）。
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.copy-btn');
   if (btn && btn.dataset.copy) copyText(btn.dataset.copy);
+  const cmp = e.target.closest('[data-compare]');
+  if (cmp && cmp.dataset.compare) openCompare(cmp.dataset.compare);
 });
+
+// ----- 文案对比弹窗 -----
+// 数据流：/api/jobs/<id> → outputs.rewrite（rewrite.json 绝对路径）；把末段
+// rewrite.json 换成 source_transcript.txt 推出原文案路径；两文件都经 /media?path= 拉取。
+// 内容一律用 textContent 注入（原文案/改写稿可能含任意字符，textContent 从不解析 HTML，
+// 比 esc()+innerHTML 更硬），拉不到则显示中文兜底提示。
+function showCompareModal() {
+  h('#compareSource').textContent = '加载中…';
+  h('#compareRewrite').textContent = '加载中…';
+  h('#compareModal').style.display = 'flex';
+}
+function closeCompare() { h('#compareModal').style.display = 'none'; }
+
+async function fetchMediaText(path) {
+  const r = await fetch('/media?path=' + encodeURIComponent(path));
+  if (!r.ok) throw new Error('读取失败');
+  return r.text();
+}
+
+async function openCompare(taskId) {
+  showCompareModal();
+  let detail = {};
+  try { const { data } = await api('/api/jobs/' + encodeURIComponent(taskId)); detail = data || {}; } catch (e) {}
+  const rewritePath = detail.outputs && detail.outputs.rewrite;
+  if (!rewritePath) {
+    h('#compareSource').textContent = '本任务未记录原文案（旧版本生成）';
+    h('#compareRewrite').textContent = '未找到 rewrite.json（该任务未完成文案改写）。';
+    return;
+  }
+  const sourcePath = String(rewritePath).replace(/rewrite\.json$/, 'source_transcript.txt');
+  fetchMediaText(sourcePath)
+    .then(txt => { h('#compareSource').textContent = txt.trim() || '本任务未记录原文案（旧版本生成）'; })
+    .catch(() => { h('#compareSource').textContent = '本任务未记录原文案（旧版本生成）'; });
+  fetchMediaText(rewritePath)
+    .then(txt => {
+      let vo = '';
+      try { vo = String(JSON.parse(txt).full_voiceover || '').trim(); } catch (e) {}
+      h('#compareRewrite').textContent = vo || '未能解析 rewrite.json 的 full_voiceover 字段。';
+    })
+    .catch(() => { h('#compareRewrite').textContent = '未能读取 rewrite.json。'; });
+}
 
 async function refreshTasks() {
   const { data } = await api('/api/jobs');
@@ -643,6 +707,9 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#batchRunBtn').addEventListener('click', batchRun);
   h('#batchAddBtn').addEventListener('click', () => addBatchJob());
   h('#stylePromptSave').addEventListener('click', saveStylePrompt);
+  // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
+  h('#compareClose').addEventListener('click', closeCompare);
+  h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
   // 批量清单用事件委托：字段编辑只改数据不重渲染（不丢焦点/光标），增删复制才重渲染。
   // 严禁把用户数据插进内联 onclick（HTML 实体在进 JS 前已解码，esc() 防不住该上下文）。
   const bwrap = h('#batchJobs');
@@ -721,6 +788,9 @@ def _body() -> str:
           <select id="f_tts"></select>
           <label>音色（voice，留空用默认）</label>
           <input type="text" id="f_voice" placeholder="留空自动用引擎默认音色">
+          <label>配音语速</label>
+          <input type="number" id="f_voice_speed" min="0.5" max="2.0" step="0.1" placeholder="留空=默认语速">
+          <p class="desc" style="margin-top:6px">1.0=原速，0.5~2.0；改语速后分镜/字幕自动跟随。</p>
           <label>背景音乐（BGM 路径，可选）</label>
           <input type="text" id="f_bgm" placeholder="粘贴本机 BGM 路径">
           <label>BGM 音量</label>
@@ -805,6 +875,19 @@ def _body() -> str:
         <div class="dep-list" id="depList"></div>
       </div>
       <div class="notice">凭据保存后会写入项目根目录的 <b>credentials.yaml</b>，重启自动加载，<b>无需每次重填</b>；你也可以直接用文本编辑器改这个文件。（该文件含明文密钥，已加入 .gitignore，切勿提交或分享。）写稿 AI 三选一即可：DeepSeek 国内直连、注册即送额度，推荐没有海外账号的用户使用。豆包配音：新版控制台（快捷API接入）只需填「豆包 API Key」一项；旧版才需要 AppID+Token 两项。</div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="compareModal" style="display:none">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span class="modal-title">文案对比</span>
+        <button type="button" class="modal-close" id="compareClose" aria-label="关闭">×</button>
+      </div>
+      <div class="compare-grid">
+        <div class="compare-col"><h3>原视频文案</h3><div class="compare-content" id="compareSource"></div></div>
+        <div class="compare-col"><h3>AI 改写稿</h3><div class="compare-content" id="compareRewrite"></div></div>
+      </div>
     </div>
   </div>
 """

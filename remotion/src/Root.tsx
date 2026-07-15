@@ -6,12 +6,16 @@ import { LowerThird } from "./compositions/LowerThird";
 import { KeyPoints } from "./compositions/KeyPoints";
 import { QuoteCard } from "./compositions/QuoteCard";
 import { NumberPop } from "./compositions/NumberPop";
+import { KeywordPop } from "./compositions/KeywordPop";
+import { OpeningCard } from "./compositions/OpeningCard";
 import {
   chapterCardSchema,
   introSchema,
   keyPointsSchema,
+  keywordPopSchema,
   lowerThirdSchema,
   numberPopSchema,
+  openingCardSchema,
   quoteCardSchema,
 } from "./schema";
 
@@ -103,6 +107,34 @@ export const RemotionRoot: React.FC = () => {
         schema={numberPopSchema}
         defaultProps={{
           value: "80%",
+          accent: "#e8b84b",
+        }}
+      />
+      <Composition
+        id="KeywordPop"
+        component={KeywordPop}
+        durationInFrames={48}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={keywordPopSchema}
+        defaultProps={{
+          keyword: "关键词",
+          accent: "#e8b84b",
+          color: "#ffffff",
+        }}
+      />
+      <Composition
+        id="OpeningCard"
+        component={OpeningCard}
+        durationInFrames={36}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={openingCardSchema}
+        defaultProps={{
+          title: "主题词",
+          points: ["要点一", "要点二"],
           accent: "#e8b84b",
         }}
       />

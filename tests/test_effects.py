@@ -39,9 +39,10 @@ REWRITE = {
 
 def test_manifest_intro_derived_from_first_section_and_hook():
     manifest = build_effects_manifest(PLAN, REWRITE)
-    intro = manifest["effects"][0]
-    assert intro["type"] == "intro"
-    assert intro["start"] == 0.0
+    # REWRITE 有 publish_titles → 冷开场卡排在最前，intro 紧接其结束硬切（无交叠淡入）。
+    assert manifest["effects"][0]["type"] == "opening_card"
+    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
+    assert intro["start"] == 1.2
     # min(2.5, 6.0*0.8=4.8) = 2.5
     assert intro["duration"] == 2.5
     # hook 前 12 字
@@ -52,7 +53,8 @@ def test_manifest_intro_derived_from_first_section_and_hook():
 
 def test_manifest_intro_falls_back_to_publish_title_without_hook():
     manifest = build_effects_manifest(PLAN, {"publish_titles": ["候选标题一"]})
-    assert manifest["effects"][0]["title"] == "候选标题一"
+    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
+    assert intro["title"] == "候选标题一"
 
 
 def test_manifest_intro_duration_capped_by_short_first_section():
@@ -200,7 +202,7 @@ def test_render_effects_builds_correct_remotion_command(tmp_path, monkeypatch):
     first = runner.commands[0]
     assert first[0] == "/usr/bin/npx"
     assert first[1] == "remotion" and first[2] == "render"
-    assert "Intro" in first  # 第一条是 intro composition
+    assert "OpeningCard" in first  # 第一条是冷开场卡 composition（排在 intro 之前）
     assert any(a == "--codec=prores" for a in first)
     assert any(a == "--prores-profile=4444" for a in first)
     # 默认 manifest 是 1920x1080，render 命令必须带 --width/--height（CLI 覆盖画幅）
@@ -267,15 +269,16 @@ class _FailAtRecorder(_Recorder):
 def test_render_effects_partial_failure_keeps_original_indices(tmp_path, monkeypatch):
     monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
     manifest = build_effects_manifest(PLAN, REWRITE)
-    # intro + 2 章节卡 + 开屏要点卡 + 金句卡（丰富化特效 2026-07 起默认全开）
-    assert len(manifest["effects"]) == 5
+    # 冷开场卡 + intro + 2 章节卡 + 开屏要点卡 + 金句卡 + 2 关键词弹出 = 8
+    assert len(manifest["effects"]) == 8
     runner = _FailAtRecorder(fail_name="effect_01.mov")
 
     result = render_effects(manifest, tmp_path, runner=runner)
 
     # 中段失败后，成功项必须保留原始 manifest 索引（跳过 1），不能塌缩重排，
     # 否则叠加阶段会把后续特效错位到前一条的时间点。
-    assert [index for index, _ in result] == [0, 2, 3, 4]
+    expected = [i for i in range(len(manifest["effects"])) if i != 1]
+    assert [index for index, _ in result] == expected
     assert result[0][1].name == "effect_00.mov"
     assert result[1][1].name == "effect_02.mov"
     warnings = json.loads((tmp_path / "effects_warnings.json").read_text(encoding="utf-8"))
@@ -469,7 +472,7 @@ def test_overlay_keeps_effect_when_resolution_probe_fails(tmp_path):
 def _make_sfx_dir(tmp_path):
     d = tmp_path / "sfx"
     d.mkdir()
-    for f in ("whoosh.wav", "pop.wav", "swoosh.wav"):
+    for f in ("whoosh.wav", "pop.wav", "swoosh.wav", "transition.wav"):
         (d / f).write_bytes(b"RIFFxxxxWAVE")
     return d
 
@@ -741,8 +744,9 @@ def test_manifest_key_points_lists_section_titles_after_intro():
     kp = next(e for e in manifest["effects"] if e["type"] == "key_points")
     # 第 0 节是 hook（片头已覆盖），要点行从正题标题取起
     assert kp["lines"] == ["第一节", "第二节"]
-    intro = manifest["effects"][0]
-    assert kp["start"] == pytest.approx(intro["duration"], abs=1 / 30)
+    # 要点卡紧接 intro 结束落点（intro 后移到 1.0 后，要点卡也随之顺延到 intro 终点）。
+    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
+    assert kp["start"] == pytest.approx(intro["start"] + intro["duration"], abs=1 / 30)
     assert kp["duration"] <= 3.5
 
 
@@ -804,3 +808,448 @@ def test_sfx_mapping_covers_new_types():
 
     for t in ("key_points", "quote_card", "number_pop"):
         assert t in SFX_BY_TYPE
+
+
+# ---------- 片头标题截断（防悬挂残字，2026-07-14 红框反馈） ----------
+
+def test_clip_title_cuts_at_sentence_end_keeps_punct():
+    from video_factory.effects import _clip_title
+
+    # 用户实际案例：[:12] 硬截会得到「王阳明心学到底有多牛？一」——句尾挂着"一句话"的首字
+    hook = "王阳明心学到底有多牛？一句话就能让你摆脱内耗，今天给你讲透。"
+    assert _clip_title(hook, 12) == "王阳明心学到底有多牛？"  # 句末？保留、残字丢弃
+
+
+def test_clip_title_cuts_before_clause_punct():
+    from video_factory.effects import _clip_title
+
+    assert _clip_title("低杠杆保现金流，多元化收入才是出路", 9) == "低杠杆保现金流"  # 逗号本身丢弃
+
+
+def test_clip_title_short_text_unchanged_and_hard_cut_fallback():
+    from video_factory.effects import _clip_title
+
+    assert _clip_title("心外无物", 12) == "心外无物"          # 预算内原样
+    assert _clip_title("零标点连续十四个字的超长标题啊", 8) == "零标点连续十四个"  # 无标点硬截
+
+
+def test_intro_title_uses_clipped_hook():
+    from video_factory.effects import _intro_title
+
+    rewrite = {"hook": "王阳明心学到底有多牛？一句话就能让你摆脱内耗"}
+    assert _intro_title(rewrite) == "王阳明心学到底有多牛？"
+
+
+# ---------- 冷开场卡 / 关键词弹出（Task C） ----------
+
+def test_manifest_opening_card_first_and_shifts_intro():
+    manifest = build_effects_manifest(PLAN, REWRITE)
+    opening = manifest["effects"][0]
+    assert opening["type"] == "opening_card"
+    assert opening["start"] == 0.0
+    assert opening["duration"] == 1.2
+    assert opening["title"] == "候选标题一"          # publish_titles[0] 截 8 字
+    assert opening["points"] == ["第一节", "第二节"]  # 第 1、2 节标题
+    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
+    assert intro["start"] == 1.2                     # 开场卡结束即硬切进 intro
+
+
+def test_manifest_no_opening_card_without_publish_titles():
+    # 无 publish_titles[0] 主题词 → 不出开场卡，intro 仍从 0 起（底片时间轴不变）。
+    manifest = build_effects_manifest(PLAN, {"hook": "只有钩子没有标题"})
+    assert all(e["type"] != "opening_card" for e in manifest["effects"])
+    intro = next(e for e in manifest["effects"] if e["type"] == "intro")
+    assert intro["start"] == 0.0
+
+
+def test_manifest_opening_card_title_clipped_to_eight():
+    rewrite = dict(REWRITE, publish_titles=["王阳明心学到底有多牛一句话讲透"])
+    manifest = build_effects_manifest(PLAN, rewrite)
+    opening = manifest["effects"][0]
+    assert opening["type"] == "opening_card"
+    assert len(opening["title"]) <= 8
+
+
+def test_manifest_keyword_pop_per_section_skips_first():
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 6.0},
+            {"index": 1, "title": "第一节", "duration_seconds": 10.0},
+            {"index": 2, "title": "第二节", "duration_seconds": 10.0},
+        ]
+    }
+    rewrite = {
+        "publish_titles": ["主题词候选"],
+        "sections": [
+            {"narration": "重点是「反脆弱」思维"},
+            {"narration": "再讲一个数字3步法"},
+        ],
+    }
+    manifest = build_effects_manifest(plan, rewrite)
+    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    # 第 0 节 hook 跳过；第 1 节引号词 > 第 2 节数字短语
+    assert [k["keyword"] for k in kws] == ["反脆弱", "3步"]
+    # 第 1 节起点 6.0 + 40%*10 = 10.0
+    assert kws[0]["start"] == pytest.approx(6.0 + 10.0 * 0.4, abs=1 / 30)
+    assert kws[0]["duration"] == 1.6
+
+
+def test_manifest_keyword_pop_falls_back_to_title():
+    # 无引号/数字 → 取节标题头 6 字兜底；无 rewrite 也能从 plan 标题产出关键词。
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 6.0},
+            {"index": 1, "title": "低杠杆保现金流才是出路", "duration_seconds": 10.0},
+        ]
+    }
+    manifest = build_effects_manifest(plan, None)
+    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    assert [k["keyword"] for k in kws] == ["低杠杆保现金"]
+
+
+def test_extract_keyword_priority():
+    from video_factory.effects import _extract_keyword
+
+    assert _extract_keyword("他说「断舍离」是关键", "标题") == "断舍离"          # 引号优先
+    assert _extract_keyword("涨了50%不止", "标题") == "50%"                     # 数字次之
+    assert _extract_keyword("没有引号也没数字", "低杠杆保现金流") == "低杠杆保现金"  # 头 6 字兜底
+    assert _extract_keyword("", "") == ""                                       # 全空 → 空串（跳过）
+
+
+def test_composition_map_covers_keyword_and_opening():
+    from video_factory.effects import _COMPOSITION_BY_TYPE
+
+    assert _COMPOSITION_BY_TYPE["keyword_pop"] == "KeywordPop"
+    assert _COMPOSITION_BY_TYPE["opening_card"] == "OpeningCard"
+
+
+def test_sfx_mapping_covers_keyword_opening_transition():
+    from video_factory.sfx import SFX_BY_TYPE
+
+    for t in ("keyword_pop", "opening_card", "transition"):
+        assert t in SFX_BY_TYPE
+
+
+# ---------- 转场特效音（Task B）：转场点混入 whoosh ----------
+
+def test_overlay_mixes_transition_whoosh_at_transition_points(tmp_path):
+    base = tmp_path / "release.mp4"
+    base.write_bytes(b"base")
+    e0 = tmp_path / "effect_00.mov"
+    e0.write_bytes(b"a")
+    sfx_dir = _make_sfx_dir(tmp_path)
+    runner = _OverlayRecorder(probe_duration=2.0, channels=2)
+
+    overlay_effects(
+        base,
+        [{"path": e0, "start": 0.0, "type": "intro"}],
+        tmp_path / "out.mp4",
+        runner=runner,
+        sfx_enabled=True,
+        sfx_dir=sfx_dir,
+        transition_points=[3.0, 7.5],
+    )
+
+    cmd = next(c for c in runner.commands if "-filter_complex" in c)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    # intro whoosh + 两个转场 whoosh 一起混：amix inputs = 1(底) + 1(intro) + 2(转场) = 4
+    assert "amix=inputs=4:duration=first:normalize=0" in fc
+    assert "adelay=3000:all=1" in fc
+    assert "adelay=7500:all=1" in fc
+    # transition.wav 作为额外输入进混音
+    assert str(sfx_dir / "transition.wav") in cmd
+
+
+def test_overlay_no_transition_sfx_when_points_empty(tmp_path):
+    # 无转场点（未走 xfade）→ 只混特效自身音效，不引入 transition。
+    base = tmp_path / "release.mp4"
+    base.write_bytes(b"base")
+    e0 = tmp_path / "effect_00.mov"
+    e0.write_bytes(b"a")
+    sfx_dir = _make_sfx_dir(tmp_path)
+    runner = _OverlayRecorder(probe_duration=2.0, channels=2)
+
+    overlay_effects(
+        base,
+        [{"path": e0, "start": 0.0, "type": "intro"}],
+        tmp_path / "out.mp4",
+        runner=runner,
+        sfx_enabled=True,
+        sfx_dir=sfx_dir,
+        transition_points=[],
+    )
+
+    cmd = next(c for c in runner.commands if "-filter_complex" in c)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=first:normalize=0" in fc  # 底 + intro
+    assert str(sfx_dir / "transition.wav") not in cmd
+
+
+# ============================================================
+# 任务A：LLM 强调计划 - emphasis 贯穿动效 + 密度控制 + 三色轮换
+# ============================================================
+
+from video_factory.effects import (  # noqa: E402
+    DENSITY_MIN_GAP_S,
+    DENSITY_VACUUM_S,
+    KEYWORD_POP_COLORS,
+    _apply_density_control,
+    _derive_keyword_events,
+)
+
+
+# ---- 辅助工具 ----
+
+def _make_section(title: str, duration_seconds: float) -> dict:
+    return {"title": title, "duration_seconds": duration_seconds}
+
+
+def _make_rewrite_section(narration: str, emphasis=None) -> dict:
+    result = {"title": "标题", "narration": narration, "visual_hint": ""}
+    if emphasis is not None:
+        result["emphasis"] = emphasis
+    return result
+
+
+def _starts(durations: list[float]) -> list[float]:
+    out, cursor = [], 0.0
+    for d in durations:
+        out.append(cursor)
+        cursor += d
+    return out
+
+
+# ---- _derive_keyword_events ----
+
+def test_derive_keyword_events_uses_emphasis_when_present():
+    """有 emphasis 时按均匀分布取落点（不走规则抽取）。"""
+    sections = [
+        _make_section("hook", 10.0),
+        _make_section("第一节", 30.0),  # 3条emphasis → 30/4=7.5s间隔
+    ]
+    rw_sections = [
+        _make_rewrite_section(
+            "这节口播文案",
+            emphasis=[
+                {"text": "核心词A", "kind": "keyword"},
+                {"text": "50%收益", "kind": "number"},
+                {"text": "持续就是力量", "kind": "golden"},
+            ],
+        )
+    ]
+    starts = _starts([10.0, 30.0])
+
+    events = _derive_keyword_events(sections, rw_sections, starts)
+
+    # 跳过 hook 节，只处理第一节
+    assert len(events) == 3
+    # 均匀分布：at 1/(3+1)*30=7.5, 2/(3+1)*30=15, 3/(3+1)*30=22.5，加 section_start=10
+    texts = [e[1] for e in events]
+    assert texts == ["核心词A", "50%收益", "持续就是力量"]
+    times = [e[0] for e in events]
+    assert abs(times[0] - (10 + 7.5)) < 0.01
+    assert abs(times[1] - (10 + 15.0)) < 0.01
+    assert abs(times[2] - (10 + 22.5)) < 0.01
+
+
+def test_derive_keyword_events_falls_back_to_rule_without_emphasis():
+    """无 emphasis 时回落规则抽取：节内 40% 处，行为与改版前完全一致。"""
+    sections = [
+        _make_section("hook", 6.0),
+        _make_section("第一节", 20.0),
+    ]
+    # rewrite 有对应节但无 emphasis
+    rw_sections = [_make_rewrite_section("带「核心操作」的口播")]
+    starts = _starts([6.0, 20.0])
+
+    events = _derive_keyword_events(sections, rw_sections, starts)
+
+    assert len(events) == 1
+    assert events[0][1] == "核心操作"  # 「」引号内词
+    # 落点：6 + 20*0.4 = 14
+    assert abs(events[0][0] - 14.0) < 0.01
+
+
+def test_derive_keyword_events_skips_hook_section():
+    """第 0 节（hook）始终跳过，不生成 keyword_pop。"""
+    sections = [_make_section("hook", 10.0)]
+    events = _derive_keyword_events(sections, [], _starts([10.0]))
+    assert events == []
+
+
+def test_derive_keyword_events_uses_title_fallback_for_empty_narration():
+    """空口播 + 无 emphasis 时，_section_title 兜底标题作关键词（永不返回空）。"""
+    sections = [
+        _make_section("hook", 5.0),
+        _make_section("核心节", 10.0),
+    ]
+    rw_sections = [_make_rewrite_section("")]  # 空口播，无引号/数字
+    events = _derive_keyword_events(sections, rw_sections, _starts([5.0, 10.0]))
+    # 空口播 → 回落节标题 "核心节"[:6]
+    assert len(events) == 1
+    assert events[0][1] == "核心节"
+
+
+# ---- _apply_density_control ----
+
+def test_density_thinning_removes_events_closer_than_min_gap():
+    """两个事件间隔 < DENSITY_MIN_GAP_S 时，后出现的被丢弃（抽稀）。"""
+    gap = DENSITY_MIN_GAP_S - 1.0  # 比最小间隔小 1s
+    events = [(10.0, "词A"), (10.0 + gap, "词B"), (30.0, "词C")]
+    sections = [_make_section("hook", 5.0), _make_section("节", 35.0)]
+    starts = _starts([5.0, 35.0])
+
+    result = _apply_density_control(events, sections, [], starts)
+
+    times = [e[0] for e in result]
+    # 词B 太近被丢，词A 和 词C 保留
+    assert 10.0 in times
+    assert 30.0 in times
+    assert 10.0 + gap not in times
+
+
+def test_density_thinning_keeps_events_at_exactly_min_gap():
+    """间隔恰好等于 DENSITY_MIN_GAP_S 时，两者都保留（边界：>= 不是 >）。"""
+    events = [(10.0, "词A"), (10.0 + DENSITY_MIN_GAP_S, "词B")]
+    sections = [_make_section("hook", 5.0), _make_section("节", 25.0)]
+    starts = _starts([5.0, 25.0])
+
+    result = _apply_density_control(events, sections, [], starts)
+
+    assert len(result) == 2
+
+
+def test_density_vacuum_fill_adds_event_in_large_gap():
+    """相邻两事件间隔 > DENSITY_VACUUM_S 时，在中点插入规则抽取的 keyword_pop。"""
+    # 第一节事件在 10s，第二节事件在 10 + DENSITY_VACUUM_S + 5 = 35s
+    gap_end = 10.0 + DENSITY_VACUUM_S + 5.0
+    events = [(10.0, "词A"), (gap_end, "词B")]
+    # 三节：hook 5s，节1 20s，节2 15s
+    sections = [
+        _make_section("hook", 5.0),
+        _make_section("第一节", 20.0),
+        _make_section("第二节", 15.0),
+    ]
+    rw_sections = [
+        _make_rewrite_section("「关键词X」的实操方法"),
+        _make_rewrite_section("「关键词Y」的进阶技巧"),
+    ]
+    starts = _starts([5.0, 20.0, 15.0])
+
+    result = _apply_density_control(events, sections, rw_sections, starts)
+
+    # 应有补填事件（总数 > 2）
+    assert len(result) > 2
+    # 补填事件时间在 (10, gap_end) 区间内
+    filled_times = [e[0] for e in result if e[0] not in (10.0, gap_end)]
+    assert len(filled_times) >= 1
+    assert all(10.0 < t < gap_end for t in filled_times)
+
+
+def test_density_no_fill_for_gap_at_or_below_threshold():
+    """间隔恰好等于 DENSITY_VACUUM_S 时不触发补填（> 不是 >=）。"""
+    events = [(5.0, "词A"), (5.0 + DENSITY_VACUUM_S, "词B")]
+    sections = [_make_section("hook", 3.0), _make_section("节", 30.0)]
+    starts = _starts([3.0, 30.0])
+
+    result = _apply_density_control(events, sections, [], starts)
+
+    assert len(result) == 2  # 无补填
+
+
+def test_density_control_returns_empty_for_empty_input():
+    """空输入直接返回空（不崩溃）。"""
+    sections = [_make_section("hook", 5.0)]
+    result = _apply_density_control([], sections, [], _starts([5.0]))
+    assert result == []
+
+
+# ---- 三色轮换 ----
+
+def test_keyword_pop_color_cycles_red_yellow_white():
+    """keyword_pop 三色按全片动效序号轮换：红→黄→白→红→……"""
+    # 3节（hook + 2内容节），无 emphasis → 规则抽取每节一个 keyword_pop
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
+            {"index": 1, "title": "节一", "duration_seconds": 30.0, "slices": []},
+            {"index": 2, "title": "节二", "duration_seconds": 30.0, "slices": []},
+            {"index": 3, "title": "节三", "duration_seconds": 30.0, "slices": []},
+        ]
+    }
+    manifest = build_effects_manifest(plan, None)
+    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+
+    # 每节规则抽取一个 keyword_pop（3 节，跳过 hook）
+    assert len(kw_pops) == 3
+    assert kw_pops[0]["color"] == KEYWORD_POP_COLORS[0]  # 红
+    assert kw_pops[1]["color"] == KEYWORD_POP_COLORS[1]  # 黄
+    assert kw_pops[2]["color"] == KEYWORD_POP_COLORS[2]  # 白
+
+
+def test_keyword_pop_color_wraps_around_at_3():
+    """4 个 keyword_pop 时第 4 个颜色回到红（轮换周期=3）。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
+            {"index": 1, "title": "节一", "duration_seconds": 30.0, "slices": []},
+            {"index": 2, "title": "节二", "duration_seconds": 30.0, "slices": []},
+            {"index": 3, "title": "节三", "duration_seconds": 30.0, "slices": []},
+            {"index": 4, "title": "节四", "duration_seconds": 30.0, "slices": []},
+        ]
+    }
+    manifest = build_effects_manifest(plan, None)
+    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+
+    assert len(kw_pops) == 4
+    # 第 4 个（index=3）= 3 % 3 = 0 → 红
+    assert kw_pops[3]["color"] == KEYWORD_POP_COLORS[0]
+
+
+# ---- 向后兼容：无 emphasis 时 manifest 总条数不变 ----
+
+def test_manifest_count_unchanged_without_emphasis():
+    """无 emphasis 时 manifest 总条数与重构前完全一致（8 条）。"""
+    # 与 test_render_effects_partial_failure_keeps_original_indices 用同一 PLAN+REWRITE
+    manifest = build_effects_manifest(PLAN, REWRITE)
+    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    # 2 节内容节（hook 跳过）→ 2 个 keyword_pop
+    assert len(kw_pops) == 2
+    # 总条数不变
+    assert len(manifest["effects"]) == 8
+
+
+def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
+    """有 emphasis 时 keyword_pop 落点来自 emphasis 均匀分布（不走 40% 规则）。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
+            {"index": 1, "title": "第一节", "duration_seconds": 40.0, "slices": []},
+        ]
+    }
+    rewrite_with_emphasis = {
+        "hook": "钩子",
+        "sections": [
+            {
+                "title": "第一节",
+                "narration": "这节口播文案",
+                "visual_hint": "",
+                "emphasis": [
+                    {"text": "关键词X", "kind": "keyword"},
+                    {"text": "关键词Y", "kind": "golden"},
+                ],
+            }
+        ],
+        "publish_titles": [],
+        "notes": "",
+    }
+    manifest = build_effects_manifest(plan, rewrite_with_emphasis)
+    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+
+    # 2 条 emphasis → 2 个 keyword_pop（均匀分布：40/(2+1)=13.33s，5+13.33, 5+26.67）
+    assert len(kw_pops) == 2
+    assert abs(kw_pops[0]["start"] - (5.0 + 40.0 / 3)) < 0.5
+    assert abs(kw_pops[1]["start"] - (5.0 + 40.0 * 2 / 3)) < 0.5
+    # 关键词文本来自 emphasis，不是规则抽取的节标题
+    assert kw_pops[0]["keyword"] == "关键词X"
+    assert kw_pops[1]["keyword"] == "关键词Y"

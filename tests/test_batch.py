@@ -797,3 +797,70 @@ def test_run_job_clears_stale_final_before_running(tmp_path, patch_runners):
     assert "subtitled" not in report.outputs  # 旧成片已清
     assert report.to_dict()["final"] == ""  # final 不再指向陈旧文件
     assert not (out / "release_subtitled.mp4").exists()
+
+
+def test_run_job_surfaces_stage_error_detail(tmp_path, monkeypatch):
+    """回归（2026-07-14 事故）：阶段失败落盘的 <stage>_error.txt 必须带进 JobReport.error，
+    任务看板才能显示根因（此前只有「返回非 0 退出码：1」，排障全靠猜）。"""
+    from video_factory import stage_report
+
+    def failing_rewrite(job, job_dir):
+        stage_report.write_stage_error(job_dir, "rewrite", "改写失败：未配置任何 LLM 凭据。")
+        return 1
+
+    monkeypatch.setattr(batch, "STAGE_RUNNERS", {**batch.STAGE_RUNNERS, "rewrite": failing_rewrite})
+    job = resolve_job({"name": "j", "source": "s", "assets": "a", "output": str(tmp_path / "o")}, 0)
+    report = run_job(job)
+    assert report.status == "failed"
+    assert "未配置任何 LLM 凭据" in (report.error or "")  # 根因进报告
+
+
+def test_run_job_clears_stale_stage_errors(tmp_path, patch_runners):
+    """回归：上一轮的 <stage>_error.txt 不许串进本轮报告（重跑前必须清）。"""
+    patch_runners(RunnerRecorder())  # 本轮全部成功
+    out = tmp_path / "job"
+    out.mkdir()
+    (out / "rewrite_error.txt").write_text("上一轮的旧错误", encoding="utf-8")
+    job = resolve_job({"name": "j", "source": "s", "assets": "a", "output": str(out)}, 0)
+    report = run_job(job)
+    assert report.status == "ok" and report.error is None
+    assert not (out / "rewrite_error.txt").exists()  # 旧错误已清
+
+
+# ---------- 配音语速（P12） ----------
+
+def test_voice_speed_resolves_validates_and_routes(tmp_path):
+    source, assets = _make_valid_paths(tmp_path)
+    # 未设 → None，不进 argv
+    plain = resolve_job({"source": source, "assets": assets}, 0)
+    assert plain.voice_speed is None
+    assert "--voice-speed" not in build_assemble_argv(plain, tmp_path / "o")
+    # 设了 → float 化、过校验、进 assemble argv
+    job = resolve_job({"source": source, "assets": assets, "voice_speed": "1.2"}, 0)
+    assert job.voice_speed == 1.2
+    assert validate_job(job) == []
+    asm = build_assemble_argv(job, tmp_path / "o")
+    assert asm[asm.index("--voice-speed") + 1] == "1.2"
+
+
+def test_voice_speed_out_of_range_invalid(tmp_path):
+    source, assets = _make_valid_paths(tmp_path)
+    job = resolve_job({"source": source, "assets": assets, "voice_speed": 3.0}, 0)
+    errors = validate_job(job)
+    assert any("voice_speed" in e for e in errors)
+
+
+def test_voice_speed_ignored_with_existing_audio(tmp_path):
+    """复用现成配音（--audio）时语速不传：变速会毁用户的成品音频。"""
+    source, assets = _make_valid_paths(tmp_path)
+    audio = tmp_path / "v.wav"
+    audio.write_bytes(b"wav")
+    job = resolve_job(
+        {"source": source, "assets": assets, "audio": str(audio), "voice_speed": 1.5}, 0)
+    assert "--voice-speed" not in build_assemble_argv(job, tmp_path / "o")
+
+
+def test_voice_speed_garbage_marks_invalid(tmp_path):
+    """voice_speed 写成非数字不许击穿整批：resolve_all 记 invalid 继续。"""
+    jobs = resolve_all([{"name": "bad", "source": "s", "assets": "a", "voice_speed": "fast"}])
+    assert validate_job(jobs[0]) != []
