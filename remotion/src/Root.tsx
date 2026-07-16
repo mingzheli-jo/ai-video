@@ -187,6 +187,18 @@ export const RemotionRoot: React.FC = () => {
         schema={coverCardSchema}
         defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
       />
+      {/* 抖音横版视频专用封面（2026-07-16 实测：抖音主页作品位是竖向 ~1080x1464，
+          16:9 封面会被中心裁掉左右——上传横版视频时选这张 3:4，主页展示才完整） */}
+      <Composition
+        id="Cover3x4"
+        component={CoverCard}
+        durationInFrames={1}
+        fps={FPS}
+        width={1080}
+        height={1464}
+        schema={coverCardSchema}
+        defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
+      />
       <Composition
         id="AmbientParticles"
         component={AmbientParticles}

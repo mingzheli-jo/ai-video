@@ -465,9 +465,12 @@ function renderTask(t) {
     const covers = [];
     if (t.outputs.cover_16x9) covers.push(`<a href="/media?path=${encodeURIComponent(t.outputs.cover_16x9)}" target="_blank"><img class="cover-thumb wide" src="/media?path=${encodeURIComponent(t.outputs.cover_16x9)}" alt="封面 16:9"></a>`);
     if (t.outputs.cover_9x16) covers.push(`<a href="/media?path=${encodeURIComponent(t.outputs.cover_9x16)}" target="_blank"><img class="cover-thumb tall" src="/media?path=${encodeURIComponent(t.outputs.cover_9x16)}" alt="封面 9:16"></a>`);
+    if (t.outputs.cover_3x4) covers.push(`<a href="/media?path=${encodeURIComponent(t.outputs.cover_3x4)}" target="_blank" title="抖音横版视频专用（主页作品位是竖向，16:9 会被裁边）"><img class="cover-thumb tall" src="/media?path=${encodeURIComponent(t.outputs.cover_3x4)}" alt="封面 3:4（抖音横版用）"></a>`);
     if (covers.length) body += `<div class="covers">${covers.join('')}</div>`;
     if (t.outputs.publish_kit) {
-      body += `<div><button class="btn btn-ghost btn-kit" data-task="${esc(t.id)}" data-kit-path="${esc(t.outputs.publish_kit)}">发布物料（标题/简介/标签）</button><pre class="kit-pre" id="kit_${esc(t.id)}" style="display:none"></pre></div>`;
+      body += `<div><button class="btn btn-ghost btn-kit" data-task="${esc(t.id)}" data-kit-path="${esc(t.outputs.publish_kit)}">发布物料（标题/简介/标签）</button>`
+        + `<button class="btn btn-ghost copy-btn" data-open="${esc(t.outputs.publish_kit)}" style="margin-left:8px">打开发布文件夹</button>`
+        + `<pre class="kit-pre" id="kit_${esc(t.id)}" style="display:none"></pre></div>`;
     }
   }
   const elapsed = t.elapsed_seconds ? `${t.elapsed_seconds.toFixed(1)}s` : '';

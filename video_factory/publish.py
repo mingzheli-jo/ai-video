@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,8 +32,14 @@ Runner = Callable[..., subprocess.CompletedProcess]
 PUBLISH_DIRNAME = "publish"
 KIT_FILENAME = "publish_kit.json"
 TXT_FILENAME = "发布物料.txt"
-# (composition id, 输出文件名)；两画幅共用 CoverCard 组件。
-COVER_SPECS = (("Cover16x9", "cover_16x9.jpg"), ("Cover9x16", "cover_9x16.jpg"))
+# (composition id, 输出文件名, kit 键)；各画幅共用 CoverCard 组件。
+# 3x4（1080×1464）是抖音横版视频专用封面（2026-07-16 实测+官方展示区）：抖音个人主页
+# 作品位是竖向 ~1080×1464，16:9 封面会被中心裁掉左右——横版视频上传时选 3x4 这张。
+COVER_SPECS = (
+    ("Cover16x9", "cover_16x9.jpg", "16x9"),
+    ("Cover9x16", "cover_9x16.jpg", "9x16"),
+    ("Cover3x4", "cover_3x4.jpg", "3x4"),
+)
 COVER_TITLE_MAX_CHARS = 20   # 封面标题超长截断（组件内还会拆 ≤2 行）
 DESCRIPTION_MAX_CHARS = 160  # 平台简介长度上限（大多数平台 200 字内，留余量）
 TAGS_MAX = 6
@@ -97,6 +104,69 @@ def pick_cover_background(
     return None, warnings
 
 
+def _probe_resolution(path: Path, runner: Runner) -> tuple[int, int]:
+    """ffprobe 读 v:0 宽高（判横竖版用）；探测失败返回 (0,0)，调用方留痕跳过。"""
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-print_format", "json", str(path),
+    ]
+    try:
+        completed = runner(command, check=False, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    except OSError:
+        return (0, 0)
+    if getattr(completed, "returncode", 0) != 0:
+        return (0, 0)
+    try:
+        streams = json.loads(getattr(completed, "stdout", "") or "{}").get("streams") or []
+        if not streams:
+            return (0, 0)
+        return (int(streams[0].get("width") or 0), int(streams[0].get("height") or 0))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return (0, 0)
+
+
+# 成片检索优先级（字幕 > 特效 > 原片）与画幅子目录（双画幅链路的落盘位）。
+_RELEASE_PRIORITY = ("release_subtitled.mp4", "release_with_effects.mp4", "release.mp4")
+_ASPECT_SUBDIRS = ("", "9x16", "16x9")  # "" = 根目录（单画幅链路）
+
+
+def _archive_videos(
+    job_dir: Path, publish_dir: Path, runner: Runner
+) -> tuple[dict[str, str], list[str]]:
+    """把最终成片归档进 publish/（2026-07-16 用户定案：视频+封面+文案一站式查找）。
+
+    扫描 根目录/9x16/16x9 各自的最优成片，按实际分辨率命名 视频_竖版/横版；
+    同盘硬链接零拷贝，跨盘/失败回落复制。任何失败只留痕不阻断。
+    """
+    archived: dict[str, str] = {}
+    warnings: list[str] = []
+    for sub in _ASPECT_SUBDIRS:
+        base = job_dir / sub if sub else job_dir
+        source = next((base / n for n in _RELEASE_PRIORITY if (base / n).exists()), None)
+        if source is None:
+            continue
+        width, height = _probe_resolution(source, runner)
+        if width <= 0 or height <= 0:
+            warnings.append(f"成片分辨率探测失败，跳过归档：{source}")
+            continue
+        label = "竖版_9x16" if height > width else "横版_16x9"
+        if label in archived:
+            continue  # 同向已归档（根目录与子目录并存的遗留场景），先到先得
+        dest = publish_dir / f"视频_{label}.mp4"
+        try:
+            dest.unlink(missing_ok=True)
+            try:
+                os.link(source, dest)  # 同盘硬链接：零拷贝零额外磁盘
+            except OSError:
+                shutil.copy2(source, dest)
+        except OSError as exc:
+            warnings.append(f"成片归档失败（{source} → {dest}）：{exc}")
+            continue
+        archived[label] = str(dest)
+    return archived, warnings
+
+
 def _data_uri(path: Path) -> str:
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -143,7 +213,7 @@ def render_covers(
     }
     props_path = output_dir / "cover.props.json"
     props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
-    for composition, filename in COVER_SPECS:
+    for composition, filename, key in COVER_SPECS:
         out_path = output_dir / filename
         command = [
             npx, "remotion", "still", str(entry), composition, str(out_path),
@@ -162,7 +232,6 @@ def render_covers(
         if not out_path.exists():
             warnings.append(f"封面 {composition} 渲染声称成功但文件未落盘：{out_path}")
             continue
-        key = "16x9" if composition == "Cover16x9" else "9x16"
         covers[key] = str(out_path)
     return covers, warnings
 
@@ -253,6 +322,13 @@ def _write_txt(path: Path, kit: dict) -> None:
         lines += ["", "【封面】"]
         for key, p in covers.items():
             lines.append(f"{key}: {p}")
+        if "3x4" in covers:
+            lines.append("（抖音传横版视频请选 3x4 这张：主页作品位是竖向 ~1080×1464，16x9 会被裁掉左右）")
+    videos = kit.get("videos") or {}
+    if videos:
+        lines += ["", "【成片】"]
+        for key, p in videos.items():
+            lines.append(f"{key}: {p}")
     if kit.get("warnings"):
         lines += ["", "【告警】"] + [f"- {w}" for w in kit["warnings"]]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -283,6 +359,9 @@ def generate_publish_kit(
     warnings += cover_warnings
     description, tags, desc_warnings = build_description_and_tags(rewrite, provider)
     warnings += desc_warnings
+    # 成片归档：横竖版视频硬链接进 publish/，与封面/文案同一文件夹一站式查找。
+    archived, archive_warnings = _archive_videos(job_dir, publish_dir, runner)
+    warnings += archive_warnings
 
     kit = {
         "version": "publish_kit_v1",
@@ -290,6 +369,7 @@ def generate_publish_kit(
         "description": description,
         "tags": tags,
         "covers": covers,
+        "videos": archived,
         "warnings": warnings,
     }
     (publish_dir / KIT_FILENAME).write_text(
@@ -326,7 +406,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     publish_dir = Path(args.output) / PUBLISH_DIRNAME
-    print(f"发布物料完成：{len(kit['titles'])} 个标题候选，封面 {len(kit['covers'])} 张")
+    print(
+        f"发布物料完成：{len(kit['titles'])} 个标题候选，封面 {len(kit['covers'])} 张，"
+        f"归档成片 {len(kit.get('videos') or {})} 支"
+    )
     print(f"- 物料:     {publish_dir / TXT_FILENAME}")
     print(f"- 留档:     {publish_dir / KIT_FILENAME}")
     for key, path in kit["covers"].items():

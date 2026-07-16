@@ -65,10 +65,11 @@ def test_generate_publish_kit_end_to_end_offline(tmp_path, monkeypatch):
 
     kit = generate_publish_kit(rewrite_path, None, job_dir, tag="心学频道", runner=runner)
 
-    # 双封面：两个 composition 各渲一张
-    assert set(kit["covers"]) == {"16x9", "9x16"}
+    # 三封面：16x9（B站/西瓜）、9x16（竖屏）、3x4（抖音横版专用——主页作品位
+    # 是竖向 ~1080×1464，16:9 会被裁掉左右，2026-07-16 用户实测+查证）
+    assert set(kit["covers"]) == {"16x9", "9x16", "3x4"}
     comps = [c[c.index("still") + 2] for c in runner.commands if "still" in c]
-    assert comps == ["Cover16x9", "Cover9x16"]
+    assert comps == ["Cover16x9", "Cover9x16", "Cover3x4"]
     # props：标题取 publish_titles[0]、底图 data URI 来自 gen_assets 首图
     props = json.loads((job_dir / "publish" / "cover.props.json").read_text(encoding="utf-8"))
     assert props["title"].startswith("王阳明")
@@ -147,3 +148,55 @@ def test_build_publish_argv_picks_final_video(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert "--video" not in build_publish_argv(job, empty)
+
+
+# ---- 成片归档（2026-07-16 用户定案：视频+封面+文案一站式文件夹） ----
+
+
+class _StillAndProbeRecorder(_StillRecorder):
+    """still 落占位 jpg；ffprobe 按路径回分辨率（9x16 目录→竖版，其余→横版）。"""
+
+    def __call__(self, command, **kwargs):
+        if command and command[0] == "ffprobe":
+            path = str(command[-1])
+            payload = (
+                {"streams": [{"width": 1080, "height": 1920}]}
+                if "9x16" in path
+                else {"streams": [{"width": 1920, "height": 1080}]}
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        return super().__call__(command, **kwargs)
+
+
+def test_publish_archives_dual_videos_into_publish_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("video_factory.publish.shutil.which", lambda _: "/usr/bin/npx")
+    job_dir = tmp_path / "job"
+    rewrite_path = _write_rewrite(job_dir)
+    for sub in ("9x16", "16x9"):
+        (job_dir / sub).mkdir()
+        (job_dir / sub / "release_subtitled.mp4").write_bytes(b"v" * 32)
+    runner = _StillAndProbeRecorder()
+
+    kit = generate_publish_kit(rewrite_path, None, job_dir, runner=runner)
+
+    # 双画幅成片按横竖命名归档进 publish/（硬链接或复制），kit 留档路径
+    assert set(kit["videos"]) == {"竖版_9x16", "横版_16x9"}
+    assert (job_dir / "publish" / "视频_竖版_9x16.mp4").exists()
+    assert (job_dir / "publish" / "视频_横版_16x9.mp4").exists()
+    txt = (job_dir / "publish" / TXT_FILENAME).read_text(encoding="utf-8")
+    assert "【成片】" in txt
+    assert "3x4 这张" in txt  # 抖音横版封面提示写进物料
+
+
+def test_publish_archives_single_root_video_without_npx(tmp_path, monkeypatch):
+    # 无 npx（封面跳过）也照常归档根目录单画幅成片。
+    monkeypatch.setattr("video_factory.publish.shutil.which", lambda _: None)
+    job_dir = tmp_path / "job"
+    rewrite_path = _write_rewrite(job_dir)
+    (job_dir / "release_subtitled.mp4").write_bytes(b"v")
+    runner = _StillAndProbeRecorder()
+
+    kit = generate_publish_kit(rewrite_path, None, job_dir, runner=runner)
+
+    assert set(kit["videos"]) == {"横版_16x9"}
+    assert (job_dir / "publish" / "视频_横版_16x9.mp4").exists()
