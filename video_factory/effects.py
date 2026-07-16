@@ -835,55 +835,94 @@ def _build_rich_effects(
     """
     rich: list[EffectSpec] = []
     quote_windows: list[tuple[float, float]] = []
+    rewrite_sections = (rewrite or {}).get("sections") or []
+    starts = _section_starts(sections)
+    # 金句 emphasis 候选提前派生：有 timeline 时金句卡要从中选锚（见下）。
+    golden_events = _derive_golden_events(sections, rewrite_sections, starts, timeline)
 
-    # 金句卡：取发布标题候选1（通常最凝练）兜底 hook；撞上章节卡窗口就顺延。
-    quote_text = ""
-    if isinstance(rewrite, dict):
-        titles = rewrite.get("publish_titles")
-        if isinstance(titles, list) and titles and str(titles[0] or "").strip():
-            quote_text = str(titles[0]).strip()
-        else:
-            quote_text = str(rewrite.get("hook") or "").strip()
-    if quote_text and total_duration > QUOTE_DURATION * 2:
-        start = total_duration * QUOTE_POSITION_RATIO
-        starts = _section_starts(sections)
-        for i in range(1, len(sections)):  # 章节卡窗口 = [节起点, +CHAPTER_CARD_DURATION]
-            card_start = starts[i]
-            if card_start - QUOTE_DURATION < start < card_start + CHAPTER_CARD_DURATION:
-                start = card_start + CHAPTER_CARD_DURATION + 0.2
-                break
-        # 「出处：正文」形态（王阳明：此心不动…）走打字机逐字呈现（2026-07-16），
-        # 时长随正文字数伸缩（前 65% 时长要打得完，见组件）；普通金句仍走 quote_card。
-        tw_match = _TYPEWRITER_QUOTE_RE.match(quote_text)
-        if tw_match is not None:
-            body = tw_match.group(2).strip()
-            duration = min(
-                TYPEWRITER_MAX_DURATION,
-                max(TYPEWRITER_MIN_DURATION, TYPEWRITER_CHAR_SECONDS * len(body) / 0.65),
-            )
-            spec = EffectSpec(
-                type="typewriter_quote",
-                start=start,
-                duration=duration,
-                props={"source": tw_match.group(1).strip(), "text": body, "accent": accent},
-            )
-        else:
-            spec = EffectSpec(
-                type="quote_card",
-                start=start,
-                duration=QUOTE_DURATION,
-                props={"text": quote_text, "accent": accent},
-            )
-        if start + spec.duration < total_duration:
+    # 金句卡（2026-07-16 三次定案：它是全链路最后一个不锚音频的特效——55% 估算位 +
+    # 从未被口播的发布标题，实锤 145315/162530 两支"很突兀"）。改为：
+    # - 有 timeline：取**离视频中点最近的命中金句**，内容=口播原句、落点=真句起点，
+    #   出卡瞬间说的就是卡上那句话；没有命中金句就不出卡（宁缺勿滥）。
+    # - 无 timeline（旧链路）：维持发布标题 + 55% 估算位的原行为。
+    if timeline:
+        card_pick: tuple[float, str, float] | None = None  # (真句起点, 口播原句, 句时长)
+        best_dist = float("inf")
+        for gstart, _gtext in golden_events:
+            dist = abs(gstart - total_duration * QUOTE_POSITION_RATIO)
+            if dist < best_dist:
+                idx = _sentence_index_near(timeline, gstart)
+                if idx is not None:
+                    spoken = str(timeline[idx].get("text") or "").strip()
+                    if spoken:
+                        span = max(0.0, float(timeline[idx].get("end") or 0.0) - gstart)
+                        card_pick, best_dist = (gstart, spoken, span), dist
+        if card_pick is not None:
+            start, spoken, span = card_pick
+            duration = min(max(span + 1.2, QUOTE_DURATION), TYPEWRITER_MAX_DURATION + 1.5)
+            tw_match = _TYPEWRITER_QUOTE_RE.match(spoken)
+            if tw_match is not None:
+                spec = EffectSpec(
+                    type="typewriter_quote",
+                    start=start,
+                    duration=duration,
+                    props={"source": tw_match.group(1).strip(),
+                           "text": tw_match.group(2).strip(), "accent": accent},
+                )
+            else:
+                spec = EffectSpec(
+                    type="quote_card",
+                    start=start,
+                    duration=duration,
+                    props={"text": spoken, "accent": accent},
+                )
             rich.append(_frame_aligned(spec, fps))
-            # 金句卡时间窗：中段金句/弹词时刻要避开（中央卡片与中央大字叠一起会糊）。
+            # 金句卡时间窗：中段时刻避让 + 防同句在 sync 层重复出场。
             quote_windows.append((rich[-1].start, rich[-1].start + rich[-1].duration))
+    else:
+        quote_text = ""
+        if isinstance(rewrite, dict):
+            titles = rewrite.get("publish_titles")
+            if isinstance(titles, list) and titles and str(titles[0] or "").strip():
+                quote_text = str(titles[0]).strip()
+            else:
+                quote_text = str(rewrite.get("hook") or "").strip()
+        if quote_text and total_duration > QUOTE_DURATION * 2:
+            start = total_duration * QUOTE_POSITION_RATIO
+            for i in range(1, len(sections)):  # 章节卡窗口 = [节起点, +CHAPTER_CARD_DURATION]
+                card_start = starts[i]
+                if card_start - QUOTE_DURATION < start < card_start + CHAPTER_CARD_DURATION:
+                    start = card_start + CHAPTER_CARD_DURATION + 0.2
+                    break
+            # 「出处：正文」形态（王阳明：此心不动…）走打字机逐字呈现，
+            # 时长随正文字数伸缩（前 65% 时长要打得完，见组件）。
+            tw_match = _TYPEWRITER_QUOTE_RE.match(quote_text)
+            if tw_match is not None:
+                body = tw_match.group(2).strip()
+                duration = min(
+                    TYPEWRITER_MAX_DURATION,
+                    max(TYPEWRITER_MIN_DURATION, TYPEWRITER_CHAR_SECONDS * len(body) / 0.65),
+                )
+                spec = EffectSpec(
+                    type="typewriter_quote",
+                    start=start,
+                    duration=duration,
+                    props={"source": tw_match.group(1).strip(), "text": body, "accent": accent},
+                )
+            else:
+                spec = EffectSpec(
+                    type="quote_card",
+                    start=start,
+                    duration=QUOTE_DURATION,
+                    props={"text": quote_text, "accent": accent},
+                )
+            if start + spec.duration < total_duration:
+                rich.append(_frame_aligned(spec, fps))
+                quote_windows.append((rich[-1].start, rich[-1].start + rich[-1].duration))
 
     # 数字强调：跳过第 0 节（片头+要点卡已经很满），每节最多 1 个、全片最多 2 个。
     # 口播文本在 rewrite 里（拼装计划的节只有 title/duration）：计划第 i 节（i>=1）
     # 对应 rewrite 第 i-1 节（计划把 hook 计为第 0 节）。
-    rewrite_sections = (rewrite or {}).get("sections") or []
-    starts = _section_starts(sections)
     count = 0
     number_values: list[str] = []  # 已弹的数字，供 keyword_pop 去重（防同一数字弹两次）
     for i, section in enumerate(sections):
@@ -930,7 +969,8 @@ def _build_rich_effects(
     # 根治规则：凡进成片的中段时刻，**起点/行文本/逐行弹入/时长全部取自 timeline
     # 真句**（估算时间只用于候选排序，绝不落屏）；次数随片长 ceil(总长/35s) 动态
     # 控制在 1~6 次，候选不足时从 timeline 里挑适配短句补足。
-    golden_events = _derive_golden_events(sections, rewrite_sections, starts, timeline)
+    # golden_events 已在函数开头派生（金句卡选锚用同一份）；被金句卡选中的句子
+    # 落在 quote_windows 里，sync 层自动避让不重复出场。
     if timeline:
         rich.extend(_build_sync_layer(
             timeline, golden_events, keyword_events,

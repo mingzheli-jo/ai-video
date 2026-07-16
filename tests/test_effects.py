@@ -1594,8 +1594,9 @@ def test_hook_opener_offsets_fallback_without_timeline_unchanged():
     assert opener["offsets"][1] == pytest.approx(4 / 9 * 6.0, abs=0.05)
 
 
-def test_golden_lines_uses_timeline_sentence_start_and_duration():
-    """有 timeline：golden_lines start=句 start，duration=min(句时长+1.2, 4.5)，多行按标点拆。"""
+def test_golden_card_takes_midmost_and_other_golden_stays_sync_moment():
+    """两个命中金句：离中点近的升级金句卡（口播原句+真句起点），另一个保持
+    golden_lines 时刻（start=句 start、多行按标点拆、offsets 按字符占比分摊）。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0},
@@ -1603,28 +1604,36 @@ def test_golden_lines_uses_timeline_sentence_start_and_duration():
         ]
     }
     rewrite = {
-        "hook": "开场白",
         "sections": [{
             "narration": "这节口播",
-            "emphasis": [{"text": "持续做正确的事，时间会回报你", "kind": "golden"}],
+            "emphasis": [
+                {"text": "先认清能力圈，再谈执行", "kind": "golden"},
+                {"text": "持续做正确的事，时间会回报你", "kind": "golden"},
+            ],
         }],
     }
     timeline = [
-        # 句子含金句文本（归一化后包含），起 30.0 止 34.0（时长 4.0s）
+        {"text": "先认清能力圈，再谈执行", "start": 8.0, "end": 11.0},
+        # 起 30.0（46% 处，离 55% 中点更近 → 成卡），止 34.0（时长 4.0s）
         {"text": "我始终相信持续做正确的事，时间会回报你。", "start": 30.0, "end": 34.0},
     ]
     manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+
+    # 卡：口播原句、真句起点、时长盖住整句 min(max(4.0+1.2, 4.5), 6.0)=5.2
+    cards = [e for e in manifest["effects"] if e["type"] == "quote_card"]
+    assert len(cards) == 1
+    assert cards[0]["start"] == pytest.approx(30.0, abs=1 / 30)
+    assert cards[0]["text"] == "我始终相信持续做正确的事，时间会回报你。"
+    assert cards[0]["duration"] == pytest.approx(5.2, abs=1 / 30)
+
+    # 时刻：另一金句保持 golden_lines，多行标点拆 + 字符占比 offsets（span=3.0）
     golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
     assert len(golden) == 1
     g = golden[0]
-    assert g["start"] == pytest.approx(30.0, abs=1 / 30)
-    # duration = min(4.0 + 1.2, 4.5) = 4.5
-    assert g["duration"] == pytest.approx(4.5, abs=1 / 30)
-    # 屏幕文字用口播原句（2026-07-16 所见即所听），按子句标点拆成两行
-    assert g["lines"] == ["我始终相信持续做正确的事", "时间会回报你"]
-    # 行内 offsets 按字符占比在句时长(4.0)上分摊：首行 0，次行 12/18×4.0≈2.667
+    assert g["start"] == pytest.approx(8.0, abs=1 / 30)
+    assert g["lines"] == ["先认清能力圈", "再谈执行"]
     assert g["offsets"][0] == 0.0
-    assert g["offsets"][1] == pytest.approx(12 / 18 * 4.0, abs=0.05)
+    assert g["offsets"][1] == pytest.approx(6 / 10 * 3.0, abs=0.05)
 
 
 def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
@@ -1788,9 +1797,11 @@ def test_overlay_ambient_loop_uses_stream_loop_and_shortest(tmp_path):
 # ---- 2026-07-16 锚点强化：转述失配二次匹配 / 有轴不中则弃 / 开屏托底 ----
 
 
-def test_golden_paraphrase_rescued_by_number_token_and_shows_spoken_text():
+def test_golden_paraphrase_rescued_by_number_token_and_becomes_anchored_card():
     # emphasis 是转述（"有句话说"），口播是"有句话讲"：全文匹配失手，但 "90%" 数字
-    # token 全片唯一 → 二次锚定到真句 64.65s；且屏幕文字用口播原句（所见即所听）。
+    # token 全片唯一 → 二次锚定到真句 64.65s。离中点最近的命中金句升级为金句卡
+    # （2026-07-16 三次定案）：口播带出处形态（"有句话讲："）→ 打字机呈现，
+    # 落点=真句起点——出卡瞬间说的就是卡上那句话。
     plan = {"sections": [
         {"index": 0, "title": "hook", "duration_seconds": 5.0},
         {"index": 1, "title": "节一", "duration_seconds": 90.0},
@@ -1804,11 +1815,15 @@ def test_golden_paraphrase_rescued_by_number_token_and_shows_spoken_text():
         {"text": "有句话讲：90%的负面情绪来源都是对事件的解读", "start": 64.65, "end": 68.87},
     ]
     manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
-    golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
-    assert len(golden) == 1
-    assert golden[0]["start"] == pytest.approx(64.65, abs=1 / 30)
-    assert golden[0]["lines"] == ["有句话讲：90%的负面情绪来源都是对事件的解读"] or \
-        "".join(golden[0]["lines"]).startswith("有句话讲")
+    cards = [e for e in manifest["effects"] if e["type"] == "typewriter_quote"]
+    assert len(cards) == 1
+    assert cards[0]["start"] == pytest.approx(64.65, abs=1 / 30)
+    assert cards[0]["source"] == "有句话讲"
+    assert cards[0]["text"] == "90%的负面情绪来源都是对事件的解读"
+    # 时长盖住整句：min(max(4.22+1.2, 4.5), 6.0) ≈ 5.42
+    assert cards[0]["duration"] == pytest.approx(5.42, abs=0.05)
+    # 同句不再在 sync 层重复出场
+    assert all(e["type"] != "golden_lines" for e in manifest["effects"])
 
 
 def test_golden_unmatched_dropped_when_timeline_present():
