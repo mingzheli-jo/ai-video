@@ -65,8 +65,15 @@ _FONT_SIZE_CAP = 96
 # 左右安全边距占宽比例；配合按 _CHARS_PER_LINE_BUDGET 收字号，保证 MAX_CUE_CHARS 最多折 2 行。
 _SIDE_MARGIN_RATIO = 0.06
 _CHARS_PER_LINE_BUDGET = 13  # ceil(MAX_CUE_CHARS/2)，令满长字幕最多折成 2 行都在可用宽度内
-# 底部安全边距：h*0.08 取整。
+# 底部安全边距：横屏 h*0.08。竖屏 h*0.18（2026-07-16 用户定案：短视频平台底部有
+# 文案区/进度条会遮字幕，上提到"中下方"。与特效不撞：文字特效锚顶部 28% 往下最深
+# ~55%、金句卡居中 35~65%，字幕两行块顶边约 70%，互不侵犯）。
 _MARGIN_RATIO = 0.08
+_MARGIN_RATIO_PORTRAIT = 0.18
+# 每条字幕最大行数：横屏单行；竖屏两行成一句（2026-07-16 用户定案：竖屏一行装不下
+# 几个字，长句被切成快速闪过的碎条——两行同屏显著减少截断，卡拉OK跨行连续点亮）。
+_MAX_LINES_LANDSCAPE = 1
+_MAX_LINES_PORTRAIT = 2
 
 # 英文副字幕（中上英下）：字号相对中文的比例、再缩一档的比例、以及拉丁字符平均宽度
 # 相对字号的经验系数（proportional 字体约 0.5~0.6em，取 0.55 估算每行可容字符数）。
@@ -75,9 +82,12 @@ _EN_FONT_RATIO_SHRUNK = 0.45
 _EN_CHAR_WIDTH_EM = 0.55
 _EN_FONT_MIN = 12
 
-# 字幕字号缩放系数（用户可调）：合法区间 [0.7, 1.5]，空/非法回落默认 1.0。
+# 字幕字号缩放系数（用户可调）：合法区间 [0.7, 3.0]，空/非法回落默认 1.0。
 # 优先级：环境变量 SUBTITLE_FONT_SIZE > settings.yaml > 默认值（仿 image_gen.get_style_prompt）。
+# 2026-07-16 用户定案：竖/横屏可分别设置——先读画幅专属键，缺失回落通用键。
 SUBTITLE_FONT_SIZE_ENV = "SUBTITLE_FONT_SIZE"
+SUBTITLE_FONT_SIZE_PORTRAIT_ENV = "SUBTITLE_FONT_SIZE_PORTRAIT"
+SUBTITLE_FONT_SIZE_LANDSCAPE_ENV = "SUBTITLE_FONT_SIZE_LANDSCAPE"
 _SUBTITLE_FONT_SCALE_DEFAULT = 1.0
 _SUBTITLE_FONT_SCALE_MIN = 0.7
 # 上限 3.0（2026-07-15 用户点名从 1.5 放开）：大字号会顶着宽度约束自动折行，
@@ -108,12 +118,21 @@ def _read_setting(env_name: str) -> str:
     return (load_settings().get(env_name) or "").strip()
 
 
-def get_subtitle_font_scale() -> float:
-    """当前生效的字幕字号缩放系数：环境变量 > settings.yaml > 默认 1.0。
+def get_subtitle_font_scale(portrait: bool | None = None) -> float:
+    """当前生效的字幕字号缩放系数：画幅专属键 > 通用键 > 默认 1.0。
 
-    宽容策略：空值/非数字回落 1.0；数字但越界钳位到 [0.7, 1.5] 边界。
+    portrait=None 时只读通用键（向后兼容旧调用）；给定画幅时先读
+    SUBTITLE_FONT_SIZE_PORTRAIT / _LANDSCAPE，缺失回落通用键。
+    宽容策略：空值/非数字回落 1.0；数字但越界钳位到 [0.7, 3.0] 边界。
     """
-    raw = _read_setting(SUBTITLE_FONT_SIZE_ENV)
+    raw = ""
+    if portrait is not None:
+        specific = (
+            SUBTITLE_FONT_SIZE_PORTRAIT_ENV if portrait else SUBTITLE_FONT_SIZE_LANDSCAPE_ENV
+        )
+        raw = _read_setting(specific)
+    if not raw:
+        raw = _read_setting(SUBTITLE_FONT_SIZE_ENV)
     if not raw:
         return _SUBTITLE_FONT_SCALE_DEFAULT
     try:
@@ -382,16 +401,22 @@ def _char_timeline(
 
 
 def _compute_layout(width: int, height: int) -> dict:
-    """按分辨率计算字幕排版参数（中文主字幕 + 英文副字幕共用）。"""
+    """按分辨率计算字幕排版参数（中文主字幕 + 英文副字幕共用）。
+
+    画幅感知（2026-07-16 用户定案）：竖屏字号系数可独立设置、底边上提到中下方
+    （0.18h，避开平台底部 UI）、每条字幕最多两行成一句；横屏维持单行贴底。
+    """
+    portrait = height > width
     side_margin = max(0, round(width * _SIDE_MARGIN_RATIO))
     usable_width = max(1, width - 2 * side_margin)
     # 字号取三者最小：高度自适应、宽度可容 _CHARS_PER_LINE_BUDGET 个字、绝对上限。
     width_font = usable_width // _CHARS_PER_LINE_BUDGET
     base_font = min(_FONT_SIZE_CAP, round(height * _FONT_RATIO), width_font)
-    # 用户可调字号系数：乘在自适应基准字号上（默认 1.0 与旧行为完全一致）。
+    # 用户可调字号系数（竖/横屏独立，缺失回落通用键）：乘在自适应基准字号上。
     # chars_per_line 也随缩放后的字号重算，字放大时自动少排字、不溢出宽度。
-    font_size = max(1, round(base_font * get_subtitle_font_scale()))
-    margin_v = max(0, round(height * _MARGIN_RATIO))
+    font_size = max(1, round(base_font * get_subtitle_font_scale(portrait)))
+    margin_ratio = _MARGIN_RATIO_PORTRAIT if portrait else _MARGIN_RATIO
+    margin_v = max(0, round(height * margin_ratio))
     return {
         "side_margin": side_margin,
         "usable_width": usable_width,
@@ -399,16 +424,20 @@ def _compute_layout(width: int, height: int) -> dict:
         "margin_v": margin_v,
         # 竖屏窄、字大：一行能放的字数 = 可用宽度 // 字号。
         "chars_per_line": max(1, usable_width // font_size),
+        "max_lines": _MAX_LINES_PORTRAIT if portrait else _MAX_LINES_LANDSCAPE,
     }
 
 
 def prepare_single_line_cues(cues: list[Cue], width: int, height: int) -> list[Cue]:
-    """把 cues 预切成单行（不换行、不溢出）。切割幂等：已达标的 cue 原样返回，
-    因此对同一批 cues 重复调用结果一致——翻译流程依赖这一点对齐中英条目。"""
+    """把 cues 预切成排版可容的条目（横屏单行；竖屏最多两行，行间 \\n）。
+    切割幂等：已达标的 cue 原样返回，因此对同一批 cues 重复调用结果一致
+    ——翻译流程依赖这一点对齐中英条目。"""
     layout = _compute_layout(width, height)
     single: list[Cue] = []
     for cue in cues:
-        single.extend(_split_cue_single_line(cue, layout["chars_per_line"]))
+        single.extend(
+            _split_cue_lines(cue, layout["chars_per_line"], layout["max_lines"])
+        )
     return single
 
 
@@ -434,7 +463,9 @@ def render_ass(
     layout = _compute_layout(width, height)
     single: list[Cue] = []
     for cue in cues:
-        single.extend(_split_cue_single_line(cue, layout["chars_per_line"]))
+        single.extend(
+            _split_cue_lines(cue, layout["chars_per_line"], layout["max_lines"])
+        )
     if english is not None and len(english) != len(single):
         raise SubtitlesError(
             f"英文字幕条数（{len(english)}）与切行后的中文条数（{len(single)}）不一致。"
@@ -524,6 +555,23 @@ def _split_cue_single_line(cue: Cue, limit: int) -> list[Cue]:
     return result
 
 
+def _split_cue_lines(cue: Cue, limit: int, max_lines: int) -> list[Cue]:
+    """把一条 cue 切成排版可容的条目：先按单行切片，再把相邻切片按 max_lines
+    行合回同一条（行间 \\n，ASS 侧转 \\N 上下两行同屏）。
+
+    竖屏 max_lines=2（2026-07-16 用户定案）：一句话两行同屏，不再被切成快速
+    闪过的碎条；时间窗按合并后各条的字符占比分摊。max_lines=1 与旧行为完全一致。
+    """
+    pieces = _split_cue_single_line(cue, limit)
+    if max_lines <= 1 or len(pieces) <= 1:
+        return pieces
+    result: list[Cue] = []
+    for i in range(0, len(pieces), max_lines):
+        group = pieces[i:i + max_lines]
+        result.append(Cue(group[0].start, group[-1].end, "\n".join(p.text for p in group)))
+    return result
+
+
 def _ass_header(
     width: int,
     height: int,
@@ -598,14 +646,23 @@ def _karaoke_text(cue: Cue) -> str:
 
     句级起止来自 whisper 真实时间轴，句内均分对中文口播误差可忽略（对标博主
     的逐字点亮观感）。余数厘秒摊给前几个字，保证总和等于句时长不漂移。
+    换行符（竖屏两行成一句）只产 \\N 不占厘秒——点亮跨行连续不停顿。
     """
     chars = list(cue.text)
-    total_cs = max(len(chars), int(round((cue.end - cue.start) * 100)))
-    base, extra = divmod(total_cs, len(chars))
+    timed = [ch for ch in chars if ch != "\n"]
+    if not timed:
+        return _escape_ass_text(cue.text)
+    total_cs = max(len(timed), int(round((cue.end - cue.start) * 100)))
+    base, extra = divmod(total_cs, len(timed))
     parts: list[str] = []
-    for i, ch in enumerate(chars):
-        span = base + (1 if i < extra else 0)
+    timed_idx = 0
+    for ch in chars:
+        if ch == "\n":
+            parts.append("\\N")
+            continue
+        span = base + (1 if timed_idx < extra else 0)
         parts.append(f"{{\\kf{span}}}{_escape_ass_text(ch)}")
+        timed_idx += 1
     return "".join(parts)
 
 

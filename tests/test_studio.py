@@ -591,7 +591,9 @@ def test_page_has_subtitle_style_card():
     from video_factory import studio_ui
 
     html = studio_ui.render_page()
-    assert 'id="subFontSize"' in html
+    # 2026-07-16 用户定案：竖/横屏字号独立设置
+    assert 'id="subFontSizeP"' in html
+    assert 'id="subFontSizeL"' in html
     assert 'id="subFontName"' in html
     assert 'id="subStyleSave"' in html
 

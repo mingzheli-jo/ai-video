@@ -439,14 +439,20 @@ def test_split_cue_strips_comma_and_edge_punctuation():
     assert [p.text for p in parts2] == ["别急着换", "三步就能救回来"]
 
 
-def test_render_ass_comma_cue_splits_and_no_comma_leaks():
-    # 端到端回归：含逗号的 cue 切成多条无逗号单行 Dialogue（规避 libass 逗号渲染残留）。
-    ass = render_ass([Cue(0, 3, "闪存空间不足时读写速度会掉一半，腾出空间立马流畅")], 1080, 1920)
-    dialogues = [l for l in ass.splitlines() if l.startswith("Dialogue:")]
-    assert len(dialogues) >= 2
-    assert all("\\N" not in d for d in dialogues)  # 单行不换行
-    # 没有任何 Dialogue 文本含逗号（Text 是第 9 字段 = 8 个逗号之后）
-    assert all("，" not in d.split(",", 8)[8] for d in dialogues)
+def test_render_ass_comma_cue_two_lines_portrait_single_line_landscape():
+    # 竖屏（2026-07-16 用户定案）：逗号两个半句（各 ≤ 单行容量）合成一条两行
+    # Dialogue（\\N 上下同屏），不再切成快速闪过的碎条；逗号仍被剥离
+    # （规避 libass 逗号渲染残留）。
+    text = "闪存不足会掉速，腾出空间立马流畅"  # 7 + 8 字，竖屏单行容 13 字
+    ass_p = render_ass([Cue(0, 3, text)], 1080, 1920)
+    dialogues_p = [l for l in ass_p.splitlines() if l.startswith("Dialogue:")]
+    assert len(dialogues_p) == 1
+    assert "\\N" in dialogues_p[0]  # 两行同屏
+    assert all("，" not in d.split(",", 8)[8] for d in dialogues_p)
+    # 横屏维持单行的旧行为（16 字 ≤ 横屏单行容量 → 单条不换行）
+    ass_l = render_ass([Cue(0, 3, text)], 1920, 1080)
+    dialogues_l = [l for l in ass_l.splitlines() if l.startswith("Dialogue:")]
+    assert all("\\N" not in d for d in dialogues_l)
 
 
 def test_render_ass_vertical_font_constrained_by_width_not_overflow():
@@ -474,11 +480,14 @@ def test_render_ass_font_size_capped_at_96():
     assert size == 96
 
 
-def test_render_ass_margin_v_scales_with_height():
-    ass = render_ass([Cue(0, 1, "a")], 1080, 1920)
-    style = next(l for l in ass.splitlines() if l.startswith("Style:"))
-    margin_v = int(style.split(",")[21])
-    assert margin_v == round(1920 * 0.08)  # 154
+def test_render_ass_margin_v_portrait_lifted_landscape_bottom():
+    # 竖屏底边上提到 0.18h（2026-07-16 用户定案：避开平台底部 UI 遮挡）；横屏维持 0.08h。
+    ass_p = render_ass([Cue(0, 1, "a")], 1080, 1920)
+    style_p = next(l for l in ass_p.splitlines() if l.startswith("Style:"))
+    assert int(style_p.split(",")[21]) == round(1920 * 0.18)  # 346
+    ass_l = render_ass([Cue(0, 1, "a")], 1920, 1080)
+    style_l = next(l for l in ass_l.splitlines() if l.startswith("Style:"))
+    assert int(style_l.split(",")[21]) == round(1080 * 0.08)  # 86
 
 
 def test_render_ass_dialogue_timestamp_format():
@@ -1194,3 +1203,30 @@ def test_align_identical_text_maps_exactly():
     assert cues[0].end == pytest.approx(3.0, abs=0.01)
     assert cues[1].start == pytest.approx(3.0, abs=0.01)
     assert cues[1].end == pytest.approx(7.0, abs=0.01)
+
+
+# ---- 2026-07-16 字幕三连：分画幅字号 / 竖屏两行卡拉OK ----
+
+
+def test_font_scale_per_aspect_with_legacy_fallback(monkeypatch):
+    # 画幅专属键优先；缺失回落通用键；无参调用只读通用键（向后兼容）。
+    monkeypatch.setenv("SUBTITLE_FONT_SIZE", "1.2")
+    monkeypatch.setenv("SUBTITLE_FONT_SIZE_PORTRAIT", "1.5")
+    monkeypatch.delenv("SUBTITLE_FONT_SIZE_LANDSCAPE", raising=False)
+    assert get_subtitle_font_scale(True) == pytest.approx(1.5)
+    assert get_subtitle_font_scale(False) == pytest.approx(1.2)  # 回落通用键
+    assert get_subtitle_font_scale() == pytest.approx(1.2)
+
+
+def test_karaoke_two_line_portrait_newline_has_no_time_share():
+    # 竖屏两行成一句：\N 不带 \kf 标签、不占厘秒；点亮跨行连续，总和仍=句时长。
+    import re as _re
+
+    text = "闪存不足会掉速，腾出空间立马流畅"  # 7 + 8 字 → 竖屏合成一条两行
+    ass = render_ass([Cue(0, 3, text)], 1080, 1920, karaoke=True)
+    dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    assert "\\N" in dialogue
+    assert "{\\kf" in dialogue
+    assert _re.search(r"\{\\kf\d+\}\\N", dialogue) is None  # \N 前无归属它的标签体
+    spans = [int(m) for m in _re.findall(r"\\kf(\d+)", dialogue)]
+    assert sum(spans) == 300  # 3s = 300cs 全部摊给 15 个实字，\N 不占

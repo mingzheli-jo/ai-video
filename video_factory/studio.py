@@ -157,6 +157,9 @@ def build_meta() -> dict:
         "rewrite_style_prompt": get_rewrite_style_prompt(),
         # 字幕样式（用户可调）：当前生效字号系数、字体族，以及字体白名单（前端下拉用）。
         "subtitle_font_size": get_subtitle_font_scale(),
+        # 竖/横屏独立字号（缺失时自动回落通用值，前端直接回填）。
+        "subtitle_font_size_portrait": get_subtitle_font_scale(True),
+        "subtitle_font_size_landscape": get_subtitle_font_scale(False),
         "subtitle_font_name": get_subtitle_font_name(),
         "subtitle_font_options": list(SUBTITLE_FONT_OPTIONS),
     }
@@ -710,6 +713,8 @@ def make_handler(store: TaskStore):
                 "REWRITE_STYLE_PROMPT": get_rewrite_style_prompt,
                 # 字号回显生效系数（钳位/回落后的数字，字符串化便于前端 number 输入回填）。
                 "SUBTITLE_FONT_SIZE": lambda: str(get_subtitle_font_scale()),
+                "SUBTITLE_FONT_SIZE_PORTRAIT": lambda: str(get_subtitle_font_scale(True)),
+                "SUBTITLE_FONT_SIZE_LANDSCAPE": lambda: str(get_subtitle_font_scale(False)),
                 "SUBTITLE_FONT_NAME": get_subtitle_font_name,
             }.get(name, lambda: value)()
             self._send_json({"name": name, "value": effective, "persisted": persisted})

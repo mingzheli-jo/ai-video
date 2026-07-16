@@ -787,8 +787,10 @@ function renderCredPage(meta) {
   if (sp) sp.value = meta.image_style_prompt || '';
   const rp = h('#rewritePrompt');
   if (rp) rp.value = meta.rewrite_style_prompt || '';
-  const sfs = h('#subFontSize');
-  if (sfs) sfs.value = (meta.subtitle_font_size != null ? meta.subtitle_font_size : '');
+  const sfp = h('#subFontSizeP');
+  if (sfp) sfp.value = (meta.subtitle_font_size_portrait != null ? meta.subtitle_font_size_portrait : '');
+  const sfl = h('#subFontSizeL');
+  if (sfl) sfl.value = (meta.subtitle_font_size_landscape != null ? meta.subtitle_font_size_landscape : '');
   const sfn = h('#subFontName');
   if (sfn && meta.subtitle_font_options) {
     sfn.innerHTML = meta.subtitle_font_options.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
@@ -833,27 +835,33 @@ function syncSubPreview() {
   const pv = h('#subFontPreview');
   if (!pv) return;
   const fam = (h('#subFontName') && h('#subFontName').value) || 'Microsoft YaHei';
-  const raw = parseFloat(h('#subFontSize') && h('#subFontSize').value);
+  // 预览跟竖屏字号（主战场画幅）。
+  const raw = parseFloat(h('#subFontSizeP') && h('#subFontSizeP').value);
   const scale = isNaN(raw) ? 1.0 : Math.min(3, Math.max(0.7, raw));
   pv.style.fontFamily = '"' + fam + '", "Microsoft YaHei", sans-serif';
   pv.style.fontSize = Math.round(24 * scale) + 'px';
 }
 
 async function saveSubtitleStyle() {
-  const size = h('#subFontSize').value.trim();
+  const sizeP = h('#subFontSizeP').value.trim();
+  const sizeL = h('#subFontSizeL').value.trim();
   const name = h('#subFontName').value;
   const msg = h('#subStyleMsg');
-  // 端点一次一项：字号、字体分两次保存（都走白名单校验）。
-  const r1 = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'SUBTITLE_FONT_SIZE', value: size }) });
-  const r2 = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'SUBTITLE_FONT_NAME', value: name }) });
-  if (r1.status === 200 && r2.status === 200) {
-    h('#subFontSize').value = r1.data.value || '';
-    h('#subFontName').value = r2.data.value || '';
-    S.meta.subtitle_font_size = r1.data.value;
-    S.meta.subtitle_font_name = r2.data.value;
+  // 端点一次一项：竖屏字号、横屏字号、字体分三次保存（都走白名单校验）。
+  const post = (n, v) => api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: n, value: v }) });
+  const r1 = await post('SUBTITLE_FONT_SIZE_PORTRAIT', sizeP);
+  const r2 = await post('SUBTITLE_FONT_SIZE_LANDSCAPE', sizeL);
+  const r3 = await post('SUBTITLE_FONT_NAME', name);
+  if (r1.status === 200 && r2.status === 200 && r3.status === 200) {
+    h('#subFontSizeP').value = r1.data.value || '';
+    h('#subFontSizeL').value = r2.data.value || '';
+    h('#subFontName').value = r3.data.value || '';
+    S.meta.subtitle_font_size_portrait = r1.data.value;
+    S.meta.subtitle_font_size_landscape = r2.data.value;
+    S.meta.subtitle_font_name = r3.data.value;
     msg.textContent = '已保存并生效';
   } else {
-    const err = (r1.data && r1.data.error) || (r2.data && r2.data.error) || (r1.status + '/' + r2.status);
+    const err = (r1.data && r1.data.error) || (r2.data && r2.data.error) || (r3.data && r3.data.error) || (r1.status + '/' + r2.status + '/' + r3.status);
     msg.textContent = '保存失败：' + esc(err);
   }
   setTimeout(() => { msg.textContent = ''; }, 4000);
@@ -885,7 +893,7 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#rewritePromptSave').addEventListener('click', saveRewritePrompt);
   h('#subStyleSave').addEventListener('click', saveSubtitleStyle);
   h('#subFontName').addEventListener('change', syncSubPreview);
-  h('#subFontSize').addEventListener('input', syncSubPreview);
+  h('#subFontSizeP').addEventListener('input', syncSubPreview);
   // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
   h('#compareClose').addEventListener('click', closeCompare);
   h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
@@ -1067,8 +1075,10 @@ def _body() -> str:
         <p class="desc">烧录字幕的字号与字体族。字号为缩放系数（0.7~3.0，留空 = 默认 1.0），字体从下拉白名单选择。
         默认即对标爆款博主样式：<b>粗体白字 + 厚黑描边</b>；改完点保存立即生效并写入 settings.yaml。</p>
         <div class="batch-actions" style="align-items:flex-end;flex-wrap:wrap;gap:14px">
-          <label style="display:flex;flex-direction:column;gap:6px">字号系数
-            <input type="number" id="subFontSize" min="0.7" max="3" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
+          <label style="display:flex;flex-direction:column;gap:6px">竖屏字号系数（9:16）
+            <input type="number" id="subFontSizeP" min="0.7" max="3" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
+          <label style="display:flex;flex-direction:column;gap:6px">横屏字号系数（16:9）
+            <input type="number" id="subFontSizeL" min="0.7" max="3" step="0.05" placeholder="1.0（默认）" style="width:7em"></label>
           <label style="display:flex;flex-direction:column;gap:6px">字体
             <select id="subFontName"></select></label>
           <button type="button" class="btn" id="subStyleSave">保存样式</button>
