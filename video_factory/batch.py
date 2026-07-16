@@ -589,6 +589,24 @@ def _run_subtitles(job: ResolvedJob, job_dir: Path) -> int:
     return subtitles.main(build_subtitles_argv(job, job_dir))
 
 
+def build_publish_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
+    """发布物料阶段参数：成片按最终优先级（字幕>特效>原片）作封面底图抽帧兜底。"""
+    argv = ["--rewrite", str(job_dir / "rewrite.json"), "--output", str(job_dir)]
+    for name in ("release_subtitled.mp4", "release_with_effects.mp4", "release.mp4"):
+        if (job_dir / name).exists():
+            argv += ["--video", str(job_dir / name)]
+            break
+    if job.llm:
+        argv += ["--llm", job.llm]
+    return argv
+
+
+def _run_publish(job: ResolvedJob, job_dir: Path) -> int:
+    from video_factory import publish
+
+    return publish.main(build_publish_argv(job, job_dir))
+
+
 # 阶段执行器：默认实现均惰性 import 对应模块并调 main(argv)，测试整体 mock 掉本 dict。
 STAGE_RUNNERS: dict[str, Callable[[ResolvedJob, Path], int]] = {
     "rewrite": _run_rewrite,
@@ -597,11 +615,13 @@ STAGE_RUNNERS: dict[str, Callable[[ResolvedJob, Path], int]] = {
     "assemble": _run_assemble,
     "effects": _run_effects,
     "subtitles": _run_subtitles,
+    "publish": _run_publish,
 }
 
 # 全量阶段顺序（进度展示用）；image_gen 仅 ai_image 模式执行，effects/subtitles 由开关决定。
 # voice（配音 + 主时间轴）P16 二期前移，恒在 rewrite 之后、image_gen/assemble 之前。
-_STAGE_ORDER = ("rewrite", "voice", "image_gen", "assemble", "effects", "subtitles")
+# publish（发布物料：双封面+标题/简介/标签留档）恒在末位（2026-07-16 用户定案）。
+_STAGE_ORDER = ("rewrite", "voice", "image_gen", "assemble", "effects", "subtitles", "publish")
 
 
 def _stages_for(job: ResolvedJob) -> list[str]:
@@ -614,6 +634,7 @@ def _stages_for(job: ResolvedJob) -> list[str]:
         stages.append("effects")
     if job.subtitles:
         stages.append("subtitles")
+    stages.append("publish")  # 发布物料恒开：封面/标题/简介是每支视频的发布刚需
     return stages
 
 
@@ -625,6 +646,9 @@ def _collect_outputs(job: ResolvedJob, job_dir: Path) -> dict[str, str]:
         "assembly_plan": job_dir / "assembly_plan.json",
         "effects": job_dir / "release_with_effects.mp4",
         "subtitled": job_dir / "release_subtitled.mp4",
+        "cover_16x9": job_dir / "publish" / "cover_16x9.jpg",
+        "cover_9x16": job_dir / "publish" / "cover_9x16.jpg",
+        "publish_kit": job_dir / "publish" / "publish_kit.json",
     }
     return {key: str(path) for key, path in candidates.items() if path.exists()}
 

@@ -13,9 +13,11 @@ import { HookOpener } from "./compositions/HookOpener";
 import { HighlightSweep } from "./compositions/HighlightSweep";
 import { TypewriterQuote } from "./compositions/TypewriterQuote";
 import { AmbientParticles } from "./compositions/AmbientParticles";
+import { CoverCard } from "./compositions/CoverCard";
 import {
   ambientParticlesSchema,
   chapterCardSchema,
+  coverCardSchema,
   goldenCardSchema,
   highlightSweepSchema,
   hookOpenerSchema,
@@ -163,6 +165,27 @@ export const RemotionRoot: React.FC = () => {
           text: "核心金句示例",
           accent: "#e8b84b",
         }}
+      />
+      {/* 发布封面（publish 阶段 remotion still 静帧）：两个画幅共用 CoverCard 组件 */}
+      <Composition
+        id="Cover16x9"
+        component={CoverCard}
+        durationInFrames={1}
+        fps={FPS}
+        width={1920}
+        height={1080}
+        schema={coverCardSchema}
+        defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
+      />
+      <Composition
+        id="Cover9x16"
+        component={CoverCard}
+        durationInFrames={1}
+        fps={FPS}
+        width={1080}
+        height={1920}
+        schema={coverCardSchema}
+        defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
       />
       <Composition
         id="AmbientParticles"

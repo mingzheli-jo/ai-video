@@ -65,6 +65,16 @@ export const ambientParticlesSchema = z.object({
   accent: z.string().default("#e8b84b"),
 });
 
+export const coverCardSchema = z.object({
+  // 封面主标题（组件内拆 ≤2 行、末行金色点睛）。
+  title: z.string(),
+  // 右上品牌角标（空=隐藏）。
+  tag: z.string().default(""),
+  accent: z.string().default("#e8b84b"),
+  // 底图 data URI（空=纯深色底）。
+  bg: z.string().default(""),
+});
+
 export const highlightSweepSchema = z.object({
   // 含关键词的句子上下文（Python 侧已按关键词居中裁到单行放得下）。
   text: z.string(),
@@ -94,6 +104,7 @@ export type HookOpenerProps = z.infer<typeof hookOpenerSchema>;
 export type HighlightSweepProps = z.infer<typeof highlightSweepSchema>;
 export type TypewriterQuoteProps = z.infer<typeof typewriterQuoteSchema>;
 export type AmbientParticlesProps = z.infer<typeof ambientParticlesSchema>;
+export type CoverCardProps = z.infer<typeof coverCardSchema>;
 
 // 开屏钩子序列的三色轮换（对标博主：红/黄/白，粗黑描边浮在画面上）。
 export const HOOK_LINE_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"];

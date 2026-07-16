@@ -17,6 +17,7 @@ from video_factory.batch import (
     build_effects_argv,
     build_rewrite_argv,
     build_subtitles_argv,
+    build_publish_argv,
     build_voice_argv,
     build_report,
     load_jobs,
@@ -65,6 +66,7 @@ def patch_runners(monkeypatch):
             "assemble": build_assemble_argv,
             "effects": build_effects_argv,
             "subtitles": build_subtitles_argv,
+            "publish": build_publish_argv,
         }
         patched = {stage: recorder.make(stage, builders[stage]) for stage in builders}
         monkeypatch.setattr(batch, "STAGE_RUNNERS", patched)
@@ -178,7 +180,7 @@ def test_run_batch_invalid_job_does_not_stop_others(tmp_path, patch_runners):
     assert status["bad"] == "invalid"
     assert status["good"] == "ok"
     # 非法 job 不进 runner，只有 good 的阶段被调用
-    assert recorder.stages == ["rewrite", "voice", "assemble"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "publish"]
 
 
 # ---------- 阶段失败不中断整批 ----------
@@ -229,7 +231,7 @@ def test_stage_chain_effects_off_subtitles_off(tmp_path, patch_runners):
         0,
     )
     run_job(job)
-    assert recorder.stages == ["rewrite", "voice", "assemble"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "publish"]
 
 
 def test_stage_chain_effects_on_subtitles_on(tmp_path, patch_runners):
@@ -240,7 +242,7 @@ def test_stage_chain_effects_on_subtitles_on(tmp_path, patch_runners):
         0,
     )
     run_job(job)
-    assert recorder.stages == ["rewrite", "voice", "assemble", "effects", "subtitles"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "effects", "subtitles", "publish"]
 
 
 def test_stage_chain_effects_on_subtitles_off(tmp_path, patch_runners):
@@ -251,7 +253,7 @@ def test_stage_chain_effects_on_subtitles_off(tmp_path, patch_runners):
         0,
     )
     run_job(job)
-    assert recorder.stages == ["rewrite", "voice", "assemble", "effects"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "effects", "publish"]
 
 
 # ---------- 特效音开关 / 音量 ----------
@@ -651,7 +653,7 @@ def test_on_stage_callback_receives_stages_in_order(tmp_path, patch_runners):
     report = run_job(job, on_stage=seen.append)
     assert report.status == "ok"
     # 回调在每个阶段开始执行前触发，顺序与阶段链一致
-    assert seen == ["rewrite", "voice", "assemble", "effects", "subtitles"]
+    assert seen == ["rewrite", "voice", "assemble", "effects", "subtitles", "publish"]
 
 
 def test_on_stage_none_preserves_current_behavior(tmp_path, patch_runners):
@@ -663,7 +665,7 @@ def test_on_stage_none_preserves_current_behavior(tmp_path, patch_runners):
     # 默认 None：不传 on_stage，行为与历史完全一致
     report = run_job(job)
     assert report.status == "ok"
-    assert recorder.stages == ["rewrite", "voice", "assemble"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "publish"]
 
 
 def test_on_stage_callback_exception_does_not_abort_job(tmp_path, patch_runners):
@@ -679,7 +681,7 @@ def test_on_stage_callback_exception_does_not_abort_job(tmp_path, patch_runners)
     # 进度回调是旁路观察者：抛异常绝不能打断任务执行
     report = run_job(job, on_stage=bad_callback)
     assert report.status == "ok"
-    assert recorder.stages == ["rewrite", "voice", "assemble"]
+    assert recorder.stages == ["rewrite", "voice", "assemble", "publish"]
 
 
 # ---------- 视觉来源：视频素材 / AI 生图 ----------

@@ -145,6 +145,12 @@ input:focus, textarea:focus, select:focus { border-color: var(--gold); box-shado
 .path-row code { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
 .copy-btn { font-size: 11px; padding: 6px 10px; border-radius: 6px; }
 .links { display: flex; gap: 12px; margin-top: 8px; font-size: 12px; }
+.covers { display: flex; gap: 10px; margin-top: 10px; align-items: flex-start; }
+.cover-thumb { display: block; border-radius: 8px; border: 1px solid var(--line); background: #000; }
+.cover-thumb.wide { width: 240px; }
+.cover-thumb.tall { width: 100px; }
+.btn-kit { margin-top: 10px; font-size: 12px; }
+.kit-pre { white-space: pre-wrap; font-size: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 8px 0 0; }
 .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 30px 0; }
 .batch-wrap { padding: 20px 24px; max-width: 1100px; }
 .batch-actions { display: flex; gap: 10px; margin: 12px 0; }
@@ -388,8 +394,8 @@ function selectVisual(key) {
   if (hint) hint.style.display = ai ? 'block' : 'none';
 }
 
-const STAGE_LABELS = { rewrite: '文案改写', voice: '配音', image_gen: 'AI 生图', assemble: '素材拼装', effects: '特效', subtitles: '字幕' };
-const ALL_STAGES = ['rewrite', 'image_gen', 'assemble', 'effects', 'subtitles'];
+const STAGE_LABELS = { rewrite: '文案改写', voice: '配音', image_gen: 'AI 生图', assemble: '素材拼装', effects: '特效', subtitles: '字幕', publish: '发布物料' };
+const ALL_STAGES = ['rewrite', 'image_gen', 'assemble', 'effects', 'subtitles', 'publish'];
 
 function stageClass(task, stage) {
   if (task.stage_failed === stage) return 'fail';
@@ -419,6 +425,14 @@ function renderTask(t) {
     if (t.outputs.rewrite) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.rewrite)}" target="_blank">rewrite.json</a>`);
     if (t.outputs.assembly_plan) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.assembly_plan)}" target="_blank">assembly_plan.json</a>`);
     if (links.length) body += `<div class="links">${links.join('')}</div>`;
+    // 发布物料（2026-07-16）：双封面缩略图（点开大图）+ 标题/简介/标签折叠面板。
+    const covers = [];
+    if (t.outputs.cover_16x9) covers.push(`<a href="/media?path=${encodeURIComponent(t.outputs.cover_16x9)}" target="_blank"><img class="cover-thumb wide" src="/media?path=${encodeURIComponent(t.outputs.cover_16x9)}" alt="封面 16:9"></a>`);
+    if (t.outputs.cover_9x16) covers.push(`<a href="/media?path=${encodeURIComponent(t.outputs.cover_9x16)}" target="_blank"><img class="cover-thumb tall" src="/media?path=${encodeURIComponent(t.outputs.cover_9x16)}" alt="封面 9:16"></a>`);
+    if (covers.length) body += `<div class="covers">${covers.join('')}</div>`;
+    if (t.outputs.publish_kit) {
+      body += `<div><button class="btn btn-ghost btn-kit" data-task="${esc(t.id)}" data-kit-path="${esc(t.outputs.publish_kit)}">发布物料（标题/简介/标签）</button><pre class="kit-pre" id="kit_${esc(t.id)}" style="display:none"></pre></div>`;
+    }
   }
   const elapsed = t.elapsed_seconds ? `${t.elapsed_seconds.toFixed(1)}s` : '';
   // 文案对比：ok/failed 任务都给一个入口（原文案 vs AI 改写稿）。走事件委托 + data 属性，
@@ -447,7 +461,26 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.copy) copyText(btn.dataset.copy);
   const cmp = e.target.closest('[data-compare]');
   if (cmp && cmp.dataset.compare) openCompare(cmp.dataset.compare);
+  const kit = e.target.closest('.btn-kit');
+  if (kit && kit.dataset.kitPath) toggleKit(kit.dataset.task, kit.dataset.kitPath);
 });
+
+// 发布物料折叠面板：优先读人类可读的 发布物料.txt（同目录），失败回落 kit JSON。
+// 内容一律 textContent 注入（物料含任意字符，绝不进 innerHTML）。
+async function toggleKit(taskId, kitPath) {
+  const pre = document.getElementById('kit_' + taskId);
+  if (!pre) return;
+  if (pre.style.display !== 'none') { pre.style.display = 'none'; return; }
+  pre.style.display = 'block';
+  pre.textContent = '加载中…';
+  const txtPath = kitPath.replace(/publish_kit\.json$/, '发布物料.txt');
+  try {
+    pre.textContent = await fetchMediaText(txtPath);
+  } catch (err) {
+    try { pre.textContent = await fetchMediaText(kitPath); }
+    catch (err2) { pre.textContent = '发布物料读取失败。'; }
+  }
+}
 
 // ----- 文案对比弹窗 -----
 // 数据流：/api/jobs/<id> → outputs.rewrite（rewrite.json 绝对路径）；把末段
