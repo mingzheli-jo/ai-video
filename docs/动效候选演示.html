@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>动效候选演示 — P1/P2/P3</title>
+<style>
+  :root {
+    --bg: #17181c; --panel: #1f2127; --line: #2c2f37;
+    --accent: #e8b84b; --red: #e74c3c; --yellow: #f1c40f;
+    --text: #e9eaee; --dim: #9aa0ab;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); padding: 28px;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .stage {
+    position: relative; aspect-ratio: 16/9; overflow: hidden;
+    background: radial-gradient(120% 100% at 50% 0%, #2a2620 0%, #12100d 70%);
+  }
+  /* 模拟正片画面的底图纹理 */
+  .stage::before {
+    content: ""; position: absolute; inset: 0;
+    background:
+      radial-gradient(40% 50% at 70% 60%, rgba(232,184,75,.08), transparent 70%),
+      radial-gradient(30% 40% at 25% 35%, rgba(231,76,60,.05), transparent 70%);
+  }
+  .meta { padding: 14px 16px 16px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .badge {
+    font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  }
+  .p1 { background: rgba(231,76,60,.18); color: #ff8a7a; border: 1px solid rgba(231,76,60,.5); }
+  .p2 { background: rgba(232,184,75,.15); color: var(--accent); border: 1px solid rgba(232,184,75,.5); }
+  .p3 { background: rgba(154,160,171,.15); color: var(--dim); border: 1px solid rgba(154,160,171,.4); }
+  .name { font-size: 15px; font-weight: 700; }
+  .desc { font-size: 12.5px; color: var(--dim); line-height: 1.6; }
+  .big {
+    font-weight: 900; letter-spacing: 2px; text-align: center;
+    -webkit-text-stroke: 3px #141410; paint-order: stroke fill;
+  }
+  .center { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; }
+
+  /* 1) 数字计数 */
+  #numVal { font-size: 64px; color: var(--yellow); }
+  #numUnit { font-size: 34px; color: #fff; margin-left: 4px; }
+
+  /* 2) 荧光笔高亮 */
+  .hl-line { font-size: 34px; color: #fff; font-weight: 900; -webkit-text-stroke: 2px #141410; paint-order: stroke fill; }
+  .hl-word { position: relative; display: inline-block; padding: 0 6px; }
+  .hl-word::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 4px; height: 46%;
+    background: linear-gradient(90deg, rgba(232,184,75,.95), rgba(241,196,64,.9));
+    z-index: -1; transform-origin: left center; transform: scaleX(0); border-radius: 3px;
+  }
+  .hl-play .hl-word::after { animation: sweep .55s cubic-bezier(.2,.9,.3,1) forwards; }
+  .hl-play .hl-word { animation: hlTone .55s .25s forwards; }
+  @keyframes sweep { to { transform: scaleX(1); } }
+  @keyframes hlTone { to { color: #1a160c; -webkit-text-stroke: 0px transparent; } }
+
+  /* 3) 遮罩揭示（金句卡） */
+  .quote-card {
+    background: linear-gradient(160deg, rgba(30,27,20,.92), rgba(20,18,14,.95));
+    border: 1px solid rgba(232,184,75,.55); border-left: 5px solid var(--accent);
+    padding: 20px 26px; border-radius: 10px; max-width: 84%;
+  }
+  .quote-mark { color: var(--accent); font-size: 30px; font-weight: 900; line-height: 1; }
+  .quote-text { font-size: 24px; font-weight: 800; color: #f5efdd; margin-top: 6px; line-height: 1.5; }
+  .reveal-play .quote-card { animation: maskUp .8s cubic-bezier(.16,1,.3,1) forwards; clip-path: inset(100% 0 0 0); }
+  @keyframes maskUp { to { clip-path: inset(0 0 0 0); } }
+
+  /* 4) 打字机 */
+  .type-line { font-size: 32px; color: #f5efdd; font-weight: 800; -webkit-text-stroke: 2px #141410; paint-order: stroke fill; min-height: 48px; }
+  .cursor { display: inline-block; width: 3px; height: 34px; background: var(--accent); vertical-align: -6px; margin-left: 3px; animation: blink .8s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .type-src { margin-top: 10px; font-size: 13px; color: var(--dim); letter-spacing: 4px; }
+
+  /* 5) 卡拉OK逐字 */
+  .ktv-line { font-size: 34px; font-weight: 900; -webkit-text-stroke: 2.5px #141410; paint-order: stroke fill; }
+  .ktv-line span { color: #fff; transition: color .18s, text-shadow .18s; }
+  .ktv-line span.on { color: var(--yellow); text-shadow: 0 0 14px rgba(241,196,64,.75); }
+
+  /* 6) 氛围粒子 */
+  .dust { position: absolute; border-radius: 50%; background: rgba(232,184,75,.5); filter: blur(1px); animation: rise linear infinite; }
+  @keyframes rise {
+    from { transform: translateY(0) translateX(0); opacity: 0; }
+    12%  { opacity: var(--o); }
+    88%  { opacity: var(--o); }
+    to   { transform: translateY(-240px) translateX(var(--dx)); opacity: 0; }
+  }
+  .dust-text { font-size: 30px; color: #f5efdd; }
+</style>
+</head>
+<body>
+  <h1>动效候选演示 · 借鉴 Remotion 官网</h1>
+  <div class="sub">按我们视频的视觉风格 1:1 复刻的小样，全部自动循环播放 — 看完决定要哪几个。（阴影脉冲已上线，不在此列）</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="stage"><div class="center">
+        <div class="big"><span id="numVal">0</span><span id="numUnit">条</span></div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p1">P1</span><span class="name">数字计数</span></div>
+        <div class="desc">number_pop 升级：「5000条」从 0 滚动到位再定格，代替现在的静态弹出。落点仍走主时间轴（说到才滚）。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="center">
+        <div class="hl-line" id="hlBox">真正困住你的，是<span class="hl-word">心中之贼</span></div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p1">P1</span><span class="name">荧光笔高亮</span></div>
+        <div class="desc">「划重点」隐喻：讲到关键词时一笔金色扫过。与关键词弹出互补——弹出是「喊」，高亮是「点」，适合密度控制后补位。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="center" id="revealBox">
+        <div class="quote-card">
+          <div class="quote-mark">❝</div>
+          <div class="quote-text">让你痛苦的从来不是事情本身，<br>而是你对事情的看法。</div>
+        </div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p2">P2</span><span class="name">遮罩揭示（金句卡入场）</span></div>
+        <div class="desc">quote_card 入场从淡入改为自下而上揭示，金句「揭晓」的仪式感更强。只改入场方式，卡片样式不变。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="center">
+        <div class="type-line"><span id="typeText"></span><span class="cursor"></span></div>
+        <div class="type-src">—— 《传习录》</div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p2">P2</span><span class="name">打字机（原典引用）</span></div>
+        <div class="desc">只在引用王阳明原句时触发，逐字浮现有「书写」氛围。滥用会拖节奏，所以限定原典场景。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stage"><div class="center">
+        <div class="ktv-line" id="ktvBox"></div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p3">P3</span><span class="name">卡拉OK逐字字幕</span></div>
+        <div class="desc">字幕随语音逐字点亮，对标头部博主。需要 whisper 字级时间戳全链路改造（manifest→组件），工程量最大，放最后。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stage" id="dustStage"><div class="center">
+        <div class="big dust-text">此心光明，亦复何言</div>
+      </div></div>
+      <div class="meta">
+        <div class="row"><span class="badge p3">P3</span><span class="name">低密度氛围粒子</span></div>
+        <div class="desc">全片常驻的金色微尘上浮，低透明度加质感不抢戏。密度一高就俗，所以默认关、按选题开。</div>
+      </div>
+    </div>
+
+  </div>
+
+<script>
+  // 1) 数字计数：easeOut 滚到 5000，停 1.6s 后重来
+  (function () {
+    const el = document.getElementById('numVal');
+    const target = 5000, dur = 1100;
+    function play() {
+      const t0 = performance.now();
+      (function tick(now) {
+        const p = Math.min(1, (now - t0) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = Math.round(target * eased).toLocaleString();
+        if (p < 1) requestAnimationFrame(tick); else setTimeout(play, 1600);
+      })(t0);
+    }
+    play();
+  })();
+
+  // 2) 荧光笔：重触发 class
+  (function () {
+    const box = document.getElementById('hlBox');
+    setInterval(() => {
+      box.classList.remove('hl-play'); void box.offsetWidth;
+      box.classList.add('hl-play');
+    }, 2600);
+    box.classList.add('hl-play');
+  })();
+
+  // 3) 遮罩揭示：重触发 class
+  (function () {
+    const box = document.getElementById('revealBox');
+    setInterval(() => {
+      box.classList.remove('reveal-play'); void box.offsetWidth;
+      box.classList.add('reveal-play');
+    }, 3000);
+    box.classList.add('reveal-play');
+  })();
+
+  // 4) 打字机
+  (function () {
+    const el = document.getElementById('typeText');
+    const text = '此心不动，随机而动。';
+    function play() {
+      let i = 0; el.textContent = '';
+      const timer = setInterval(() => {
+        el.textContent = text.slice(0, ++i);
+        if (i >= text.length) { clearInterval(timer); setTimeout(play, 1800); }
+      }, 130);
+    }
+    play();
+  })();
+
+  // 5) 卡拉OK：模拟逐字时间戳点亮
+  (function () {
+    const box = document.getElementById('ktvBox');
+    const chars = '知行合一，方能致良知'.split('');
+    box.innerHTML = chars.map(c => `<span>${c}</span>`).join('');
+    const spans = box.querySelectorAll('span');
+    function play() {
+      spans.forEach(s => s.classList.remove('on'));
+      chars.forEach((_, i) => setTimeout(() => spans[i].classList.add('on'), 200 + i * 210));
+      setTimeout(play, 200 + chars.length * 210 + 1400);
+    }
+    play();
+  })();
+
+  // 6) 氛围粒子：随机生成 18 颗低透明度金尘
+  (function () {
+    const stage = document.getElementById('dustStage');
+    for (let i = 0; i < 18; i++) {
+      const d = document.createElement('div');
+      d.className = 'dust';
+      const size = 2 + Math.random() * 3.5;
+      d.style.width = d.style.height = size + 'px';
+      d.style.left = Math.random() * 100 + '%';
+      d.style.bottom = -10 + Math.random() * 40 + 'px';
+      d.style.setProperty('--o', (0.15 + Math.random() * 0.3).toFixed(2));
+      d.style.setProperty('--dx', (Math.random() * 40 - 20).toFixed(0) + 'px');
+      d.style.animationDuration = (6 + Math.random() * 7).toFixed(1) + 's';
+      d.style.animationDelay = (-Math.random() * 10).toFixed(1) + 's';
+      stage.appendChild(d);
+    }
+  })();
+</script>
+</body>
+</html>

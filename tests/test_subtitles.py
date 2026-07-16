@@ -1122,3 +1122,44 @@ def test_burn_command_has_faststart_for_web_playback():
     cmd = _build_burn_command()
     assert "-movflags" in cmd
     assert cmd[cmd.index("-movflags") + 1] == "+faststart"
+
+
+# ---- P3a 卡拉OK逐字字幕（2026-07-16 借鉴 Remotion 官网卡拉OK效果）----
+
+
+def test_render_ass_karaoke_adds_kf_per_char_and_swaps_colors():
+    # 每字一个 \kf 标签、时长按字数均分（3s/6字=50cs/字）；
+    # Primary 换金黄（唱到色）、Secondary 换白（未唱色）。
+    ass = render_ass([Cue(0, 3, "此心不动随机")], 1920, 1080, karaoke=True)
+    dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    assert dialogue.count("\\kf") == 6
+    assert "{\\kf50}此" in dialogue
+    style = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
+    assert "&H000FC4F1" in style  # PrimaryColour = #f1c40f 的 BGR
+    assert "&H00FFFFFF" in style  # SecondaryColour = 白
+
+
+def test_render_ass_karaoke_centisecond_sum_matches_cue_span():
+    # 余数厘秒摊给前几个字：总和必须等于句时长（2.5s=250cs / 7 字 = 36*5 + 35*2）。
+    import re as _re
+
+    ass = render_ass([Cue(0, 2.5, "知行合一致良知")], 1920, 1080, karaoke=True)
+    dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    spans = [int(m) for m in _re.findall(r"\\kf(\d+)", dialogue)]
+    assert len(spans) == 7
+    assert sum(spans) == 250
+
+
+def test_render_ass_karaoke_off_keeps_plain_text_and_white_primary():
+    ass = render_ass([Cue(0, 2, "你好世界")], 1920, 1080)
+    dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    assert "\\kf" not in dialogue
+    style = next(l for l in ass.splitlines() if l.startswith("Style: Default"))
+    assert style.split(",")[3] == "&H00FFFFFF"  # Primary 仍是白
+
+
+def test_render_ass_karaoke_escapes_special_chars_per_char():
+    # 逐字包标签后转义仍生效：{ } 不能裸露破坏 override 块。
+    ass = render_ass([Cue(0, 1, "a{b}c")], 1920, 1080, karaoke=True)
+    dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
+    assert "\\{" in dialogue and "\\}" in dialogue

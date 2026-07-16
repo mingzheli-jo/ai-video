@@ -61,6 +61,26 @@ export const hookOpenerSchema = z.object({
   accent: z.string().default("#e8b84b"),
 });
 
+export const ambientParticlesSchema = z.object({
+  accent: z.string().default("#e8b84b"),
+});
+
+export const highlightSweepSchema = z.object({
+  // 含关键词的句子上下文（Python 侧已按关键词居中裁到单行放得下）。
+  text: z.string(),
+  // 被金色高亮扫过的关键词（text 的子串；防御：不是子串时整行扫）。
+  keyword: z.string(),
+  accent: z.string().default("#e8b84b"),
+});
+
+export const typewriterQuoteSchema = z.object({
+  // 出处（"王阳明"/"传习录"…），正文打完后落款淡入。
+  source: z.string(),
+  // 逐字打出的引用正文。
+  text: z.string(),
+  accent: z.string().default("#e8b84b"),
+});
+
 export type IntroProps = z.infer<typeof introSchema>;
 export type ChapterCardProps = z.infer<typeof chapterCardSchema>;
 export type LowerThirdProps = z.infer<typeof lowerThirdSchema>;
@@ -71,6 +91,9 @@ export type KeywordPopProps = z.infer<typeof keywordPopSchema>;
 export type OpeningCardProps = z.infer<typeof openingCardSchema>;
 export type GoldenCardProps = z.infer<typeof goldenCardSchema>;
 export type HookOpenerProps = z.infer<typeof hookOpenerSchema>;
+export type HighlightSweepProps = z.infer<typeof highlightSweepSchema>;
+export type TypewriterQuoteProps = z.infer<typeof typewriterQuoteSchema>;
+export type AmbientParticlesProps = z.infer<typeof ambientParticlesSchema>;
 
 // 开屏钩子序列的三色轮换（对标博主：红/黄/白，粗黑描边浮在画面上）。
 export const HOOK_LINE_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"];

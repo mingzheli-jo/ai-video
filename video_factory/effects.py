@@ -59,6 +59,9 @@ _COMPOSITION_BY_TYPE = {
     "golden_card": "GoldenCard",
     # 金句开屏三行式（黑卡退役后的形态）：复用 HookOpener 组件，不新建 TSX。
     "golden_lines": "HookOpener",
+    # 荧光笔高亮 / 打字机引用（2026-07-16 用户拍板借鉴 Remotion 官网）。
+    "highlight_sweep": "HighlightSweep",
+    "typewriter_quote": "TypewriterQuote",
 }
 
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
@@ -81,6 +84,22 @@ _KEYWORD_QUOTE_RE = re.compile(r"「([^」]+)」")
 
 # 关键词弹出三色轮换（博主风格：红/黄/白，按全片 keyword_pop 序号循环）。
 KEYWORD_POP_COLORS = ["#e74c3c", "#f1c40f", "#ffffff"]
+
+# 荧光笔高亮（2026-07-16）：命中主时间轴的关键词事件在 keyword_pop（弹出=喊）与
+# highlight_sweep（划重点=点）间隔条轮替；没命中的没有句子上下文，维持弹出。
+HIGHLIGHT_SWEEP_DURATION = 2.0
+HIGHLIGHT_CONTEXT_MAX_CHARS = 16  # 上下文行超此长度以关键词为中心裁窗（单行放得下）
+
+# 打字机引用（2026-07-16）：金句文本形如「出处：正文」（出处 ≤6 字）时改走打字机
+# 逐字呈现；时长随正文字数伸缩（打字要打得完），普通金句仍走 quote_card。
+_TYPEWRITER_QUOTE_RE = re.compile(r"^([^：:，。！？\s]{1,6})[：:](.{4,})$")
+TYPEWRITER_CHAR_SECONDS = 0.12   # 每字打字耗时（前 65% 时长打完，见组件）
+TYPEWRITER_MIN_DURATION = QUOTE_DURATION
+TYPEWRITER_MAX_DURATION = 4.5
+
+# 氛围粒子（2026-07-16，默认关按选题开）：只渲染一小段无缝循环，ffmpeg -stream_loop
+# 循环铺满全片——2 分钟正片只需 8s 的 ProRes 4444 粒子层，成本可控。
+AMBIENT_LOOP_SECONDS = 8.0
 # 密度控制阈值（秒）：相邻 keyword_pop 事件最小间隔 / 真空补填触发间隔。
 DENSITY_MIN_GAP_S = 8.0    # 间隔 < 8s → 抽稀（删后出现的事件）
 DENSITY_VACUUM_S = 20.0    # 间隔 > 20s → 补填一个规则抽取的 keyword_pop
@@ -431,6 +450,28 @@ def _extract_keyword(narration: str, title: str) -> str:
     return (title or "").strip()[:KEYWORD_TITLE_FALLBACK_CHARS]
 
 
+def _clip_context(sentence: str, keyword: str, max_chars: int = HIGHLIGHT_CONTEXT_MAX_CHARS) -> str:
+    """荧光笔高亮的上下文行：取含关键词的句子，超长时以关键词为中心裁窗。
+
+    裁剪保证关键词完整保留，被裁的一端补省略号；句中找不到关键词（标点/空白差异）
+    或关键词本身超窗时，直接返回关键词（组件对整词扫高亮）。
+    """
+    sentence = str(sentence or "").strip()
+    keyword = str(keyword or "").strip()
+    at = sentence.find(keyword)
+    if at < 0 or len(keyword) >= max_chars:
+        return keyword
+    if len(sentence) <= max_chars:
+        return sentence
+    pad = (max_chars - len(keyword)) // 2
+    left = max(0, at - pad)
+    right = min(len(sentence), left + max_chars)
+    left = max(0, right - max_chars)
+    prefix = "…" if left > 0 else ""
+    suffix = "…" if right < len(sentence) else ""
+    return f"{prefix}{sentence[left:right]}{suffix}"
+
+
 def _derive_keyword_events(
     sections: list[dict],
     rewrite_sections: list,
@@ -734,16 +775,30 @@ def _build_rich_effects(
             if card_start - QUOTE_DURATION < start < card_start + CHAPTER_CARD_DURATION:
                 start = card_start + CHAPTER_CARD_DURATION + 0.2
                 break
-        if start + QUOTE_DURATION < total_duration:
-            rich.append(_frame_aligned(
-                EffectSpec(
-                    type="quote_card",
-                    start=start,
-                    duration=QUOTE_DURATION,
-                    props={"text": quote_text, "accent": accent},
-                ),
-                fps,
-            ))
+        # 「出处：正文」形态（王阳明：此心不动…）走打字机逐字呈现（2026-07-16），
+        # 时长随正文字数伸缩（前 65% 时长要打得完，见组件）；普通金句仍走 quote_card。
+        tw_match = _TYPEWRITER_QUOTE_RE.match(quote_text)
+        if tw_match is not None:
+            body = tw_match.group(2).strip()
+            duration = min(
+                TYPEWRITER_MAX_DURATION,
+                max(TYPEWRITER_MIN_DURATION, TYPEWRITER_CHAR_SECONDS * len(body) / 0.65),
+            )
+            spec = EffectSpec(
+                type="typewriter_quote",
+                start=start,
+                duration=duration,
+                props={"source": tw_match.group(1).strip(), "text": body, "accent": accent},
+            )
+        else:
+            spec = EffectSpec(
+                type="quote_card",
+                start=start,
+                duration=QUOTE_DURATION,
+                props={"text": quote_text, "accent": accent},
+            )
+        if start + spec.duration < total_duration:
+            rich.append(_frame_aligned(spec, fps))
 
     # 数字强调：跳过第 0 节（片头+要点卡已经很满），每节最多 1 个、全片最多 2 个。
     # 口播文本在 rewrite 里（拼装计划的节只有 title/duration）：计划第 i 节（i>=1）
@@ -809,10 +864,29 @@ def _build_rich_effects(
         golden_windows.append((spec.start, spec.start + spec.duration))
 
     # keyword_pop 三色轮换；过滤掉落在金句卡时间窗 ±1s 内的弹词（全屏卡前后弹小词很怪）。
+    # 荧光笔轮替（2026-07-16 用户拍板借鉴 Remotion 官网）：命中主时间轴的关键词事件
+    # 隔条改走 highlight_sweep——句子上下文浮现、金笔扫过关键词（弹出是"喊"，高亮是
+    # "点"，两种形态交替不单调）。没命中 timeline 的没有上下文句子，维持弹出。
     kw_color_idx = 0
+    matched_idx = 0
     for kw_start, keyword in keyword_events:
         if any(gs - 1.0 <= kw_start <= ge + 1.0 for gs, ge in golden_windows):
             continue
+        sentence = _find_timeline_sentence(timeline, keyword)
+        if sentence is not None:
+            matched_idx += 1
+            if matched_idx % 2 == 1:  # 第 1、3、5…个命中的走荧光笔
+                context = _clip_context(str(sentence.get("text") or ""), keyword)
+                rich.append(_frame_aligned(
+                    EffectSpec(
+                        type="highlight_sweep",
+                        start=kw_start,
+                        duration=HIGHLIGHT_SWEEP_DURATION,
+                        props={"text": context, "keyword": keyword, "accent": accent},
+                    ),
+                    fps,
+                ))
+                continue
         color = KEYWORD_POP_COLORS[kw_color_idx % len(KEYWORD_POP_COLORS)]
         rich.append(_frame_aligned(
             EffectSpec(
@@ -940,6 +1014,76 @@ def _build_render_command(
         f"--height={height}",
         f"--frames=0-{frames - 1}",
     ]
+
+
+def render_ambient_particles(
+    output_dir: Path | str,
+    fps: int = DEFAULT_FPS,
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    accent: str = DEFAULT_ACCENT,
+    runner: Runner = subprocess.run,
+    remotion_dir: Path | str | None = None,
+) -> Path | None:
+    """渲染 AMBIENT_LOOP_SECONDS 的无缝循环氛围粒子层（ProRes 4444 带 alpha）。
+
+    与特效清单是两套生命周期（粒子层循环铺满全片、不进 manifest）。npx 缺失或
+    渲染失败都返回 None 并留痕——氛围粒子是锦上添花，绝不阻断成片。
+    """
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    npx = shutil.which("npx")
+    if not npx:
+        _append_warnings(output_dir, ["未找到 npx，跳过氛围粒子层。"])
+        return None
+    project = Path(remotion_dir) if remotion_dir else _default_remotion_dir()
+    entry = project / "src" / "index.ts"
+    out_path = output_dir / "ambient_particles.mov"
+    props_path = output_dir / "ambient_particles.props.json"
+    props_path.write_text(json.dumps({"accent": accent}, ensure_ascii=False), encoding="utf-8")
+    command = _build_render_command(
+        npx, entry, "AmbientParticles", props_path, out_path,
+        {"duration": AMBIENT_LOOP_SECONDS}, fps, width, height,
+    )
+    try:
+        completed = runner(
+            command, check=False, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", cwd=str(project),
+        )
+    except OSError as exc:
+        _append_warnings(output_dir, [f"氛围粒子渲染无法启动 npx：{exc}"])
+        return None
+    if getattr(completed, "returncode", 0) != 0:
+        stderr = (getattr(completed, "stderr", "") or "")[:300]
+        _append_warnings(output_dir, [f"氛围粒子渲染失败（退出码 {completed.returncode}）：{stderr}"])
+        return None
+    return out_path
+
+
+def overlay_ambient_loop(
+    base_video: Path | str,
+    particles: Path | str,
+    output: Path | str,
+    runner: Runner = subprocess.run,
+) -> Path:
+    """把无缝循环粒子层 -stream_loop 循环叠加到成片全程（shortest=1 以正片长度收尾）。"""
+    base_video = Path(base_video)
+    output = Path(output)
+    if not base_video.exists():
+        raise EffectsError(f"原片不存在：{base_video}")
+    command = [
+        "ffmpeg", "-y", *_FF_QUIET,
+        "-i", str(base_video),
+        "-stream_loop", "-1", "-i", str(particles),
+        "-filter_complex",
+        "[1:v]setpts=PTS-STARTPTS[p];[0:v][p]overlay=0:0:shortest=1[out]",
+        "-map", "[out]", "-map", "0:a?", "-c:a", "copy",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    _run(command, runner, context="氛围粒子叠加")
+    return output
 
 
 def _write_skipped(output_dir: Path, reason: str) -> None:
@@ -1355,6 +1499,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-sfx", dest="sfx", action="store_false", help="关闭特效音（默认开：为片头/章节卡/花字条配音效）")
     parser.set_defaults(sfx=True)
     parser.add_argument("--sfx-volume", type=float, default=DEFAULT_SFX_VOLUME, help=f"特效音音量 0~1（默认 {DEFAULT_SFX_VOLUME}）")
+    parser.add_argument(
+        "--ambient-particles",
+        action="store_true",
+        help="叠加全片低密度金色氛围粒子（默认关，按选题开；渲染 8s 无缝循环层后 ffmpeg 循环铺满）",
+    )
     parser.add_argument("--skip-render", action="store_true", help="只产出 manifest，不调 remotion 渲染")
     args = parser.parse_args(argv)
 
@@ -1421,6 +1570,24 @@ def main(argv: list[str] | None = None) -> int:
             sfx_enabled=args.sfx,
             sfx_volume=args.sfx_volume,
         )
+
+        # 氛围粒子（可选，默认关）：渲染 8s 无缝循环层后循环叠满全片。
+        # 任一步失败只留痕不阻断——粒子是锦上添花，成片保持无粒子版本。
+        if args.ambient_particles:
+            particles = render_ambient_particles(
+                output_dir,
+                fps=int(manifest.get("fps") or DEFAULT_FPS),
+                width=int(manifest.get("width") or DEFAULT_WIDTH),
+                height=int(manifest.get("height") or DEFAULT_HEIGHT),
+                accent=str(manifest.get("accent") or DEFAULT_ACCENT),
+            )
+            if particles is not None:
+                try:
+                    ambient_out = output_dir / "release_with_effects_ambient.mp4"
+                    overlay_ambient_loop(release, particles, ambient_out)
+                    ambient_out.replace(release)
+                except (EffectsError, OSError) as exc:
+                    _append_warnings(output_dir, [f"氛围粒子叠加失败，保持无粒子成片：{exc}"])
     except (EffectsError, OSError) as exc:
         print(f"特效层失败：{exc}")
         stage_report.write_stage_error(args.output, "effects", f"特效层失败：{exc}")

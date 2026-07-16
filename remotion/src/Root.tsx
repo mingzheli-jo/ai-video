@@ -10,9 +10,14 @@ import { KeywordPop } from "./compositions/KeywordPop";
 import { OpeningCard } from "./compositions/OpeningCard";
 import { GoldenCard } from "./compositions/GoldenCard";
 import { HookOpener } from "./compositions/HookOpener";
+import { HighlightSweep } from "./compositions/HighlightSweep";
+import { TypewriterQuote } from "./compositions/TypewriterQuote";
+import { AmbientParticles } from "./compositions/AmbientParticles";
 import {
+  ambientParticlesSchema,
   chapterCardSchema,
   goldenCardSchema,
+  highlightSweepSchema,
   hookOpenerSchema,
   introSchema,
   keyPointsSchema,
@@ -21,6 +26,7 @@ import {
   numberPopSchema,
   openingCardSchema,
   quoteCardSchema,
+  typewriterQuoteSchema,
 } from "./schema";
 
 // 以下 FPS/WIDTH/HEIGHT/durationInFrames 仅为 Remotion Studio 预览的默认值。
@@ -152,6 +158,44 @@ export const RemotionRoot: React.FC = () => {
         schema={goldenCardSchema}
         defaultProps={{
           text: "核心金句示例",
+          accent: "#e8b84b",
+        }}
+      />
+      <Composition
+        id="AmbientParticles"
+        component={AmbientParticles}
+        durationInFrames={240}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={ambientParticlesSchema}
+        defaultProps={{ accent: "#e8b84b" }}
+      />
+      <Composition
+        id="HighlightSweep"
+        component={HighlightSweep}
+        durationInFrames={60}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={highlightSweepSchema}
+        defaultProps={{
+          text: "真正困住你的，是心中之贼",
+          keyword: "心中之贼",
+          accent: "#e8b84b",
+        }}
+      />
+      <Composition
+        id="TypewriterQuote"
+        component={TypewriterQuote}
+        durationInFrames={110}
+        fps={FPS}
+        width={WIDTH}
+        height={HEIGHT}
+        schema={typewriterQuoteSchema}
+        defaultProps={{
+          source: "王阳明",
+          text: "此心不动，随机而动。",
           accent: "#e8b84b",
         }}
       />

@@ -355,6 +355,7 @@ function collectForm() {
   f.sfx = h('#f_sfx').checked;
   put('sfx_volume', h('#f_sfxvol').value);
   f.lower_thirds = h('#f_lower').checked;
+  f.ambient_particles = h('#f_ambient').checked;
   return f;
 }
 
@@ -913,6 +914,7 @@ def _body() -> str:
             <div class="switch-row"><span>字幕</span><label class="switch"><input type="checkbox" id="f_subtitles"><span class="slider"></span></label></div>
             <div class="switch-row"><span>特效</span><label class="switch"><input type="checkbox" id="f_effects" checked><span class="slider"></span></label></div>
             <div class="switch-row"><span>特效音（片头/章节卡/花字条音效）</span><label class="switch"><input type="checkbox" id="f_sfx" checked><span class="slider"></span></label></div>
+            <div class="switch-row"><span>氛围粒子（全片金色微尘上浮，按选题开）</span><label class="switch"><input type="checkbox" id="f_ambient"><span class="slider"></span></label></div>
             <div class="switch-row"><span>底部花字条（每节小标题横条）</span><label class="switch"><input type="checkbox" id="f_lower"><span class="slider"></span></label></div>
           </div>
           <label>特效音音量</label>

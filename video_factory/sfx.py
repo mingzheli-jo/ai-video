@@ -30,6 +30,9 @@ SFX_BY_TYPE = {
     "key_points": "whoosh.wav",
     "quote_card": "pop.wav",
     "number_pop": "pop.wav",
+    # 荧光笔高亮：一声"刷"贴合金笔划过；打字机引用与金句卡同声起势。
+    "highlight_sweep": "swoosh.wav",
+    "typewriter_quote": "pop.wav",
     # 关键词弹出复用"啵"的 pop；冷开场卡用 whoosh 起势；金句全屏卡用低频冲击音。
     "keyword_pop": "pop.wav",
     "opening_card": "whoosh.wav",

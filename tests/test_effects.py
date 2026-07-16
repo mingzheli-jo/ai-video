@@ -1637,3 +1637,132 @@ def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
     assert str(sfx_dir / "swoosh.wav") not in cmd
     assert "adelay=30000:all=1" in fc
     assert "amix=inputs=2:duration=first:normalize=0" in fc  # 底片音轨 + 1 声 impact
+
+
+# ---- P1b/P2b（2026-07-16 借鉴 Remotion 官网）：荧光笔高亮 / 打字机引用 ----
+
+
+def test_manifest_typewriter_quote_for_sourced_text():
+    # 「出处：正文」形态的金句走打字机逐字呈现；出处与正文拆开传给组件。
+    rewrite = {"publish_titles": ["王阳明：此心不动随机而动"]}
+    manifest = build_effects_manifest(PLAN, rewrite)
+    tw = [e for e in manifest["effects"] if e["type"] == "typewriter_quote"]
+    assert len(tw) == 1
+    assert tw[0]["source"] == "王阳明"
+    assert tw[0]["text"] == "此心不动随机而动"
+    # 8 字正文：0.12*8/0.65≈1.48 < 下限 → 取 QUOTE_DURATION=2.8
+    assert tw[0]["duration"] == pytest.approx(2.8, abs=1 / 30)
+    assert all(e["type"] != "quote_card" for e in manifest["effects"])
+
+
+def test_manifest_typewriter_duration_scales_and_caps():
+    # 30 字正文：0.12*30/0.65≈5.54 → 封顶 4.5s（不能为打字拖垮节奏）。
+    rewrite = {"publish_titles": ["传习录：" + "知" * 30]}
+    manifest = build_effects_manifest(PLAN, rewrite)
+    tw = next(e for e in manifest["effects"] if e["type"] == "typewriter_quote")
+    assert tw["duration"] == pytest.approx(4.5, abs=1 / 30)
+
+
+def test_manifest_plain_quote_still_quote_card():
+    # 无出处前缀的普通金句维持 quote_card，不被打字机接管。
+    manifest = build_effects_manifest(PLAN, REWRITE)
+    assert any(e["type"] == "quote_card" for e in manifest["effects"])
+    assert all(e["type"] != "typewriter_quote" for e in manifest["effects"])
+
+
+def test_manifest_highlight_sweep_alternates_on_timeline_matches():
+    # 命中主时间轴的关键词事件隔条轮替：第 1 个走荧光笔（带句子上下文、真实句起点），
+    # 第 2 个保持弹出。没 timeline 的用例（本文件其余测试）不受影响。
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 6.0},
+            {"index": 1, "title": "第一节", "duration_seconds": 20.0},
+            {"index": 2, "title": "第二节", "duration_seconds": 20.0},
+        ]
+    }
+    rewrite = {
+        "hook": "开场",
+        "sections": [
+            {"narration": "先讲「心中之贼」这个概念"},
+            {"narration": "再说「知行合一」的功夫"},
+        ],
+    }
+    timeline = [
+        {"text": "真正困住你的是心中之贼", "start": 9.0, "end": 12.0},
+        {"text": "落到实处就是知行合一四个字", "start": 26.0, "end": 29.0},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    sweeps = [e for e in manifest["effects"] if e["type"] == "highlight_sweep"]
+    pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    assert len(sweeps) == 1 and len(pops) == 1
+    assert sweeps[0]["keyword"] == "心中之贼"
+    assert sweeps[0]["text"] == "真正困住你的是心中之贼"  # ≤16 字整句直用
+    assert sweeps[0]["start"] == pytest.approx(9.0, abs=1 / 30)
+    assert pops[0]["keyword"] == "知行合一"
+    assert pops[0]["start"] == pytest.approx(26.0, abs=1 / 30)
+
+
+def test_clip_context_windows_long_sentence_around_keyword():
+    from video_factory.effects import _clip_context
+
+    # 短句整句直用；长句以关键词为中心裁窗、两端补省略号；找不到关键词回落关键词本身。
+    assert _clip_context("短句里有关键词", "关键词") == "短句里有关键词"
+    long_sent = "这是一个非常非常长的句子中间藏着关键词然后后面还有很多很多字"
+    clipped = _clip_context(long_sent, "关键词")
+    assert "关键词" in clipped
+    assert clipped.startswith("…") and clipped.endswith("…")
+    assert len(clipped) <= 16 + 2
+    assert _clip_context("句子里根本没有", "关键词") == "关键词"
+
+
+# ---- P3b 氛围粒子（2026-07-16，默认关按选题开）----
+
+
+def test_render_ambient_particles_builds_command(tmp_path, monkeypatch):
+    from video_factory.effects import render_ambient_particles
+
+    monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
+    runner = _Recorder()
+
+    path = render_ambient_particles(tmp_path, fps=30, width=1080, height=1920, runner=runner)
+
+    assert path is not None and path.name == "ambient_particles.mov"
+    cmd = runner.commands[0]
+    assert "AmbientParticles" in cmd
+    assert "--frames=0-239" in cmd  # 8s 无缝循环 * 30fps = 240 帧
+    assert "--width=1080" in cmd and "--height=1920" in cmd
+
+
+def test_render_ambient_particles_skips_without_npx(tmp_path, monkeypatch):
+    from video_factory.effects import render_ambient_particles
+
+    monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: None)
+    runner = _Recorder()
+
+    assert render_ambient_particles(tmp_path, runner=runner) is None
+    assert runner.commands == []
+    warnings = json.loads((tmp_path / "effects_warnings.json").read_text(encoding="utf-8"))
+    assert any("npx" in w for w in warnings["warnings"])
+
+
+def test_overlay_ambient_loop_uses_stream_loop_and_shortest(tmp_path):
+    from video_factory.effects import overlay_ambient_loop
+
+    base = tmp_path / "base.mp4"
+    base.write_bytes(b"v")
+    particles = tmp_path / "ambient_particles.mov"
+    particles.write_bytes(b"p")
+    recorded: list[list[str]] = []
+
+    def runner(command, **kwargs):
+        recorded.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    overlay_ambient_loop(base, particles, tmp_path / "out.mp4", runner=runner)
+
+    cmd = recorded[0]
+    loop_at = cmd.index("-stream_loop")
+    assert cmd[loop_at + 1] == "-1"  # 粒子层无限循环，shortest=1 以正片长度收尾
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "shortest=1" in fc
+    assert "+faststart" in cmd

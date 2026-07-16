@@ -271,7 +271,7 @@ def _build_raw_job(form: dict) -> dict:
         value = form.get(key)
         if value not in (None, ""):
             raw[key] = value
-    for key in ("subtitles", "effects", "lower_thirds", "sfx"):
+    for key in ("subtitles", "effects", "lower_thirds", "sfx", "ambient_particles"):
         if key in form and form[key] is not None:
             raw[key] = _as_bool(form[key])
     return raw

@@ -368,12 +368,17 @@ def render_ass(
     width: int,
     height: int,
     english: list[str] | None = None,
+    karaoke: bool = False,
 ) -> str:
     """把 cues 渲染成完整 .ass 文件文本（Microsoft YaHei、白字细黑描边、底部居中）。
 
     english 非空时输出双语：中文在上（主字号）、英文在下（小字号），逐条同时间窗。
     english 必须与**切成单行后**的 cues 一一对应（长度一致），否则抛错——调用方应先
     prepare_single_line_cues 再翻译再传入。
+
+    karaoke=True（2026-07-16 用户拍板对标头部博主）：中文字幕逐字卡拉OK——每字一个
+    \\kf 标签，句内时长按字数均分（句级起止已是 whisper 真实时间，句内均分误差可忽略），
+    白字随语音逐字填充成黄。英文副字幕不参与。此函数默认关，由 generate_subtitles 默认开。
     """
     if not cues:
         raise SubtitlesError("没有字幕条目可渲染 ASS。")
@@ -396,11 +401,12 @@ def render_ass(
     zh_margin_v = layout["margin_v"] if not en_font else en_margin_v + round(en_font * 1.6)
 
     header = _ass_header(
-        width, height, font_size, zh_margin_v, layout["side_margin"], en_font, en_margin_v
+        width, height, font_size, zh_margin_v, layout["side_margin"], en_font, en_margin_v,
+        karaoke=karaoke,
     )
     events: list[str] = []
     for i, cue in enumerate(single):
-        events.append(_ass_dialogue(cue))
+        events.append(_ass_dialogue(cue, karaoke=karaoke))
         if en_lines and en_lines[i]:
             events.append(_ass_dialogue_en(cue, en_lines[i]))
     return header + "\n".join(events) + "\n"
@@ -477,6 +483,7 @@ def _ass_header(
     side_margin: int,
     en_font: int = 0,
     en_margin_v: int = 0,
+    karaoke: bool = False,
 ) -> str:
     # Alignment=2 底部居中。BorderStyle=1=白字+厚黑描边+轻阴影（用户点名去掉黑色底板；
     # 纯白无描边在亮背景会看不清，厚描边是可读性主力）。OutlineColour 是描边色
@@ -485,8 +492,13 @@ def _ass_header(
     outline = max(4, round(font_size * 0.10))
     shadow = max(1, round(font_size * 0.03))
     font_name = get_subtitle_font_name()
+    # 卡拉OK填充语义（\kf）：字从 SecondaryColour 填成 PrimaryColour。开卡拉OK时
+    # Primary=金黄（#f1c40f 的 BGR）作"唱到"色、Secondary=白作"未唱"色；
+    # 关卡拉OK维持原样（Primary 白）。
+    primary = "&H000FC4F1" if karaoke else "&H00FFFFFF"
+    secondary = "&H00FFFFFF" if karaoke else "&H000000FF"
     styles = (
-        f"Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,"
+        f"Style: Default,{font_name},{font_size},{primary},{secondary},"
         f"&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,{outline},{shadow},2,"
         f"{side_margin},{side_margin},{margin_v},1\n"
     )
@@ -519,9 +531,9 @@ def _ass_header(
     )
 
 
-def _ass_dialogue(cue: Cue) -> str:
-    # cue 已在 render_ass 里预切成单行，这里只做 ASS 转义。
-    text = _escape_ass_text(cue.text)
+def _ass_dialogue(cue: Cue, karaoke: bool = False) -> str:
+    # cue 已在 render_ass 里预切成单行，这里只做 ASS 转义（卡拉OK时逐字加 \kf 标签）。
+    text = _karaoke_text(cue) if karaoke and cue.text else _escape_ass_text(cue.text)
     # 字段严格对齐 Format（Layer,Start,End,Style,Name,MarginL,MarginR,Effect,Text）：
     # Style 与 Text 之间只有 Name/MarginL/MarginR/Effect 四段 → ",,0,0,"。
     # 曾多写一个 margin 字段（",,0,0,0,,"），libass 把越界的逗号并入 Text，
@@ -530,6 +542,22 @@ def _ass_dialogue(cue: Cue) -> str:
         f"Dialogue: 0,{_format_ass_timestamp(cue.start)},"
         f"{_format_ass_timestamp(cue.end)},Default,,0,0,,{text}"
     )
+
+
+def _karaoke_text(cue: Cue) -> str:
+    """逐字卡拉OK文本：每字一个 {\\kf厘秒} 标签，句内时长按字数均分。
+
+    句级起止来自 whisper 真实时间轴，句内均分对中文口播误差可忽略（对标博主
+    的逐字点亮观感）。余数厘秒摊给前几个字，保证总和等于句时长不漂移。
+    """
+    chars = list(cue.text)
+    total_cs = max(len(chars), int(round((cue.end - cue.start) * 100)))
+    base, extra = divmod(total_cs, len(chars))
+    parts: list[str] = []
+    for i, ch in enumerate(chars):
+        span = base + (1 if i < extra else 0)
+        parts.append(f"{{\\kf{span}}}{_escape_ass_text(ch)}")
+    return "".join(parts)
 
 
 def _ass_dialogue_en(cue: Cue, english: str) -> str:
@@ -899,8 +927,12 @@ def generate_subtitles(
     runner: Runner | None = None,
     english: bool = False,
     timeline: list[dict] | None = None,
+    karaoke: bool = True,
 ) -> dict:
     """编排：分句 → 定字号 → 生成时间轴 → （可选）翻译英文 → 写 .ass → 烧录 → 落 report。
+
+    karaoke 默认开（2026-07-16 用户拍板对标头部博主）：字幕随语音逐字点亮成金黄；
+    CLI --no-karaoke 可关。
 
     english=True 时输出中英双语（中上英下）；翻译任何失败（无 LLM 凭据/超时/条数不齐）
     都降级为纯中文并在 warnings 留痕，绝不因字幕翻译阻断成片。
@@ -948,7 +980,10 @@ def generate_subtitles(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ass_path = output_dir / ASS_FILENAME
-    ass_path.write_text(render_ass(single, width, height, english=english_lines), encoding="utf-8")
+    ass_path.write_text(
+        render_ass(single, width, height, english=english_lines, karaoke=karaoke),
+        encoding="utf-8",
+    )
 
     release_path = output_dir / RELEASE_FILENAME
     burn_subtitles(video, ass_path, release_path, runner)
@@ -965,6 +1000,7 @@ def generate_subtitles(
         "requested_mode": (mode or "auto").strip().lower(),
         "cue_count": len(single),
         "bilingual": english_lines is not None,
+        "karaoke": karaoke,
         "timeline_source": timeline_source,
         "width": width,
         "height": height,
@@ -1017,6 +1053,13 @@ def main(argv: list[str] | None = None) -> int:
         help="显式关闭英文副字幕（当前默认即关，此开关为兼容保留）",
     )
     parser.set_defaults(english=False)
+    parser.add_argument(
+        "--no-karaoke",
+        dest="karaoke",
+        action="store_false",
+        help="关闭逐字卡拉OK点亮（默认开：字幕随语音逐字填充成金黄，对标头部博主）",
+    )
+    parser.set_defaults(karaoke=True)
     parser.add_argument("--output", default="video_factory/output/subtitles", help="输出目录")
     args = parser.parse_args(argv)
     # 补齐凭据（英文副字幕的 LLM 翻译等）：credentials.yaml → 空缺的环境变量。
@@ -1046,20 +1089,22 @@ def _run_cli(args: argparse.Namespace) -> dict:
     if timeline:
         return generate_subtitles(
             video, text, Path(args.output), mode=args.mode, audio=None,
-            english=args.english, timeline=timeline,
+            english=args.english, timeline=timeline, karaoke=args.karaoke,
         )
     # 显式给了音频，或 ratio 模式且没给音频（会在下游报错）——都无需抽临时音轨。
     if args.audio or args.mode == "ratio":
         audio = Path(args.audio) if args.audio else None
         return generate_subtitles(
-            video, text, Path(args.output), mode=args.mode, audio=audio, english=args.english
+            video, text, Path(args.output), mode=args.mode, audio=audio,
+            english=args.english, karaoke=args.karaoke,
         )
     # 未显式给音频、又需要 ASR 时间轴（auto/align）：从视频抽临时 wav，用完即删。
     with tempfile.TemporaryDirectory(prefix="vf_subtitles_") as tmp:
         wav_path = Path(tmp) / "audio.wav"
         _extract_audio(video, wav_path, subprocess.run)
         return generate_subtitles(
-            video, text, Path(args.output), mode=args.mode, audio=wav_path, english=args.english
+            video, text, Path(args.output), mode=args.mode, audio=wav_path,
+            english=args.english, karaoke=args.karaoke,
         )
 
 

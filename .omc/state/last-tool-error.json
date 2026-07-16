@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd \\\"D:/ide/workspace/personal-new/crm-standup-bot\\\" && PYTHONIOENCODING=utf-8 python fetch.py --date 2026-07-15 > /tmp/f.json 2>&1; PYTHONIOENCODING=utf-8 python -c \\\"\\nimport json\\nd=jso...",
+  "error": "Exit code 1\nTraceback (most recent call last):\r\n  File \"<string>\", line 3, in <module>\r\n    d=json.load(open('/tmp/f.json',encoding='utf-8'))\r\n                ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\nFileNotFoundError: [Errno 2] No such file or directory: '/tmp/f.json'",
+  "timestamp": "2026-07-16T01:30:59.945Z",
+  "retry_count": 2
+}

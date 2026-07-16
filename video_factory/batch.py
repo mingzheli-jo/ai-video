@@ -92,6 +92,8 @@ class ResolvedJob:
     # 特效音总开关（默认开：为片头/章节卡/花字条配音效）与音量（None=用 effects 默认 0.35）。
     sfx: bool = True
     sfx_volume: float | None = None
+    # 氛围粒子（2026-07-16，默认关按选题开）：全片低密度金色微尘上浮加质感。
+    ambient_particles: bool = False
     # 配音语速（None=默认；0.5~2.0，1.0=原速）。仅对现场 TTS 生效；分镜/字幕以
     # 音频时长为轴自动跟随，无需额外字段。
     voice_speed: float | None = None
@@ -171,6 +173,7 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         platform=platform,
         sfx=bool(_pick(raw, "sfx", None, True)),
         sfx_volume=raw.get("sfx_volume"),
+        ambient_particles=bool(raw.get("ambient_particles") or False),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
         voice_speed=float(raw["voice_speed"]) if raw.get("voice_speed") not in (None, "") else None,
     )
@@ -319,6 +322,8 @@ def build_effects_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
         argv += ["--no-sfx"]
     if job.sfx_volume is not None:
         argv += ["--sfx-volume", str(job.sfx_volume)]
+    if job.ambient_particles:
+        argv += ["--ambient-particles"]
     argv += ["--output", str(job_dir)]
     return argv
 

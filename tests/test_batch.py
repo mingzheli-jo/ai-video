@@ -1054,3 +1054,16 @@ def test_run_image_gen_uses_timeline_beats_when_present(tmp_path, monkeypatch):
     assert captured["n_beats"] == 2  # 来自 timeline 的变长拍，非 5s 均分
     assert (job_dir / "gen_assets" / "img_00.png").exists()
     assert (job_dir / "gen_assets" / "img_01.png").exists()
+
+
+# ---- P3b 氛围粒子开关（2026-07-16）----
+
+
+def test_build_effects_argv_ambient_particles_flag(tmp_path):
+    from video_factory.batch import build_effects_argv, resolve_job
+
+    on = resolve_job({"source": "s.mp4", "assets": "a", "ambient_particles": True}, 0)
+    assert "--ambient-particles" in build_effects_argv(on, tmp_path)
+
+    off = resolve_job({"source": "s.mp4", "assets": "a"}, 0)
+    assert "--ambient-particles" not in build_effects_argv(off, tmp_path)
