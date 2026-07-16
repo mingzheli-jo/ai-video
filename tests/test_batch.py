@@ -1073,3 +1073,15 @@ def test_build_effects_argv_ambient_particles_flag(tmp_path):
 
     off = resolve_job({"source": "s.mp4", "assets": "a", "ambient_particles": False}, 0)
     assert "--ambient-particles" not in build_effects_argv(off, tmp_path)
+
+
+def test_validate_job_rejects_zero_byte_source(tmp_path):
+    # 0 字节 source = 上传中断残骸（2026-07-16 实锤事故）：validate 就地拦下，
+    # 不让它混到 rewrite 阶段才以 ffmpeg Invalid data 的面目炸出来。
+    source = tmp_path / "broken.mp4"
+    source.write_bytes(b"")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    job = resolve_job({"source": str(source), "assets": str(assets)}, 0)
+    errors = validate_job(job)
+    assert any("空文件" in e and "重新上传" in e for e in errors)

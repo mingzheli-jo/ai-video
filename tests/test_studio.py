@@ -624,3 +624,27 @@ def test_open_folder_launches_explorer_for_in_tree_file(server, monkeypatch):
     assert len(launched) == 1
     # 参数里必须带上目标文件（win: explorer /select,<path>；其他平台带路径/父目录）
     assert any("final.mp4" in str(part) or str(target.parent) in str(part) for part in launched[0])
+
+
+def test_upload_truncated_stream_rejected_and_partial_deleted(server):
+    """上传中断（实收字节 < 声明长度）必须 400 并删除半截文件，
+    绝不能回成功让 0 字节残骸冒充素材（2026-07-16 实锤事故）。"""
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", server["port"], timeout=5)
+    body = b"x" * 100  # 只发 100 字节，却声明 5000
+    conn.putrequest("POST", "/api/upload?kind=source&name=broken.mp4")
+    conn.putheader("Content-Length", "5000")
+    conn.putheader("Content-Type", "application/octet-stream")
+    conn.endheaders()
+    conn.send(body)
+    conn.sock.shutdown(1)  # 半途掐断写端，模拟网络中断
+    resp = conn.getresponse()
+    data = json.loads(resp.read().decode("utf-8"))
+    conn.close()
+
+    assert resp.status == 400
+    assert "上传中断" in data["error"]
+    # 半截文件必须被清掉
+    partial = server["output_root"] / "studio" / "uploads" / "source" / "broken.mp4"
+    assert not partial.exists()

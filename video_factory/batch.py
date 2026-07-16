@@ -204,6 +204,10 @@ def validate_job(job: ResolvedJob) -> list[str]:
         errors.append("缺少 source（原片/字幕/文本路径）。")
     elif not Path(job.source).exists():
         errors.append(f"source 不存在：{job.source}")
+    elif Path(job.source).is_file() and Path(job.source).stat().st_size == 0:
+        # 0 字节 = 上传中断的残骸（2026-07-16 实锤）：在这里拦下并说人话，
+        # 别让它混到 rewrite 阶段才以 ffmpeg Invalid data 的面目炸出来。
+        errors.append(f"source 是空文件（0 字节，可能上传中断），请重新上传：{job.source}")
     # ai_image 模式：配图由生图阶段现场产出，不需要（也不校验）视频素材目录。
     if job.visual_source == "video":
         if not job.assets:

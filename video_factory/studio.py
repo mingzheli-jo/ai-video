@@ -737,7 +737,20 @@ def make_handler(store: TaskStore):
             dest = dest_dir / filename
             # 体积上限由上方 Content-Length 前置校验执行；_stream_to_file 按声明长度
             # 定量读取，不可能写超（客户端谎报短长度只会短读，不会撑爆磁盘）。
-            self._stream_to_file(dest, length)
+            written = self._stream_to_file(dest, length)
+            if written != length:
+                # 上传中断（网络断/连接被掐）：删掉半截文件并明确报错，绝不能让
+                # 0 字节/残缺文件冒充上传成功——它会一路混到 rewrite 阶段才以
+                # ffmpeg Invalid data 的面目炸出来（2026-07-16 实锤事故）。
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._send_json(
+                    {"error": f"上传中断：只收到 {written}/{length} 字节，请重新上传。"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
             self._send_json({"path": str(dest)})
 
         def _stream_to_file(self, dest: Path, length: int) -> int:
