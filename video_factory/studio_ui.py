@@ -418,7 +418,7 @@ function renderTask(t) {
   const actions = canCompare
     ? `<div class="task-actions"><button class="btn btn-ghost btn-compare" data-compare="${esc(t.id)}">文案对比</button></div>`
     : '';
-  return `<div class="task">
+  return `<div class="task" data-task-id="${esc(t.id)}" data-sig="${esc(taskSig(t))}">
     <div class="task-head"><span class="task-name">${esc(t.name)}</span>
       <span>${t.platform ? `<span class="badge plat">${esc(t.platform)}</span> ` : ''}<span class="badge">${esc(statusLabel(t.status))}</span></span>
     </div>
@@ -481,11 +481,50 @@ async function openCompare(taskId) {
     .catch(() => { h('#compareRewrite').textContent = '未能读取 rewrite.json。'; });
 }
 
+// 任务卡签名：只含"会变化"的字段。已完成(ok)任务这些字段全稳定 → 签名不变 → 键控
+// 更新时该卡永不重建，其内嵌 <video> 得以在每 2s 刷新中存活（2026-07-15 修复"点播放
+// 播 2 秒就被刷新重建、归零循环"——根因是旧实现每次刷新整体重写 innerHTML 销毁了视频）。
+function taskSig(t) {
+  return [t.status, t.current_stage || '', (t.stages_done || []).join('.'),
+          t.stage_failed || '', t.error || '', t.final || '',
+          (t.elapsed_seconds || 0)].join('|');
+}
+
 async function refreshTasks() {
   const { data } = await api('/api/jobs');
   const list = data.jobs || [];
   const wrap = h('#taskBoard');
-  wrap.innerHTML = list.length ? list.map(renderTask).join('') : '<div class="empty">还没有任务。填好左侧表单点「开始生成」。</div>';
+  const emptyEl = wrap.querySelector('.empty');
+  if (!list.length) {
+    if (!emptyEl) wrap.innerHTML = '<div class="empty">还没有任务。填好左侧表单点「开始生成」。</div>';
+    return;
+  }
+  if (emptyEl) emptyEl.remove();
+  // 现有卡片按 task id 索引
+  const existing = {};
+  wrap.querySelectorAll('.task[data-task-id]').forEach(el => { existing[el.dataset.taskId] = el; });
+  const seen = {};
+  let prev = null;  // 按 list 顺序摆放；移动 DOM 节点不会重置正在播放的 <video>
+  list.forEach(t => {
+    seen[t.id] = true;
+    let el = existing[t.id];
+    if (!el || el.dataset.sig !== taskSig(t)) {
+      // 新卡或签名变了才重建这一张（完成态签名稳定，永不走到这里 → 视频存活）
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderTask(t);
+      const fresh = tmp.firstElementChild;
+      if (el && el.parentNode) el.parentNode.replaceChild(fresh, el);
+      el = fresh;
+    }
+    if (prev) {
+      if (prev.nextElementSibling !== el) wrap.insertBefore(el, prev.nextElementSibling);
+    } else if (wrap.firstElementChild !== el) {
+      wrap.insertBefore(el, wrap.firstElementChild);
+    }
+    prev = el;
+  });
+  // 删除已消失的任务卡
+  Object.keys(existing).forEach(id => { if (!seen[id]) existing[id].remove(); });
 }
 
 function copyText(txt) { navigator.clipboard && navigator.clipboard.writeText(txt); }

@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>King-AI-video · 一条视频是怎么被造出来的</title>
+<style>
+  :root{
+    --bg:#17181c;
+    --panel:#1f2127;
+    --panel-2:#24262d;
+    --panel-3:#2b2e36;
+    --gold:#e8b84b;
+    --gold-soft:rgba(232,184,75,.14);
+    --gold-line:rgba(232,184,75,.42);
+    --text:#e9e7e1;
+    --text-dim:#9a9ca4;
+    --text-faint:#6f727b;
+    --line:#33353d;
+    --line-soft:#2a2c33;
+    --green:#5bbf7a;
+    --red:#e74c3c;
+    --yellow:#f1c40f;
+    --blue:#5aa9e6;
+    --mono:'SF Mono','Cascadia Code',Consolas,'Courier New',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.7;
+    font-size:16px;
+    -webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 15% -5%,rgba(232,184,75,.06),transparent 42%),radial-gradient(circle at 100% 0%,rgba(90,169,230,.05),transparent 38%);
+    background-attachment:fixed;
+  }
+  .wrap{max-width:1140px;margin:0 auto;padding:0 24px 100px}
+
+  /* ---------- header ---------- */
+  header{padding:70px 0 34px;border-bottom:1px solid var(--line)}
+  .kicker{
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.32em;
+    color:var(--gold);text-transform:uppercase;margin-bottom:20px;
+    display:flex;align-items:center;gap:14px;
+  }
+  .kicker::before{content:"";width:34px;height:1px;background:var(--gold)}
+  h1{
+    font-size:clamp(30px,5.4vw,54px);line-height:1.08;font-weight:800;
+    letter-spacing:-.01em;margin-bottom:22px;
+  }
+  h1 .hl{color:var(--gold)}
+  .lede{font-size:clamp(16px,2vw,19px);color:var(--text-dim);max-width:760px}
+  .lede b{color:var(--text);font-weight:600}
+
+  /* ---------- one-line 3-row flow ---------- */
+  .oneliner{
+    margin:38px 0 4px;background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;padding:26px 28px;position:relative;overflow:hidden;
+  }
+  .oneliner::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--gold)}
+  .oneliner h3{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-faint);margin-bottom:18px;font-weight:600}
+  .oline{display:flex;align-items:baseline;gap:14px;padding:7px 0;flex-wrap:wrap}
+  .oline .num{font-family:var(--mono);color:var(--gold);font-size:13px;min-width:24px;font-weight:700}
+  .oline .txt{font-size:clamp(15px,1.9vw,18px)}
+  .oline .txt b{color:var(--gold);font-weight:700}
+  .oline .txt .m{font-family:var(--mono);font-size:.86em;color:var(--text-dim)}
+
+  /* ---------- section scaffolding ---------- */
+  section{margin-top:74px;scroll-margin-top:24px}
+  .sec-head{display:flex;align-items:center;gap:16px;margin-bottom:8px}
+  .sec-idx{
+    font-family:var(--mono);font-size:13px;font-weight:700;color:var(--bg);
+    background:var(--gold);width:30px;height:30px;border-radius:8px;
+    display:grid;place-items:center;flex-shrink:0;
+  }
+  h2{font-size:clamp(23px,3.2vw,32px);font-weight:800;letter-spacing:-.01em}
+  .sec-sub{color:var(--text-dim);margin:2px 0 30px 46px;max-width:820px;font-size:15.5px}
+
+  /* ---------- core timeline callout ---------- */
+  .core{
+    background:linear-gradient(160deg,#221f16 0%,var(--panel) 60%);
+    border:1px solid var(--gold-line);border-radius:18px;padding:34px 32px;
+    box-shadow:0 24px 60px -30px rgba(232,184,75,.4);
+  }
+  .core .badge{
+    display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);
+    font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);
+    background:var(--gold-soft);border:1px solid var(--gold-line);
+    padding:5px 13px;border-radius:100px;margin-bottom:20px;
+  }
+  .core .badge .dot{width:7px;height:7px;border-radius:50%;background:var(--gold);box-shadow:0 0 10px var(--gold)}
+  .core h3{font-size:clamp(19px,2.6vw,25px);margin-bottom:14px;font-weight:800;line-height:1.3}
+  .core h3 .hl{color:var(--gold)}
+  .core p{color:var(--text-dim);margin-bottom:14px;max-width:880px}
+  .core p b{color:var(--text);font-weight:600}
+  .core .file{font-family:var(--mono);color:var(--gold);font-size:.9em}
+
+  .clock{
+    display:grid;grid-template-columns:auto 1fr;gap:0 26px;
+    margin-top:28px;background:rgba(0,0,0,.22);border-radius:14px;
+    padding:24px 26px;border:1px solid var(--line-soft);
+  }
+  .clock .spine{position:relative;width:14px}
+  .clock .spine::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--gold-line)}
+  .clock .spine .beat{position:absolute;left:2px;width:10px;height:10px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 4px rgba(232,184,75,.12)}
+  .clock ul{list-style:none;display:flex;flex-direction:column;gap:16px}
+  .clock li{position:relative}
+  .clock li .t{font-family:var(--mono);color:var(--gold);font-size:12.5px;letter-spacing:.05em}
+  .clock li .d{color:var(--text);font-size:15px;margin-top:2px}
+  .clock li .d span{color:var(--text-dim)}
+
+  .why{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:26px}
+  @media(max-width:720px){.why{grid-template-columns:1fr}}
+  .why .card{border-radius:12px;padding:18px 20px;border:1px solid var(--line)}
+  .why .bad{background:rgba(231,76,60,.06);border-color:rgba(231,76,60,.3)}
+  .why .good{background:rgba(91,191,122,.06);border-color:rgba(91,191,122,.32)}
+  .why h4{font-size:14px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .why .bad h4{color:#f08a7f}
+  .why .good h4{color:var(--green)}
+  .why p{font-size:14px;color:var(--text-dim);margin:0}
+
+  /* ---------- main pipeline (spine + cards) ---------- */
+  .pipe{position:relative;margin-top:8px;padding-left:20px}
+  .stage{position:relative;margin-bottom:20px}
+  .connector{display:flex;flex-direction:column;align-items:center;gap:0;margin:2px 0 2px 40px}
+  .connector .bar{width:2px;height:22px;background:linear-gradient(var(--gold-line),var(--gold-line))}
+  .connector .arw{color:var(--gold);font-size:15px;line-height:.6;margin-top:-3px}
+  .connector .lbl{font-family:var(--mono);font-size:11.5px;color:var(--text-faint);margin:5px 0 0}
+
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    overflow:hidden;transition:border-color .2s,transform .2s,box-shadow .2s;
+  }
+  .card:hover{border-color:var(--gold-line);transform:translateY(-2px);box-shadow:0 20px 44px -28px rgba(0,0,0,.9)}
+  .card .top{display:flex;align-items:flex-start;gap:18px;padding:22px 26px 18px}
+  .card .stagenum{
+    font-family:var(--mono);font-weight:800;font-size:15px;color:var(--gold);
+    border:1.5px solid var(--gold-line);border-radius:10px;min-width:44px;height:44px;
+    display:grid;place-items:center;flex-shrink:0;background:var(--gold-soft);
+  }
+  .card .ttl{flex:1}
+  .card .ttl h3{font-size:20px;font-weight:800;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .card .ttl h3 .en{font-family:var(--mono);font-size:12px;color:var(--text-faint);font-weight:500;letter-spacing:.05em}
+  .card .ttl .file{font-family:var(--mono);font-size:12px;color:var(--text-dim);margin-top:4px}
+  .card .ttl .file b{color:var(--gold)}
+  .card .cost{font-family:var(--mono);font-size:12px;padding:4px 11px;border-radius:100px;white-space:nowrap;flex-shrink:0}
+  .cost.ai{background:rgba(90,169,230,.12);color:var(--blue);border:1px solid rgba(90,169,230,.3)}
+  .cost.ff{background:rgba(255,255,255,.05);color:var(--text-dim);border:1px solid var(--line)}
+
+  .grid3{display:grid;grid-template-columns:0.85fr 1.5fr 1.1fr;gap:1px;background:var(--line-soft);border-top:1px solid var(--line-soft)}
+  @media(max-width:760px){.grid3{grid-template-columns:1fr}}
+  .cell{background:var(--panel);padding:16px 24px 18px}
+  .cell .h{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);margin-bottom:9px;font-weight:600}
+  .cell .h.in{color:var(--blue)}
+  .cell .h.do{color:var(--gold)}
+  .cell .h.out{color:var(--green)}
+  .cell p{font-size:14px;color:var(--text-dim);line-height:1.62}
+  .cell ul{list-style:none;font-size:14px;color:var(--text-dim)}
+  .cell ul li{padding-left:15px;position:relative;margin-bottom:5px}
+  .cell ul li::before{content:"›";position:absolute;left:0;color:var(--gold);font-weight:700}
+  .file-out{font-family:var(--mono);font-size:12.5px;background:var(--panel-3);color:var(--gold);
+    padding:3px 9px;border-radius:6px;display:inline-block;margin:3px 4px 3px 0;border:1px solid var(--line)}
+  .file-out.sub{color:var(--text-dim)}
+
+  /* feeds timeline note inside voice card */
+  .feeds{margin:0 24px 20px;background:rgba(232,184,75,.07);border:1px dashed var(--gold-line);
+    border-radius:10px;padding:12px 16px;font-size:13.5px;color:var(--text-dim)}
+  .feeds b{color:var(--gold)}
+
+  /* ---------- image retrieval subflow ---------- */
+  .flowrow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:6px}
+  @media(max-width:860px){.flowrow{grid-template-columns:1fr 1fr}}
+  @media(max-width:520px){.flowrow{grid-template-columns:1fr}}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;position:relative}
+  .step .n{font-family:var(--mono);font-size:12px;color:var(--gold);font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .step .n .ico{font-size:17px}
+  .step h4{font-size:15.5px;font-weight:700;margin-bottom:8px}
+  .step p{font-size:13.5px;color:var(--text-dim);line-height:1.6}
+  .step p code{font-family:var(--mono);font-size:.92em;color:var(--gold);background:var(--panel-3);padding:1px 5px;border-radius:4px}
+  .step .price{margin-top:11px;font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:8px;display:inline-block}
+  .price.free{background:rgba(91,191,122,.12);color:var(--green);border:1px solid rgba(91,191,122,.3)}
+  .price.pay{background:rgba(232,184,75,.12);color:var(--gold);border:1px solid var(--gold-line)}
+  .snowball{margin-top:22px;background:var(--panel);border:1px solid var(--gold-line);border-radius:14px;
+    padding:20px 24px;display:flex;gap:18px;align-items:flex-start}
+  .snowball .big{font-size:30px;line-height:1}
+  .snowball h4{color:var(--gold);font-size:16px;margin-bottom:6px}
+  .snowball p{font-size:14px;color:var(--text-dim)}
+  .snowball p b{color:var(--text)}
+
+  .beatbox{margin-top:24px;background:var(--panel-2);border:1px solid var(--line);border-radius:14px;padding:22px 26px}
+  .beatbox h4{font-size:16px;font-weight:700;margin-bottom:12px;color:var(--gold)}
+  .beatbox p{font-size:14.5px;color:var(--text-dim);margin-bottom:10px}
+  .beatbox p b{color:var(--text)}
+  .beatbox .row{display:flex;gap:20px;flex-wrap:wrap;margin-top:14px}
+  .beatbox .chip{font-family:var(--mono);font-size:12.5px;background:var(--panel-3);border:1px solid var(--line);
+    padding:6px 13px;border-radius:8px;color:var(--text-dim)}
+  .beatbox .chip b{color:var(--gold)}
+
+  /* ---------- effects table ---------- */
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:16px;margin-top:4px}
+  table{border-collapse:collapse;width:100%;min-width:760px;font-size:14px}
+  thead th{
+    background:var(--panel-3);color:var(--text);text-align:left;padding:15px 18px;
+    font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;
+    border-bottom:1px solid var(--line);white-space:nowrap;
+  }
+  tbody td{padding:16px 18px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--text-dim)}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover td{background:var(--panel-2)}
+  td .name{font-family:var(--mono);font-weight:700;font-size:13.5px;display:block;margin-bottom:3px}
+  td .zh{color:var(--text);font-weight:600}
+  .tag-hook .name{color:var(--gold)}
+  .tag-golden .name{color:#c99cff}
+  .tag-keyword .name{color:var(--red)}
+  .tag-number .name{color:var(--blue)}
+  .swatch{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px;border:1px solid rgba(255,255,255,.2)}
+  td code{font-family:var(--mono);font-size:12.5px;color:var(--gold)}
+  .sfx-note{margin-top:16px;font-size:13.5px;color:var(--text-faint);padding-left:18px;position:relative}
+  .sfx-note::before{content:"♪";position:absolute;left:0;color:var(--gold)}
+  .sfx-note b{color:var(--text-dim)}
+
+  /* ---------- fallback ---------- */
+  .fallback{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:32px}
+  .fallback .lead{font-size:16px;color:var(--text);margin-bottom:6px;font-weight:600}
+  .fallback .lead .hl{color:var(--gold)}
+  .fallback>p{color:var(--text-dim);margin-bottom:22px;font-size:14.5px;max-width:840px}
+  .fbgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:720px){.fbgrid{grid-template-columns:1fr}}
+  .fb{display:flex;gap:13px;padding:15px 17px;background:var(--panel-2);border:1px solid var(--line-soft);border-radius:11px}
+  .fb .st{font-family:var(--mono);font-size:11.5px;color:var(--gold);font-weight:700;min-width:78px;padding-top:1px}
+  .fb .dsc{font-size:13.5px;color:var(--text-dim)}
+  .fb .dsc b{color:var(--text)}
+  .hardline{margin-top:22px;padding:16px 20px;border-radius:11px;background:rgba(231,76,60,.07);
+    border:1px solid rgba(231,76,60,.28);font-size:14px;color:var(--text-dim)}
+  .hardline b{color:#f08a7f}
+
+  footer{margin-top:80px;padding-top:30px;border-top:1px solid var(--line);color:var(--text-faint);font-size:13px}
+  footer .mono{font-family:var(--mono)}
+  a{color:var(--gold);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">King-AI-video · 批量视频生产系统</div>
+    <h1>一条视频，是怎么被<span class="hl">自动造出来</span>的</h1>
+    <p class="lede">给系统一份<b>原始视频文案</b>（或一段素材），它自己完成<b>改写口播 → 合成配音 → 对齐时间轴 → 配图 → 拼装 → 加特效 → 烧字幕</b>七步，最后吐出一条可直接发布的成片。全程无人值守，一张任务清单进、N 条成片出。</p>
+
+    <div class="oneliner">
+      <h3>一句话流程（最简三行版）</h3>
+      <div class="oline"><span class="num">1</span><span class="txt">把原文<b>改写</b>成原创口播稿，再<b>配上人声</b>，并用 AI 听写出<b>每句话的精确起止时间</b>。</span></div>
+      <div class="oline"><span class="num">2</span><span class="txt">按这份时间表，<b>给每个画面镜头配一张图</b>（先翻自家图库，翻不到才现生），然后<b>拼成带运镜和转场的视频</b>。</span></div>
+      <div class="oline"><span class="num">3</span><span class="txt">最后叠上<b>开屏钩子、金句、关键词、数字</b>等花字特效，再<b>烧上字幕</b>，成片 <span class="m">release_subtitled.mp4</span> 完工。</span></div>
+    </div>
+  </header>
+
+  <!-- ============ CORE ARCHITECTURE ============ -->
+  <section id="core">
+    <div class="sec-head">
+      <span class="sec-idx">★</span>
+      <h2>核心架构：一条「主时间轴」当全片唯一时钟</h2>
+    </div>
+    <p class="sec-sub">这是整个系统能跑通、图片和声音能严丝合缝对上的地基。老板只需记住这一件事，其余都是它的延伸。</p>
+
+    <div class="core">
+      <span class="badge"><span class="dot"></span>为什么图片、字幕、特效都能对准声音</span>
+      <h3>配音一定稿，系统立刻用 AI 把口播「听写」成<span class="hl">逐句真实起止时间表</span>，写进 <span class="file">timeline.json</span>。此后全链所有环节都读这同一份时间表。</h3>
+      <p><b>过去的病根：</b>听写对齐原本发生在最后一步（字幕阶段），特效只能靠「这句占全文多少字」去<b>估算</b>该出现在第几秒 —— 结果字幕能对上音频，特效却对不上，数字弹早了、金句弹晚了。</p>
+      <p><b>现在的解法：</b>把「配音」从拼装里拆出来<b>提前到改写之后</b>单独成一步，配音一落定就立刻听写对齐、产出 timeline.json（代码见 <span class="file">voice.py</span> → <span class="file">timeline.py</span>）。生图、拼装、特效、字幕四个环节全都消费它 —— <b>全链只有一个时钟，自然全都对齐同一条声音。</b></p>
+
+      <div class="clock">
+        <div class="spine">
+          <span class="beat" style="top:6px"></span>
+          <span class="beat" style="top:28%"></span>
+          <span class="beat" style="top:52%"></span>
+          <span class="beat" style="top:76%"></span>
+          <span class="beat" style="bottom:6px"></span>
+        </div>
+        <ul>
+          <li><div class="t">timeline.json 产出</div><div class="d"><b>配音</b>阶段用 whisper 听写对齐，逐句得到 <span>{ 文本, start, end }</span>，对齐的正是最终混进成片的那条音轨。</div></li>
+          <li><div class="t">↳ 喂给 · 配图</div><div class="d">按「句子在哪停顿」把画面切成<b>变长拍</b>（卡话切）—— 镜头切换点落在语音停顿处，而不是机械每 5 秒切一次。</div></li>
+          <li><div class="t">↳ 喂给 · 拼装</div><div class="d">拼装侧用<b>同一个函数、同一份输入</b>算拍，所以「第几张图、放多久」和配图侧算的分毫不差。</div></li>
+          <li><div class="t">↳ 喂给 · 特效</div><div class="d">金句、数字、关键词直接落在<b>含它那句话的真实起点</b>上，不再靠字数估算。</div></li>
+          <li><div class="t">↳ 喂给 · 字幕</div><div class="d">字幕直接用这份时间表逐句烧录，<b>跳过重复听写</b>（省一次 ASR）。</div></li>
+        </ul>
+      </div>
+
+      <div class="why">
+        <div class="card bad"><h4>✕ 没有主时间轴</h4><p>特效靠「字数占比」估算落点 → 5000 这个数字弹在了错误的位置，金句和口播错开，观感散。</p></div>
+        <div class="card good"><h4>✓ 有主时间轴</h4><p>所有画面/文字都锚定同一条声音的真实秒数 → 所见即所听，图片跟着话走，字幕跟着话走。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MAIN PIPELINE ============ -->
+  <section id="pipeline">
+    <div class="sec-head">
+      <span class="sec-idx">1</span>
+      <h2>主流程图：从文案到成片的六个阶段</h2>
+    </div>
+    <p class="sec-sub">编排在 <b>batch.py</b>（STAGE_RUNNERS / _stages_for）。每个 job 串行跑这些阶段，单个 job 失败不拖垮整批。平台预设（抖音 / 快手 / 视频号 / 小红书 / B站）会自动套好画幅、时长、是否加字幕特效；参数优先级：任务显式字段 &gt; 平台预设 &gt; 全局默认。</p>
+
+    <div class="pipe">
+
+      <!-- 1 rewrite -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">01</div>
+            <div class="ttl">
+              <h3>改写口播稿 <span class="en">rewrite</span></h3>
+              <div class="file">代码：<b>rewrite.py</b></div>
+            </div>
+            <div class="cost ai">AI · LLM</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>原始视频文案 / 字幕 / 转写文本（视频、音频会先走 ASR 转写）；可选创作 brief 与文风。</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>让大模型<b>原创重写</b>：换钩子、换叙事顺序、只保留真信息，不照抄原句。</li>
+              <li>按目标时长换算字数预算（<b>4.8 字/秒</b>，实测校准）。</li>
+              <li>为每节标 <b>emphasis 强调计划</b>：keyword / number / golden 三类，全片至少 1 条金句。</li>
+              <li><b>字数闭环</b>：估算时长不足目标 85% 就让 LLM 扩写重来，最多 2 轮（宁短勿废）。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div><span class="file-out">rewrite.json</span><p style="margin-top:8px">含 hook、开屏钩子序列、各节口播 + 强调计划、发布标题候选。</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar"></div><div class="arw">▼</div><div class="lbl">口播文字 → 人声</div></div>
+
+      <!-- 2 voice -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">02</div>
+            <div class="ttl">
+              <h3>配音 ＋ 主时间轴 <span class="en">voice</span></h3>
+              <div class="file">代码：<b>voice.py</b> · <b>timeline.py</b></div>
+            </div>
+            <div class="cost ai">AI · TTS + 听写</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>rewrite.json 的完整口播文本。给了现成配音就直接复用，否则现场合成。</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>用 TTS（默认豆包）把口播<b>合成人声</b>；未指定语速时按目标时长做 <b>atempo 变速微调</b>（0.9~1.1，偏差&gt;5% 才动）。</li>
+              <li>配音定稿后<b>立刻 whisper 对齐</b>，逐句产出真实起止时间。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div>
+              <span class="file-out">voiceover.wav</span>
+              <span class="file-out sub">voiceover_fitted.wav</span>
+              <span class="file-out">timeline.json</span>
+            </div>
+          </div>
+          <div class="feeds">⏱ <b>timeline.json</b> 就是上面那张「核心架构」讲的主时间轴 —— 从这里开始，下面每一步都读它对齐声音。</div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar"></div><div class="arw">▼</div><div class="lbl">仅「AI 生图」模式经过此步</div></div>
+
+      <!-- 3 image_gen -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">03</div>
+            <div class="ttl">
+              <h3>配图（变长拍） <span class="en">image_gen</span></h3>
+              <div class="file">代码：<b>image_gen.py</b></div>
+            </div>
+            <div class="cost ai">AI · 图库 + 生图</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>rewrite.json ＋ timeline.json。（用视频素材做画面的模式会跳过这一步。）</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>按主时间轴把口播切成<b>变长拍</b>（一拍一图，2.5~8 秒，切点落在语音停顿）。</li>
+              <li>每拍走<b>二级检索</b>：本地粗排 → LLM 精选，能复用图库就复用、不行才现生。</li>
+              <li>新生成的图<b>回写图库</b>，越用越肥（详见下一节）。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div><span class="file-out">gen_assets/img_00 … img_NN</span><p style="margin-top:8px">按全局拍序命名，供拼装阶段严格按序取用。</p></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar"></div><div class="arw">▼</div><div class="lbl">图 + 配音 → 视频</div></div>
+
+      <!-- 4 assemble -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">04</div>
+            <div class="ttl">
+              <h3>拼装成片 <span class="en">assemble</span></h3>
+              <div class="file">代码：<b>assemble.py</b></div>
+            </div>
+            <div class="cost ff">FFmpeg · 无 AI</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>gen_assets 的图（或视频素材）＋ 配音 ＋ timeline.json ＋ 画幅/填充/时长。</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>第 k 拍用第 k 张图，拍时长＝该句群真实秒数，再<b>按真实节归组</b>。</li>
+              <li>每张静图加 <b>Ken Burns 运镜</b>（8 款推拉摇移，确定性挑选、先超采样减抖）。</li>
+              <li>节边界必转、长节内约每 15 秒转一次的 <b>xfade 转场</b>（0.4 秒，含时长补偿守恒）。</li>
+              <li>混入配音（可选 BGM ducking），<b>faststart</b> 让浏览器能边下边播。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div>
+              <span class="file-out">release.mp4</span>
+              <span class="file-out">assembly_plan.json</span>
+              <p style="margin-top:8px">plan 里记了转场时刻、真实用的音轨、时长是否对齐。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar"></div><div class="arw">▼</div><div class="lbl">默认开启，可关</div></div>
+
+      <!-- 5 effects -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">05</div>
+            <div class="ttl">
+              <h3>特效花字 <span class="en">effects</span></h3>
+              <div class="file">代码：<b>effects.py</b></div>
+            </div>
+            <div class="cost ff">Remotion + FFmpeg</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>release.mp4 ＋ assembly_plan.json ＋ rewrite.json ＋ timeline.json。</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>派生特效清单：<b>开屏钩子、金句、关键词、数字</b>四类（落点用真实句起点，详见清单表）。</li>
+              <li>用 Remotion 把每条渲成<b>带透明通道的片段</b>，再 FFmpeg 逐层叠加进原片。</li>
+              <li>按每条特效类型<b>混入对应音效</b>（whoosh 等），平移到落点、保住人声音量。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div>
+              <span class="file-out">release_with_effects.mp4</span>
+              <span class="file-out">effects_manifest.json</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar"></div><div class="arw">▼</div><div class="lbl">按平台预设决定是否烧</div></div>
+
+      <!-- 6 subtitles -->
+      <div class="stage">
+        <div class="card">
+          <div class="top">
+            <div class="stagenum">06</div>
+            <div class="ttl">
+              <h3>烧字幕 <span class="en">subtitles</span></h3>
+              <div class="file">代码：<b>subtitles.py</b></div>
+            </div>
+            <div class="cost ff">libass 硬烧录</div>
+          </div>
+          <div class="grid3">
+            <div class="cell"><div class="h in">输入</div><p>带特效的成片 ＋ rewrite 原稿 ＋ timeline.json。</p></div>
+            <div class="cell"><div class="h do">干了什么</div><ul>
+              <li>有 timeline 就<b>直接按逐句真实时间构造字幕</b>，跳过重复听写。</li>
+              <li>没有则回落：ASR 对齐 → 字符占比分摊，逐级降级。</li>
+              <li>用 ffmpeg <b>libass 滤镜硬烧录</b>；可选中英双语（中上英下）。</li>
+            </ul></div>
+            <div class="cell"><div class="h out">产物</div>
+              <span class="file-out">release_subtitled.mp4</span>
+              <span class="file-out sub">subtitles.ass</span>
+              <p style="margin-top:8px">这就是最终成片。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="connector"><div class="bar" style="height:26px"></div><div class="arw" style="font-size:20px">▼</div></div>
+      <div style="text-align:center;margin-top:6px">
+        <div style="display:inline-flex;align-items:center;gap:12px;background:var(--gold-soft);border:1px solid var(--gold-line);
+             padding:14px 26px;border-radius:14px">
+          <span style="font-size:22px">🎬</span>
+          <span style="font-family:var(--mono);font-weight:700;color:var(--gold);font-size:16px">release_subtitled.mp4</span>
+          <span style="color:var(--text-dim);font-size:14px">· 可直接发布的成片</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ IMAGE RETRIEVAL SUBFLOW ============ -->
+  <section id="images">
+    <div class="sec-head">
+      <span class="sec-idx">2</span>
+      <h2>配图检索子流程：图库优先，省钱又保画风</h2>
+    </div>
+    <p class="sec-sub">核心原则：<b>能翻自家图库就绝不花钱现生</b>。每现生一张图都会自动入库，下一条视频就可能白嫖到它 —— 图库越用越肥，生图成本越用越低。代码见 <b>image_gen.py</b>。</p>
+
+    <div class="beatbox">
+      <h4>先决定「要切几个镜头、每个镜头讲哪句话」——变长拍（卡话切）</h4>
+      <p>系统读主时间轴，把口播<b>按句子的真实停顿</b>打包成一段段「拍」：累计到下限就封一拍，太长的单句拆成等份。这样画面切换点永远踩在语音的自然停顿处，而不是机械地每 5 秒硬切一次。</p>
+      <p>关键：<b>配图侧和拼装侧调的是同一个权威函数、喂同一份输入</b>，所以「算出来要几张图」和「拼装时要放几张图」天生一致，永不错位。（无主时间轴时才回落到旧的 5 秒均分。）</p>
+      <div class="row">
+        <span class="chip">一拍时长 <b>2.5 ~ 8 秒</b></span>
+        <span class="chip">一拍 <b>= 一张图</b></span>
+        <span class="chip">单 job 现生上限 <b>60 张</b>（复用不计）</span>
+      </div>
+    </div>
+
+    <div class="flowrow" style="margin-top:22px">
+      <div class="step">
+        <div class="n"><span class="ico">🎬</span>STEP 1</div>
+        <h4>LLM 派生每拍需求</h4>
+        <p>大模型为每一拍写出<b>画面提示词 + 视觉类目 + 检索标签</b>（人物 / 场景 / 物品 / 数据图表 / 抽象概念 / 情绪氛围）。</p>
+      </div>
+      <div class="step">
+        <div class="n"><span class="ico">⚡</span>STEP 2</div>
+        <h4>本地二级粗排</h4>
+        <p>纯本地毫秒级打分选出候选：条目<b>标签命中</b>拍文案 <code>+3</code>／个，提示词与拍文案<b>二元组重合</b> <code>+1</code>／个。每拍取前 20，全片截到 150 张喂给下一步。</p>
+      </div>
+      <div class="step">
+        <div class="n"><span class="ico">🎯</span>STEP 3</div>
+        <h4>LLM 精选（库优先）</h4>
+        <p>大模型看着候选库图为每拍拍板：<b>reuse</b>（复用某张库图）或 <b>generate</b>（给新生成提示词）。同一张库图<b>最多用一次</b>，代码端再去重兜底。</p>
+        <span class="price free">命中复用 ¥0</span>
+      </div>
+      <div class="step">
+        <div class="n"><span class="ico">🖼</span>STEP 4</div>
+        <h4>现生 + 入库</h4>
+        <p>翻不到的才调<b>豆包 Seedream 4.0</b> 现生（统一美式漫画画风、钉死不出文字），落到本拍的 <code>img_NN</code>。</p>
+        <span class="price pay">新生成 ¥0.2 / 张</span>
+      </div>
+    </div>
+
+    <div class="snowball">
+      <div class="big">❄️</div>
+      <div>
+        <h4>滚雪球：生成的图立刻回写图库</h4>
+        <p>每张新生成的图都会<b>写进图库并登记索引</b>（素材库/图片/&lt;类目&gt;/，同内容不重复落盘）。库越大，下次 LLM 精选时命中率越高、要花钱现生的越少 —— <b>这是「生成入库、下次复用省钱」的既定原则</b>。入库失败只告警，不影响本条成片。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ EFFECTS TABLE ============ -->
+  <section id="effects">
+    <div class="sec-head">
+      <span class="sec-idx">3</span>
+      <h2>特效类型清单：四种花字，各司其职</h2>
+    </div>
+    <p class="sec-sub">章节卡 / 序号卡已彻底退役，节奏改由下面四类「跟着声音走」的花字承担。全部落点优先用主时间轴的真实句起点。代码见 <b>effects.py</b>。</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>特效类型</th><th>是什么</th><th>何时触发</th><th>样式 / 音效</th></tr>
+        </thead>
+        <tbody>
+          <tr class="tag-hook">
+            <td><span class="name">hook_opener</span><span class="zh">开屏钩子</span></td>
+            <td>开头的<b>透明大字叠层</b>，把 hook 按子句切成 2~3 行，随口播逐条弹入 —— 所见即所听，替代已退役的冷开场黑卡。</td>
+            <td><b>视频最开头</b>（start = 0）。时长取 min(5 秒, 首节 ×0.9)，避免盖过正片开头。</td>
+            <td>大字逐行弹出，落点用真实句起止。音效：<b>首行 whoosh 起势，后续行 swoosh</b>。</td>
+          </tr>
+          <tr class="tag-golden">
+            <td><span class="name">golden_lines</span><span class="zh">金句开屏</span></td>
+            <td>把 <b>kind=golden 的金句</b>做成三行式开屏卡（复用 hook 组件渲染），是全片的记忆点。</td>
+            <td>命中含该金句那句话的<b>真实起点</b>。相邻金句至少隔 20 秒，撞开屏/固定窗口就顺延，仍撞则丢弃（宁缺勿滥）。</td>
+            <td>三行大字。时长 = 该句时长 + 1.2 秒尾留白，封顶 <code>4.5s</code>（保证读得完）。</td>
+          </tr>
+          <tr class="tag-keyword">
+            <td><span class="name">keyword_pop</span><span class="zh">关键词弹出</span></td>
+            <td>把 <b>keyword 类强调词</b>弹到屏上（无 emphasis 时回落规则抽取：引号内词 &gt; 数字短语 &gt; 节标题头几字）。</td>
+            <td>emphasis 优先用真实句起点。做<b>密度控制</b>：相邻&lt;8 秒抽稀、&gt;20 秒真空补填；避开金句卡窗口 ±1 秒。</td>
+            <td>时长 <code>1.6s</code>。<b>三色轮换</b>：<span class="swatch" style="background:#e74c3c"></span>红 <span class="swatch" style="background:#f1c40f"></span>黄 <span class="swatch" style="background:#ffffff"></span>白。</td>
+          </tr>
+          <tr class="tag-number">
+            <td><span class="name">number_pop</span><span class="zh">数字强调</span></td>
+            <td>把口播里的<b>关键数字</b>（如 3 倍 / 5 步 / 5000 条 / 30%）单独弹大，强化冲击力。</td>
+            <td>每节首个关键数字，<b>全片最多 2 个</b>。落点用含该数字那句话的真实起点（无时间轴时节起点后约 1 秒）。已弹的数字不再作关键词弹。</td>
+            <td>时长 <code>1.4s</code>，数字放大呈现。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sfx-note"><b>音效怎么加：</b>特效音默认开启（可关）。渲染时按每条特效的类型取对应音效文件，用 adelay 平移到该特效的落点混进音轨，amix 保住人声不被压过；默认音量 <b>0.35</b>。音效文件缺失只跳过、绝不阻断成片。</p>
+  </section>
+
+  <!-- ============ FALLBACK ============ -->
+  <section id="fallback">
+    <div class="sec-head">
+      <span class="sec-idx">4</span>
+      <h2>降级兜底：AI 环节坏了，也照样出片</h2>
+    </div>
+    <p class="sec-sub">系统的设计信条：<b>每一个「增强型」AI 环节失败都自动回落到更简单的路径，而不是让整条视频崩掉。</b></p>
+
+    <div class="fallback">
+      <div class="lead"><span class="hl">增强件失败 → 自动降级，成片继续</span></div>
+      <p>下面这些环节即使 AI 出错、没凭据、网络抖动，系统也会走一条更朴素的备用路，你依然拿得到成片：</p>
+      <div class="fbgrid">
+        <div class="fb"><div class="st">改写</div><div class="dsc">扩写没把字数补够 → <b>止损保留现有稿</b>，剩余缺口交给配音的变速微调（宁短勿废）。</div></div>
+        <div class="fb"><div class="st">主时间轴</div><div class="dsc">听写对齐失败 → <b>只告警不阻断</b>，下游生图/特效/字幕各自回落到「字数估算 / 自跑一次 ASR」。</div></div>
+        <div class="fb"><div class="st">配图</div><div class="dsc">无凭据或解析失败 → 回落<b>每节一张</b>的节级配图；单拍生成失败跳过、超上限尾部循环、入库失败仅告警。</div></div>
+        <div class="fb"><div class="st">拼装</div><div class="dsc">xfade 转场失败 → 回退<b>全量硬切</b>；变速探测失败 → 放行原音频。都不阻断。</div></div>
+        <div class="fb"><div class="st">特效</div><div class="dsc">无主时间轴 → 落点用<b>字符占比估算</b>；片段分辨率不匹配跳过留痕；音效缺失跳过；翻译失败降纯中文。</div></div>
+        <div class="fb"><div class="st">字幕</div><div class="dsc">主时间轴 → ASR 对齐 → 字符占比分摊，<b>三级逐级降级</b>；英文翻译失败退回纯中文。</div></div>
+      </div>
+      <div class="hardline">⚠️ <b>唯二的硬门槛：</b>「配音合成」（成片刚需）和「至少产出文案 / 至少产出一张配图」失败会让该 job 记为 failed 并停止 —— 但即便如此，<b>其它 job 照常继续，整批不中断</b>，最终成片逐级回落：字幕版 &gt; 特效版 &gt; 原拼装版。</div>
+    </div>
+  </section>
+
+  <footer>
+    <p class="mono">King-AI-video · video_factory · 本文档由阅读源码核实生成，仅新增本 HTML，未改动任何代码。</p>
+    <p style="margin-top:8px">核对到的关键代码：<span class="mono">batch.py</span>（编排/平台预设）· <span class="mono">rewrite.py</span>（改写/字数闭环）· <span class="mono">voice.py</span> + <span class="mono">timeline.py</span>（配音/主时间轴）· <span class="mono">image_gen.py</span>（变长拍/二级检索/入库）· <span class="mono">assemble.py</span>（运镜/转场/时长闭环）· <span class="mono">effects.py</span>（四类花字/音效）· <span class="mono">subtitles.py</span>（libass 烧录）。</p>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -143,24 +143,14 @@ def build_effects_manifest(
     opener = _build_opener(sections[0], rewrite, fps, accent, timeline)
     effects.append(opener)
 
-    for i, section in enumerate(sections):
-        if i == 0:
-            continue  # 首节不出章节卡（片头已覆盖开场）。
-        start = starts[i]
-        title = _section_title(section, i)
-        effects.append(
-            _frame_aligned(
-                EffectSpec(
-                    type="chapter_card",
-                    start=start,
-                    duration=CHAPTER_CARD_DURATION,
-                    props={"index": i, "title": title, "accent": accent},
-                ),
-                fps,
-            )
-        )
-        if include_lower_thirds:
-            lt = _build_lower_third(section, i, start, accent)
+    # 章节卡已彻底退役（2026-07-15 用户点名去掉章节/序号「01」）：它按节标题机械插入、
+    # 与关键词弹出内容重复（节标题≈关键词）、落点又不跟音频，是"特效文字乱掉"的一大来源。
+    # 节奏改由随音频走的 keyword_pop/golden_lines 承担。lower_thirds 是独立可选功能，保留。
+    if include_lower_thirds:
+        for i, section in enumerate(sections):
+            if i == 0:
+                continue
+            lt = _build_lower_third(section, i, starts[i], accent)
             if lt is not None:
                 effects.append(_frame_aligned(lt, fps))
 
@@ -445,6 +435,7 @@ def _derive_keyword_events(
     sections: list[dict],
     rewrite_sections: list,
     starts: list[float],
+    timeline: list[dict] | None = None,
 ) -> list[tuple[float, str]]:
     """为每个非 hook 节生成候选 keyword_pop 落点列表 [(abs_time, text), ...]。
 
@@ -482,17 +473,27 @@ def _derive_keyword_events(
         em_texts = em_texts[:3]
 
         if em_texts:
-            # 均匀分布：N 条 emphasis → 节内 1/(N+1), 2/(N+1), …, N/(N+1) 处
+            # 落点优先用主时间轴：在 timeline 里找到真正说这个词的句子 → 用句子真实起点
+            # （2026-07-15 修复"5000条"等弹词落到错误位置——根因是估算落点不跟音频）。
+            # 找不到（词非口播原文子串）才回落节内均匀分布估算。
             n = len(em_texts)
             for idx, text in enumerate(em_texts):
-                offset = (idx + 1) / (n + 1) * sec_dur
-                events.append((sec_start + offset, text))
+                sentence = _find_timeline_sentence(timeline, text)
+                if sentence is not None:
+                    events.append((float(sentence.get("start") or 0.0), text))
+                else:
+                    offset = (idx + 1) / (n + 1) * sec_dur
+                    events.append((sec_start + offset, text))
         else:
-            # 回落原有规则：节内 40% 处抽关键词
+            # 回落原有规则：节内抽关键词；同样优先用 timeline 真实句起点。
             narration = _section_narration(section, rewrite_sections, i)
             keyword = _extract_keyword(narration, _section_title(section, i))
             if keyword:
-                events.append((sec_start + sec_dur * KEYWORD_POP_OFFSET_RATIO, keyword))
+                sentence = _find_timeline_sentence(timeline, keyword)
+                if sentence is not None:
+                    events.append((float(sentence.get("start") or 0.0), keyword))
+                else:
+                    events.append((sec_start + sec_dur * KEYWORD_POP_OFFSET_RATIO, keyword))
 
     return events
 
@@ -750,6 +751,7 @@ def _build_rich_effects(
     rewrite_sections = (rewrite or {}).get("sections") or []
     starts = _section_starts(sections)
     count = 0
+    number_values: list[str] = []  # 已弹的数字，供 keyword_pop 去重（防同一数字弹两次）
     for i, section in enumerate(sections):
         if count >= NUMBER_POP_MAX:
             break
@@ -759,19 +761,33 @@ def _build_rich_effects(
         match = _NUMBER_RE.search(narration)
         if not match:
             continue
+        value = match.group(0)
+        # 落点优先用主时间轴：找到含该数字的句子 → 用真实句起点（2026-07-15 修"5000条"
+        # 落到错误位置的根因）；找不到才回落节起点+固定偏移估算。
+        sentence = _find_timeline_sentence(timeline, value)
+        pop_start = (
+            float(sentence.get("start") or 0.0) if sentence is not None
+            else starts[i] + NUMBER_POP_OFFSET
+        )
         rich.append(_frame_aligned(
             EffectSpec(
                 type="number_pop",
-                start=starts[i] + NUMBER_POP_OFFSET,
+                start=pop_start,
                 duration=NUMBER_POP_DURATION,
-                props={"value": match.group(0), "accent": accent},
+                props={"value": value, "accent": accent},
             ),
             fps,
         ))
+        number_values.append(value)
         count += 1
 
-    # 关键词弹出：emphasis 均匀分布优先，无 emphasis 回落规则抽取，密度控制，三色轮换。
-    keyword_events = _derive_keyword_events(sections, rewrite_sections, starts)
+    # 关键词弹出：emphasis 优先用真实句起点，无 emphasis 回落规则抽取，密度控制，三色轮换。
+    keyword_events = _derive_keyword_events(sections, rewrite_sections, starts, timeline)
+    # 去重：已被 number_pop 弹出的数字不再作 keyword_pop（避免"5000条"弹两次）。
+    keyword_events = [
+        (t, kw) for t, kw in keyword_events
+        if not any(nv in kw or kw in nv for nv in number_values)
+    ]
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
     # 金句开屏三行式（golden_lines，黑卡退役后的形态）：kind=golden emphasis 单独派生，

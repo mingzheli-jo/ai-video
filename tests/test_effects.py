@@ -63,17 +63,13 @@ def test_manifest_intro_duration_capped_by_short_first_section():
     assert manifest["effects"][0]["duration"] == 1.6
 
 
-def test_manifest_chapter_cards_skip_first_section_and_start_at_cumulative():
+def test_manifest_no_chapter_cards_after_retirement():
+    # 章节卡已退役（2026-07-15 用户点名去掉「01」序号卡）：任何输入都不再产出，
+    # 节奏改由随音频走的 keyword_pop / golden_lines 承担。
     manifest = build_effects_manifest(PLAN, REWRITE)
-    chapters = [e for e in manifest["effects"] if e["type"] == "chapter_card"]
-    assert len(chapters) == 2  # 3 节，首节除外
-    # 第二节起点 = 6.0；第三节起点 = 6.0 + 20.0 = 26.0
-    assert chapters[0]["start"] == 6.0
-    assert chapters[0]["index"] == 1
-    assert chapters[0]["title"] == "第一节"
-    assert chapters[0]["duration"] == 1.5
-    assert chapters[1]["start"] == 26.0
-    assert chapters[1]["title"] == "第二节"
+    assert all(e["type"] != "chapter_card" for e in manifest["effects"])
+    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    assert [k["keyword"] for k in kws] == ["第一节", "第二节"]
 
 
 def test_manifest_lower_thirds_optional_and_derived():
@@ -139,10 +135,11 @@ def test_manifest_skips_zero_duration_sections():
         ]
     }
     manifest = build_effects_manifest(plan, None)
-    chapters = [e for e in manifest["effects"] if e["type"] == "chapter_card"]
-    # 空节被过滤，只有 hook + 真节 → 真节作为第 1 章
-    assert len(chapters) == 1
-    assert chapters[0]["title"] == "真节"
+    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
+    # 空节被过滤，只有 hook + 真节 → 只有真节产出关键词弹出（章节卡已退役，
+    # 用 keyword_pop 验证零时长节的过滤逻辑）
+    assert len(kws) == 1
+    assert kws[0]["keyword"] == "真节"
 
 
 def test_manifest_top_level_shape():
@@ -268,8 +265,8 @@ class _FailAtRecorder(_Recorder):
 def test_render_effects_partial_failure_keeps_original_indices(tmp_path, monkeypatch):
     monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
     manifest = build_effects_manifest(PLAN, REWRITE)
-    # hook_opener + 2 章节卡 + 金句卡 + 2 关键词弹出 = 6（要点卡已退役）
-    assert len(manifest["effects"]) == 6
+    # hook_opener + 金句卡 + 2 关键词弹出 = 4（要点卡、章节卡已退役）
+    assert len(manifest["effects"]) == 4
     runner = _FailAtRecorder(fail_name="effect_01.mov")
 
     result = render_effects(manifest, tmp_path, runner=runner)
@@ -901,8 +898,11 @@ def test_manifest_keyword_pop_per_section_skips_first():
     }
     manifest = build_effects_manifest(plan, rewrite)
     kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    # 第 0 节 hook 跳过；第 1 节引号词 > 第 2 节数字短语
-    assert [k["keyword"] for k in kws] == ["反脆弱", "3步"]
+    # 第 0 节 hook 跳过；第 1 节引号词入选。第 2 节的「3步」是数字短语，
+    # 已由 number_pop 弹出，keyword_pop 去重让位（防同一数字弹两次）。
+    assert [k["keyword"] for k in kws] == ["反脆弱"]
+    nums = [e for e in manifest["effects"] if e["type"] == "number_pop"]
+    assert [n["value"] for n in nums] == ["3步"]
     # 第 1 节起点 6.0 + 40%*10 = 10.0
     assert kws[0]["start"] == pytest.approx(6.0 + 10.0 * 0.4, abs=1 / 30)
     assert kws[0]["duration"] == 1.6
@@ -1243,14 +1243,14 @@ def test_keyword_pop_color_wraps_around_at_3():
 # ---- 向后兼容：无 emphasis 时 manifest 总条数不变 ----
 
 def test_manifest_count_unchanged_without_emphasis():
-    """无 emphasis 时 manifest 总条数稳定（7 条：intro + 2 章节卡 + 要点卡 + 金句卡 + 2 关键词）。"""
+    """无 emphasis 时 manifest 总条数稳定（4 条：hook_opener + 金句卡 + 2 关键词）。"""
     # 与 test_render_effects_partial_failure_keeps_original_indices 用同一 PLAN+REWRITE
     manifest = build_effects_manifest(PLAN, REWRITE)
     kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
     # 2 节内容节（hook 跳过）→ 2 个 keyword_pop
     assert len(kw_pops) == 2
-    # 总条数：要点卡退役后为 6（hook_opener + 2 章节卡 + 金句卡 + 2 关键词）
-    assert len(manifest["effects"]) == 6
+    # 总条数：要点卡、章节卡退役后为 4（hook_opener + 金句卡 + 2 关键词）
+    assert len(manifest["effects"]) == 4
 
 
 def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
