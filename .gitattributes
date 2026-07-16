@@ -1,0 +1,4 @@
+# Windows 批处理必须以 CRLF 检出：LF 换行会让 cmd 解析中断、双击闪退
+# （启动创作工作台.bat 2026-07 实测踩坑）。无论对方机器 autocrlf 怎么配，
+# 这条都保证新电脑 git clone 下来的 .bat 直接可双击。
+*.bat text eol=crlf
