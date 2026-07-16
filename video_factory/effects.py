@@ -65,8 +65,9 @@ _COMPOSITION_BY_TYPE = {
 }
 
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
+# 时长 2.8→4.5（2026-07-16 用户反馈"金句停留时间太短"：一句 15+ 字的观点要读完）。
 QUOTE_POSITION_RATIO = 0.55
-QUOTE_DURATION = 2.8
+QUOTE_DURATION = 4.5
 # 数字强调：每节口播里第一个关键数字，节起点后 0.8s 弹出，全片最多 2 个。
 NUMBER_POP_OFFSET = 1.0
 NUMBER_POP_DURATION = 1.4
@@ -758,6 +759,7 @@ def _build_rich_effects(
     内容重复（要点行=各节标题=章节卡文字），还在开屏后与首张章节卡同屏糊成一团。
     """
     rich: list[EffectSpec] = []
+    quote_windows: list[tuple[float, float]] = []
 
     # 金句卡：取发布标题候选1（通常最凝练）兜底 hook；撞上章节卡窗口就顺延。
     quote_text = ""
@@ -799,6 +801,8 @@ def _build_rich_effects(
             )
         if start + spec.duration < total_duration:
             rich.append(_frame_aligned(spec, fps))
+            # 金句卡时间窗：中段金句/弹词时刻要避开（中央卡片与中央大字叠一起会糊）。
+            quote_windows.append((rich[-1].start, rich[-1].start + rich[-1].duration))
 
     # 数字强调：跳过第 0 节（片头+要点卡已经很满），每节最多 1 个、全片最多 2 个。
     # 口播文本在 rewrite 里（拼装计划的节只有 title/duration）：计划第 i 节（i>=1）
@@ -863,41 +867,42 @@ def _build_rich_effects(
         rich.append(spec)
         golden_windows.append((spec.start, spec.start + spec.duration))
 
-    # keyword_pop 三色轮换；过滤掉落在金句卡时间窗 ±1s 内的弹词（全屏卡前后弹小词很怪）。
-    # 荧光笔轮替（2026-07-16 用户拍板借鉴 Remotion 官网）：命中主时间轴的关键词事件
-    # 隔条改走 highlight_sweep——句子上下文浮现、金笔扫过关键词（弹出是"喊"，高亮是
-    # "点"，两种形态交替不单调）。没命中 timeline 的没有上下文句子，维持弹出。
-    kw_color_idx = 0
+    # 中段时刻派生（2026-07-16 用户定案，keyword_pop 彻底退役）：
+    # - "第一幕：聚会"式的标题弹词是特效乱掉的最后源头——标题不是口播内容、落点
+    #   无从对齐。规则改为**只认命中主时间轴的事件**：没找到对应口播句子的直接丢弃
+    #   （宁缺勿滥），找到的隔条轮替两种形态：
+    #   1) 金句开屏时刻（golden_lines，与首屏同样式同 spring 弹入 + 逐行"刷"）：
+    #      把真正说出的那句话按子句切行放大展示——"也放金句"；
+    #   2) 荧光笔高亮（highlight_sweep）：句子上下文浮现、金笔扫过关键词。
+    # - 避开金句卡/打字机时间窗 ±1s（中央卡片与中央大字叠一起会糊）。
+    avoid_windows = golden_windows + quote_windows
     matched_idx = 0
     for kw_start, keyword in keyword_events:
-        if any(gs - 1.0 <= kw_start <= ge + 1.0 for gs, ge in golden_windows):
+        if any(ws - 1.0 <= kw_start <= we + 1.0 for ws, we in avoid_windows):
             continue
         sentence = _find_timeline_sentence(timeline, keyword)
-        if sentence is not None:
-            matched_idx += 1
-            if matched_idx % 2 == 1:  # 第 1、3、5…个命中的走荧光笔
-                context = _clip_context(str(sentence.get("text") or ""), keyword)
-                rich.append(_frame_aligned(
-                    EffectSpec(
-                        type="highlight_sweep",
-                        start=kw_start,
-                        duration=HIGHLIGHT_SWEEP_DURATION,
-                        props={"text": context, "keyword": keyword, "accent": accent},
-                    ),
-                    fps,
-                ))
-                continue
-        color = KEYWORD_POP_COLORS[kw_color_idx % len(KEYWORD_POP_COLORS)]
-        rich.append(_frame_aligned(
-            EffectSpec(
-                type="keyword_pop",
-                start=kw_start,
-                duration=KEYWORD_POP_DURATION,
-                props={"keyword": keyword, "accent": accent, "color": color},
-            ),
-            fps,
-        ))
-        kw_color_idx += 1
+        if sentence is None:
+            continue  # 估算落点的标签弹词已退役：对不上口播的一律不出
+        matched_idx += 1
+        if matched_idx % 2 == 1:
+            # 第 1、3、5…个：金句开屏时刻，内容 = 含关键词的完整口播句。
+            spec = _build_golden_lines(
+                str(sentence.get("text") or "").strip() or keyword,
+                kw_start, timeline, fps, accent,
+            )
+            rich.append(spec)
+            avoid_windows.append((spec.start, spec.start + spec.duration))
+        else:
+            context = _clip_context(str(sentence.get("text") or ""), keyword)
+            rich.append(_frame_aligned(
+                EffectSpec(
+                    type="highlight_sweep",
+                    start=kw_start,
+                    duration=HIGHLIGHT_SWEEP_DURATION,
+                    props={"text": context, "keyword": keyword, "accent": accent},
+                ),
+                fps,
+            ))
 
     return rich
 
@@ -1200,11 +1205,13 @@ def _build_sfx_audio(
     for effect in kept:
         start = float(effect.get("start") or 0.0)
         offsets = effect.get("offsets")
-        if str(effect.get("type")) == "hook_opener" and isinstance(offsets, list) and offsets:
-            # 钩子序列逐行配音（2026-07-15 用户定案）：首行 whoosh 起势，
-            # 后续每行一声 swoosh"刷"，落点=各行弹入时刻（start+offset）。
+        etype = str(effect.get("type"))
+        if etype in ("hook_opener", "golden_lines") and isinstance(offsets, list) and offsets:
+            # 逐行配音：开屏首行 whoosh 起势、后续每行一声 swoosh"刷"（2026-07-15 定案）；
+            # 金句开屏卡每行都是 swoosh（2026-07-16 定案：whoosh 只留给真正的首屏，
+            # 中段金句时刻与首屏同样式同节奏、但用第 2/3 声的"刷"）。
             for i, offset in enumerate(offsets):
-                name = "whoosh.wav" if i == 0 else "swoosh.wav"
+                name = "whoosh.wav" if (etype == "hook_opener" and i == 0) else "swoosh.wav"
                 line_path = resolve_sfx_file(name, sfx_dir)
                 if line_path is not None:
                     try:

@@ -22,27 +22,27 @@ Runner = Callable[..., subprocess.CompletedProcess]
 DEFAULT_SFX_DIR = Path(__file__).resolve().parent / "assets" / "sfx"
 
 # 特效类型 → 音效文件名。键与 effects_manifest 的 type 对齐。
+# 2026-07-16 用户定案：首屏三声（whoosh+刷+刷）不动，**其余所有特效一律"刷"（swoosh）**
+# ——pop/impact 全部退役，全片音效语言统一成开屏那一套。
 SFX_BY_TYPE = {
-    "intro": "whoosh.wav",
+    "intro": "swoosh.wav",
     # chapter_card 无音效（2026-07-15 用户点名去掉章节文字出现时的"啵"声）：
     # 不在映射里 = resolve_sfx_path 返回 None = 静默跳过，章节大字纯视觉浮现。
     "lower_third": "swoosh.wav",
-    "key_points": "whoosh.wav",
-    "quote_card": "pop.wav",
-    "number_pop": "pop.wav",
-    # 荧光笔高亮：一声"刷"贴合金笔划过；打字机引用与金句卡同声起势。
+    "key_points": "swoosh.wav",
+    "quote_card": "swoosh.wav",
+    "number_pop": "swoosh.wav",
     "highlight_sweep": "swoosh.wav",
-    "typewriter_quote": "pop.wav",
-    # 关键词弹出复用"啵"的 pop；冷开场卡用 whoosh 起势；金句全屏卡用低频冲击音。
-    "keyword_pop": "pop.wav",
-    "opening_card": "whoosh.wav",
-    "golden_card": "impact.wav",
-    # 金句开屏三行式（黑卡退役后的形态）：起点一声低频冲击（不逐行——逐行"刷刷"
-    # 只认 hook_opener，见 effects._build_sfx_audio 特判）。
-    "golden_lines": "impact.wav",
-    # 开屏钩子序列（替代已退役的冷开场卡）：首行 whoosh 起势；逐行"刷刷"由
-    # effects._build_sfx_audio 按 offsets 特判注入（首行 whoosh、后续行 swoosh，
-    # 2026-07-15 用户定案），本映射仅作 offsets 缺失时的兜底首声。
+    "typewriter_quote": "swoosh.wav",
+    "keyword_pop": "swoosh.wav",  # 类型已退役，仅旧 manifest 重渲兼容
+    "opening_card": "swoosh.wav",
+    "golden_card": "swoosh.wav",
+    # 金句开屏三行式：逐行"刷刷"由 effects._build_sfx_audio 按 offsets 特判注入
+    # （每行一声 swoosh），本映射仅作 offsets 缺失时的兜底首声。
+    "golden_lines": "swoosh.wav",
+    # 开屏钩子序列：首行 whoosh 起势；逐行"刷刷"由 effects._build_sfx_audio 按
+    # offsets 特判注入（首行 whoosh、后续行 swoosh，2026-07-15 用户定案），
+    # 本映射仅作 offsets 缺失时的兜底首声。whoosh 是全片唯一保留的非 swoosh 音。
     "hook_opener": "whoosh.wav",
 }
 

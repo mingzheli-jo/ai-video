@@ -17,8 +17,9 @@ from video_factory.sfx import (
 def test_resolve_sfx_path_maps_type_to_file(tmp_path):
     d = tmp_path / "sfx"
     d.mkdir()
-    (d / "whoosh.wav").write_bytes(b"x")
-    assert resolve_sfx_path("intro", d) == d / "whoosh.wav"
+    # 2026-07-16 音效语言统一：intro 也改"刷"（whoosh 只留给首屏首声）。
+    (d / "swoosh.wav").write_bytes(b"x")
+    assert resolve_sfx_path("intro", d) == d / "swoosh.wav"
 
 
 def test_resolve_sfx_path_none_for_unknown_type(tmp_path):

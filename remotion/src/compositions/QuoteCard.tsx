@@ -8,8 +8,9 @@ import {
 } from "remotion";
 import { FONT_STACK, QuoteCardProps } from "../schema";
 
-// 金句卡：中段把一句核心观点放大定格。压暗背景 + 大引号 + 遮罩揭示入场
-// （借鉴 Remotion 官网"遮罩揭示"：自下而上揭开，金句"揭晓"的仪式感比淡入强），
+// 金句卡：中段把一句核心观点放大定格。压暗背景 + 大引号 + 弹出回弹入场
+// （2026-07-16 用户反馈"直接显示不够吸引人"：遮罩揭示太含蓄，改成低阻尼 spring
+// 从 0.3 弹到 1、带明显过冲——"啪"地弹到观众脸上），
 // 停留期间轻微持续放大（呼吸感），尾段整体淡出。
 export const QuoteCard: React.FC<QuoteCardProps> = ({ text, accent }) => {
   const frame = useCurrentFrame();
@@ -19,9 +20,9 @@ export const QuoteCard: React.FC<QuoteCardProps> = ({ text, accent }) => {
   const isPortrait = height > width;
   const fontSize = 64 * s * (isPortrait ? 1.35 : 1);
 
-  // spring 驱动揭示进度：顶部 inset 从 100% 收到 0，可见区自下而上生长。
-  const enter = spring({ frame, fps, config: { damping: 16, mass: 0.6 } });
-  const revealInset = interpolate(enter, [0, 1], [100, 0]);
+  // 低阻尼 spring：0.3 → 1 带过冲回弹，弹出感拉满。
+  const enter = spring({ frame, fps, config: { damping: 9, mass: 0.6, stiffness: 130 } });
+  const popScale = interpolate(enter, [0, 1], [0.3, 1]);
   const drift = 1 + 0.015 * (frame / Math.max(1, durationInFrames));
   const opacityIn = interpolate(frame, [0, 6], [0, 1], { extrapolateRight: "clamp" });
   const outStart = durationInFrames - 8;
@@ -43,8 +44,7 @@ export const QuoteCard: React.FC<QuoteCardProps> = ({ text, accent }) => {
       <div
         style={{
           position: "relative",
-          transform: `scale(${drift})`,
-          clipPath: `inset(${revealInset}% 0 0 0)`,
+          transform: `scale(${popScale * drift})`,
           maxWidth: isPortrait ? width * 0.82 : width * 0.62,
           textAlign: "center",
         }}

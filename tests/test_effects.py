@@ -64,12 +64,13 @@ def test_manifest_intro_duration_capped_by_short_first_section():
 
 
 def test_manifest_no_chapter_cards_after_retirement():
-    # 章节卡已退役（2026-07-15 用户点名去掉「01」序号卡）：任何输入都不再产出，
-    # 节奏改由随音频走的 keyword_pop / golden_lines 承担。
+    # 章节卡已退役（2026-07-15）；keyword_pop 也已退役（2026-07-16 用户点名去掉
+    # "第一幕：聚会"式标签弹词）：无 timeline 时中段一律不出估算落点的文字特效，
+    # 只剩开屏 + 金句卡。
     manifest = build_effects_manifest(PLAN, REWRITE)
     assert all(e["type"] != "chapter_card" for e in manifest["effects"])
-    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    assert [k["keyword"] for k in kws] == ["第一节", "第二节"]
+    assert all(e["type"] != "keyword_pop" for e in manifest["effects"])
+    assert sorted(e["type"] for e in manifest["effects"]) == ["hook_opener", "quote_card"]
 
 
 def test_manifest_lower_thirds_optional_and_derived():
@@ -134,12 +135,14 @@ def test_manifest_skips_zero_duration_sections():
             {"title": "真节", "duration_seconds": 8.0},
         ]
     }
-    manifest = build_effects_manifest(plan, None)
-    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    # 空节被过滤，只有 hook + 真节 → 只有真节产出关键词弹出（章节卡已退役，
-    # 用 keyword_pop 验证零时长节的过滤逻辑）
-    assert len(kws) == 1
-    assert kws[0]["keyword"] == "真节"
+    # 空节被过滤，只有 hook + 真节 → 只有真节的关键词能命中 timeline 产出中段
+    # 金句时刻（keyword_pop 已退役，用 golden_lines 验证零时长节的过滤逻辑）。
+    timeline = [{"text": "只有真节靠得住", "start": 9.0, "end": 11.0}]
+    manifest = build_effects_manifest(plan, None, timeline=timeline)
+    mids = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    assert len(mids) == 1
+    assert mids[0]["lines"] == ["只有真节靠得住"]
+    assert mids[0]["start"] == pytest.approx(9.0, abs=1 / 30)
 
 
 def test_manifest_top_level_shape():
@@ -265,8 +268,8 @@ class _FailAtRecorder(_Recorder):
 def test_render_effects_partial_failure_keeps_original_indices(tmp_path, monkeypatch):
     monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
     manifest = build_effects_manifest(PLAN, REWRITE)
-    # hook_opener + 金句卡 + 2 关键词弹出 = 4（要点卡、章节卡已退役）
-    assert len(manifest["effects"]) == 4
+    # hook_opener + 金句卡 = 2（要点卡、章节卡、标签弹词均已退役）
+    assert len(manifest["effects"]) == 2
     runner = _FailAtRecorder(fail_name="effect_01.mov")
 
     result = render_effects(manifest, tmp_path, runner=runner)
@@ -276,7 +279,6 @@ def test_render_effects_partial_failure_keeps_original_indices(tmp_path, monkeyp
     expected = [i for i in range(len(manifest["effects"])) if i != 1]
     assert [index for index, _ in result] == expected
     assert result[0][1].name == "effect_00.mov"
-    assert result[1][1].name == "effect_02.mov"
     warnings = json.loads((tmp_path / "effects_warnings.json").read_text(encoding="utf-8"))
     assert len(warnings["warnings"]) == 1 and "第 1 条" in warnings["warnings"][0]
 
@@ -507,9 +509,9 @@ def test_overlay_mixes_sfx_at_effect_starts_when_enabled(tmp_path):
     # 音轨重编码为 aac 并映射混音输出，不再直通 copy
     assert "aac" in cmd and "[aout]" in cmd
     assert "copy" not in cmd
-    # 对应音效作为额外输入（intro→whoosh、keyword_pop→pop）
-    assert str(sfx_dir / "whoosh.wav") in cmd
-    assert str(sfx_dir / "pop.wav") in cmd
+    # 2026-07-16 音效语言统一：除首屏 whoosh 外全部"刷"（intro/keyword_pop 均 swoosh）
+    assert cmd.count(str(sfx_dir / "swoosh.wav")) == 2
+    assert str(sfx_dir / "pop.wav") not in cmd
 
 
 def test_chapter_card_has_no_sfx():
@@ -897,19 +899,17 @@ def test_manifest_keyword_pop_per_section_skips_first():
         ],
     }
     manifest = build_effects_manifest(plan, rewrite)
-    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    # 第 0 节 hook 跳过；第 1 节引号词入选。第 2 节的「3步」是数字短语，
-    # 已由 number_pop 弹出，keyword_pop 去重让位（防同一数字弹两次）。
-    assert [k["keyword"] for k in kws] == ["反脆弱"]
+    # keyword_pop 已退役（2026-07-16）：无 timeline 时「反脆弱」对不上口播句子，
+    # 中段文字时刻一律不出（宁缺勿滥）；数字弹出保留估算兜底。
+    assert all(e["type"] not in ("keyword_pop", "highlight_sweep", "golden_lines")
+               for e in manifest["effects"])
     nums = [e for e in manifest["effects"] if e["type"] == "number_pop"]
     assert [n["value"] for n in nums] == ["3步"]
-    # 第 1 节起点 6.0 + 40%*10 = 10.0
-    assert kws[0]["start"] == pytest.approx(6.0 + 10.0 * 0.4, abs=1 / 30)
-    assert kws[0]["duration"] == 1.6
 
 
-def test_manifest_keyword_pop_falls_back_to_title():
-    # 无引号/数字 → 取节标题头 6 字兜底；无 rewrite 也能从 plan 标题产出关键词。
+def test_manifest_title_fallback_no_longer_pops_without_timeline():
+    # 2026-07-16 用户点名去掉"第一幕：聚会"式标签弹词：节标题兜底的关键词不是口播
+    # 内容，无 timeline 命中一律不出——中段没有任何估算落点的文字特效。
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 6.0},
@@ -917,8 +917,8 @@ def test_manifest_keyword_pop_falls_back_to_title():
         ]
     }
     manifest = build_effects_manifest(plan, None)
-    kws = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    assert [k["keyword"] for k in kws] == ["低杠杆保现金"]
+    assert all(e["type"] not in ("keyword_pop", "highlight_sweep", "golden_lines")
+               for e in manifest["effects"])
 
 
 def test_extract_keyword_priority():
@@ -951,8 +951,10 @@ def test_sfx_mapping_covers_keyword_hook_opener_golden():
     for t in ("keyword_pop", "hook_opener", "golden_lines"):
         assert t in SFX_BY_TYPE
     assert SFX_BY_TYPE["hook_opener"] == "whoosh.wav"
-    # 金句开屏卡：起点一声低频冲击（impact.wav），不逐行。
-    assert SFX_BY_TYPE["golden_lines"] == "impact.wav"
+    # 2026-07-16 音效语言统一：whoosh 只留给首屏首声，其余类型全部"刷"（swoosh）。
+    for t, name in SFX_BY_TYPE.items():
+        if t != "hook_opener":
+            assert name == "swoosh.wav", f"{t} 应为 swoosh.wav，实际 {name}"
     # 转场音效已取消（2026-07-15 用户点名），不再注入。
     assert "transition" not in SFX_BY_TYPE
 
@@ -1200,9 +1202,9 @@ def test_density_control_returns_empty_for_empty_input():
 
 # ---- 三色轮换 ----
 
-def test_keyword_pop_color_cycles_red_yellow_white():
-    """keyword_pop 三色按全片动效序号轮换：红→黄→白→红→……"""
-    # 3节（hook + 2内容节），无 emphasis → 规则抽取每节一个 keyword_pop
+def test_keyword_pop_retired_no_label_pops_without_timeline():
+    """keyword_pop 已退役（2026-07-16）：多节纯标题输入 + 无 timeline，
+    中段不产出任何估算落点的文字特效（"第一幕：聚会"式标签的根治）。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
@@ -1212,17 +1214,12 @@ def test_keyword_pop_color_cycles_red_yellow_white():
         ]
     }
     manifest = build_effects_manifest(plan, None)
-    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-
-    # 每节规则抽取一个 keyword_pop（3 节，跳过 hook）
-    assert len(kw_pops) == 3
-    assert kw_pops[0]["color"] == KEYWORD_POP_COLORS[0]  # 红
-    assert kw_pops[1]["color"] == KEYWORD_POP_COLORS[1]  # 黄
-    assert kw_pops[2]["color"] == KEYWORD_POP_COLORS[2]  # 白
+    assert all(e["type"] not in ("keyword_pop", "highlight_sweep", "golden_lines")
+               for e in manifest["effects"])
 
 
-def test_keyword_pop_color_wraps_around_at_3():
-    """4 个 keyword_pop 时第 4 个颜色回到红（轮换周期=3）。"""
+def test_mid_moments_alternate_golden_and_highlight_across_four_matches():
+    """4 个命中 timeline 的事件按 金句开屏→荧光笔→金句开屏→荧光笔 轮替。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0, "slices": []},
@@ -1232,25 +1229,43 @@ def test_keyword_pop_color_wraps_around_at_3():
             {"index": 4, "title": "节四", "duration_seconds": 30.0, "slices": []},
         ]
     }
-    manifest = build_effects_manifest(plan, None)
-    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-
-    assert len(kw_pops) == 4
-    # 第 4 个（index=3）= 3 % 3 = 0 → 红
-    assert kw_pops[3]["color"] == KEYWORD_POP_COLORS[0]
+    rewrite = {
+        "sections": [
+            {"narration": "先说「破山中贼」的道理"},
+            {"narration": "再说「破心中贼」更难"},
+            {"narration": "然后是「事上磨练」的功夫"},
+            {"narration": "最后落到「知行合一」收束"},
+        ],
+    }
+    # 相邻间隔都在 [8, 20)：既不被抽稀也不触发真空补填。
+    timeline = [
+        {"text": "王阳明说破山中贼易", "start": 10.0, "end": 12.0},
+        {"text": "可是破心中贼难", "start": 22.0, "end": 24.0},
+        {"text": "功夫全在事上磨练", "start": 34.0, "end": 36.0},
+        {"text": "归根结底是知行合一", "start": 46.0, "end": 48.0},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    mids = [e for e in manifest["effects"]
+            if e["type"] in ("golden_lines", "highlight_sweep")]
+    mids.sort(key=lambda e: e["start"])
+    assert [e["type"] for e in mids] == [
+        "golden_lines", "highlight_sweep", "golden_lines", "highlight_sweep",
+    ]
+    # 金句时刻内容 = 真正说出的整句；荧光笔带关键词与上下文。
+    assert mids[0]["lines"] == ["王阳明说破山中贼易"]
+    assert mids[1]["keyword"] == "破心中贼"
+    assert all(e["type"] != "keyword_pop" for e in manifest["effects"])
 
 
 # ---- 向后兼容：无 emphasis 时 manifest 总条数不变 ----
 
 def test_manifest_count_unchanged_without_emphasis():
-    """无 emphasis 时 manifest 总条数稳定（4 条：hook_opener + 金句卡 + 2 关键词）。"""
+    """无 emphasis 且无 timeline 时 manifest 总条数稳定（2 条：hook_opener + 金句卡）。"""
     # 与 test_render_effects_partial_failure_keeps_original_indices 用同一 PLAN+REWRITE
     manifest = build_effects_manifest(PLAN, REWRITE)
-    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    # 2 节内容节（hook 跳过）→ 2 个 keyword_pop
-    assert len(kw_pops) == 2
-    # 总条数：要点卡、章节卡退役后为 4（hook_opener + 金句卡 + 2 关键词）
-    assert len(manifest["effects"]) == 4
+    # 标签弹词退役（2026-07-16）：无 timeline 命中的中段文字特效一律不出
+    assert all(e["type"] != "keyword_pop" for e in manifest["effects"])
+    assert len(manifest["effects"]) == 2
 
 
 def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
@@ -1288,12 +1303,11 @@ def test_manifest_keyword_pop_with_emphasis_uses_distributed_positions():
         "notes": "",
     }
     manifest = build_effects_manifest(plan, rewrite_with_emphasis)
-    kw_pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
     golden_lines = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
 
-    # keyword 类（节一）应存在；金句开屏卡（golden_lines）由节二的 "关键词Y" 派生
-    assert len(kw_pops) >= 1
-    assert any(k["keyword"] == "关键词X" for k in kw_pops)
+    # keyword 类 emphasis（节一"关键词X"）无 timeline 命中 → 不再弹出（2026-07-16
+    # 标签弹词退役）；golden 类 emphasis 的派生不受影响，仍出金句开屏卡。
+    assert all(e["type"] != "keyword_pop" for e in manifest["effects"])
     # 黑卡退役：不再派生 golden_card，改为 golden_lines（无标点 → 单行）
     assert all(e["type"] != "golden_card" for e in manifest["effects"])
     assert len(golden_lines) == 1
@@ -1632,11 +1646,13 @@ def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
     )
     cmd = next(c for c in runner.commands if "-filter_complex" in c)
     fc = cmd[cmd.index("-filter_complex") + 1]
-    # 只有一声 impact 落在起点 30s；不因 offsets 逐行注入 swoosh
-    assert str(sfx_dir / "impact.wav") in cmd
-    assert str(sfx_dir / "swoosh.wav") not in cmd
+    # 2026-07-16 定案：金句开屏卡与首屏同节奏逐行配音，但每行都是"刷"（swoosh，
+    # whoosh 只留给真正的首屏首声）；两行 → 30.0s 与 32.15s 各一声。
+    assert cmd.count(str(sfx_dir / "swoosh.wav")) == 2
+    assert str(sfx_dir / "impact.wav") not in cmd
     assert "adelay=30000:all=1" in fc
-    assert "amix=inputs=2:duration=first:normalize=0" in fc  # 底片音轨 + 1 声 impact
+    assert "adelay=32150:all=1" in fc
+    assert "amix=inputs=3:duration=first:normalize=0" in fc  # 底片音轨 + 2 声 swoosh
 
 
 # ---- P1b/P2b（2026-07-16 借鉴 Remotion 官网）：荧光笔高亮 / 打字机引用 ----
@@ -1650,8 +1666,8 @@ def test_manifest_typewriter_quote_for_sourced_text():
     assert len(tw) == 1
     assert tw[0]["source"] == "王阳明"
     assert tw[0]["text"] == "此心不动随机而动"
-    # 8 字正文：0.12*8/0.65≈1.48 < 下限 → 取 QUOTE_DURATION=2.8
-    assert tw[0]["duration"] == pytest.approx(2.8, abs=1 / 30)
+    # 8 字正文：0.12*8/0.65≈1.48 < 下限 → 取 QUOTE_DURATION=4.5（2026-07-16 金句停留加长）
+    assert tw[0]["duration"] == pytest.approx(4.5, abs=1 / 30)
     assert all(e["type"] != "quote_card" for e in manifest["effects"])
 
 
@@ -1670,9 +1686,9 @@ def test_manifest_plain_quote_still_quote_card():
     assert all(e["type"] != "typewriter_quote" for e in manifest["effects"])
 
 
-def test_manifest_highlight_sweep_alternates_on_timeline_matches():
-    # 命中主时间轴的关键词事件隔条轮替：第 1 个走荧光笔（带句子上下文、真实句起点），
-    # 第 2 个保持弹出。没 timeline 的用例（本文件其余测试）不受影响。
+def test_manifest_mid_moments_alternate_golden_then_highlight():
+    # 命中主时间轴的事件隔条轮替（2026-07-16 定案）：第 1 个走金句开屏时刻
+    # （golden_lines，内容=真正说出的整句），第 2 个走荧光笔高亮。
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 6.0},
@@ -1681,7 +1697,6 @@ def test_manifest_highlight_sweep_alternates_on_timeline_matches():
         ]
     }
     rewrite = {
-        "hook": "开场",
         "sections": [
             {"narration": "先讲「心中之贼」这个概念"},
             {"narration": "再说「知行合一」的功夫"},
@@ -1692,14 +1707,15 @@ def test_manifest_highlight_sweep_alternates_on_timeline_matches():
         {"text": "落到实处就是知行合一四个字", "start": 26.0, "end": 29.0},
     ]
     manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    mids = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
     sweeps = [e for e in manifest["effects"] if e["type"] == "highlight_sweep"]
-    pops = [e for e in manifest["effects"] if e["type"] == "keyword_pop"]
-    assert len(sweeps) == 1 and len(pops) == 1
-    assert sweeps[0]["keyword"] == "心中之贼"
-    assert sweeps[0]["text"] == "真正困住你的是心中之贼"  # ≤16 字整句直用
-    assert sweeps[0]["start"] == pytest.approx(9.0, abs=1 / 30)
-    assert pops[0]["keyword"] == "知行合一"
-    assert pops[0]["start"] == pytest.approx(26.0, abs=1 / 30)
+    assert len(mids) == 1 and len(sweeps) == 1
+    assert mids[0]["lines"] == ["真正困住你的是心中之贼"]
+    assert mids[0]["start"] == pytest.approx(9.0, abs=1 / 30)
+    assert sweeps[0]["keyword"] == "知行合一"
+    assert sweeps[0]["text"] == "落到实处就是知行合一四个字"  # ≤16 字整句直用
+    assert sweeps[0]["start"] == pytest.approx(26.0, abs=1 / 30)
+    assert all(e["type"] != "keyword_pop" for e in manifest["effects"])
 
 
 def test_clip_context_windows_long_sentence_around_keyword():
