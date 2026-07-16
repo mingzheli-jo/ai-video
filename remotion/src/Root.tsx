@@ -97,7 +97,10 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="QuoteCard"
         component={QuoteCard}
-        durationInFrames={84}
+        // 契约：durationInFrames 是渲染帧数上限（CLI --frames 不能越过它）。
+        // 必须 ≥ Python 侧最大可能时长（QUOTE_DURATION 4.5s×30=135），留余量取 150。
+        // 2026-07-16 事故：4.5s 金句卡在旧上限 84 帧下渲染直接失败。
+        durationInFrames={150}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}
@@ -188,7 +191,8 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="TypewriterQuote"
         component={TypewriterQuote}
-        durationInFrames={110}
+        // 同 QuoteCard 的契约注释：上限必须 ≥ TYPEWRITER_MAX_DURATION 4.5s×30=135。
+        durationInFrames={150}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}

@@ -872,15 +872,16 @@ def test_manifest_hook_opener_falls_back_to_intro_without_hook():
 
 
 def test_manifest_hook_opener_duration_capped_by_short_first_section():
-    # 首节很短时 hook_opener 时长受 min(5, 首节×0.9) 约束。
+    # 首节很短时 hook_opener 时长 = max(min(5, 首节×0.9), 2.5) —— 2026-07-16 加托底：
+    # 开屏是透明叠层可越节，不再随短首节被压到一闪而过。
     plan = {"sections": [{"title": "hook", "duration_seconds": 2.0},
                          {"title": "正题", "duration_seconds": 10.0}]}
     rewrite = {"hook": "悬念一句，反问一句"}
     manifest = build_effects_manifest(plan, rewrite)
     opener = manifest["effects"][0]
     assert opener["type"] == "hook_opener"
-    # min(5.0, 2.0 * 0.9 = 1.8) = 1.8
-    assert opener["duration"] == pytest.approx(1.8, abs=1 / 30)
+    # max(min(5.0, 2.0*0.9=1.8), 2.5) = 2.5
+    assert opener["duration"] == pytest.approx(2.5, abs=1 / 30)
 
 
 def test_manifest_keyword_pop_per_section_skips_first():
@@ -1619,11 +1620,11 @@ def test_golden_lines_uses_timeline_sentence_start_and_duration():
     assert g["start"] == pytest.approx(30.0, abs=1 / 30)
     # duration = min(4.0 + 1.2, 4.5) = 4.5
     assert g["duration"] == pytest.approx(4.5, abs=1 / 30)
-    # 按子句标点拆成两行
-    assert g["lines"] == ["持续做正确的事", "时间会回报你"]
-    # 行内 offsets 按字符占比在句时长(4.0)上分摊：首行 0，次行 7/13×4.0≈2.15
+    # 屏幕文字用口播原句（2026-07-16 所见即所听），按子句标点拆成两行
+    assert g["lines"] == ["我始终相信持续做正确的事", "时间会回报你"]
+    # 行内 offsets 按字符占比在句时长(4.0)上分摊：首行 0，次行 12/18×4.0≈2.667
     assert g["offsets"][0] == 0.0
-    assert g["offsets"][1] == pytest.approx(7 / 13 * 4.0, abs=0.05)
+    assert g["offsets"][1] == pytest.approx(12 / 18 * 4.0, abs=0.05)
 
 
 def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
@@ -1782,3 +1783,59 @@ def test_overlay_ambient_loop_uses_stream_loop_and_shortest(tmp_path):
     fc = cmd[cmd.index("-filter_complex") + 1]
     assert "shortest=1" in fc
     assert "+faststart" in cmd
+
+
+# ---- 2026-07-16 锚点强化：转述失配二次匹配 / 有轴不中则弃 / 开屏托底 ----
+
+
+def test_golden_paraphrase_rescued_by_number_token_and_shows_spoken_text():
+    # emphasis 是转述（"有句话说"），口播是"有句话讲"：全文匹配失手，但 "90%" 数字
+    # token 全片唯一 → 二次锚定到真句 64.65s；且屏幕文字用口播原句（所见即所听）。
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 5.0},
+        {"index": 1, "title": "节一", "duration_seconds": 90.0},
+    ]}
+    rewrite = {"sections": [{
+        "narration": "口播里有一句话",
+        "emphasis": [{"text": "有句话说，90%的负面情绪来源都是对事件的解读", "kind": "golden"}],
+    }]}
+    timeline = [
+        {"text": "开场白", "start": 0.0, "end": 5.0},
+        {"text": "有句话讲：90%的负面情绪来源都是对事件的解读", "start": 64.65, "end": 68.87},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    assert len(golden) == 1
+    assert golden[0]["start"] == pytest.approx(64.65, abs=1 / 30)
+    assert golden[0]["lines"] == ["有句话讲：90%的负面情绪来源都是对事件的解读"] or \
+        "".join(golden[0]["lines"]).startswith("有句话讲")
+
+
+def test_golden_unmatched_dropped_when_timeline_present():
+    # 有主时间轴却完全对不上（无数字/引号可救）→ 丢弃，不再估算落点（宁缺勿滥）。
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 5.0},
+        {"index": 1, "title": "节一", "duration_seconds": 60.0},
+    ]}
+    rewrite = {"sections": [{
+        "narration": "口播",
+        "emphasis": [{"text": "完全不同的转述内容", "kind": "golden"}],
+    }]}
+    timeline = [{"text": "口播的真实句子", "start": 10.0, "end": 13.0}]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    assert all(e["type"] != "golden_lines" for e in manifest["effects"])
+
+
+def test_hook_opener_floor_duration_covers_short_single_clause_hook():
+    # 单句短钩子 + 首节仅 1.53s：开屏不再被压到 1.37s 一闪而过——
+    # timeline 命中时时长 = 口播终点 + 1.0s 尾留白，且不低于 2.5s。
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 1.53},
+        {"index": 1, "title": "节一", "duration_seconds": 40.0},
+    ]}
+    rewrite = {"hook": "你被情绪劫持了吗？"}
+    timeline = [{"text": "你被情绪劫持了吗", "start": 0.0, "end": 1.53}]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    opener = manifest["effects"][0]
+    assert opener["type"] == "hook_opener"
+    assert opener["duration"] >= 2.5 - 1 / 30

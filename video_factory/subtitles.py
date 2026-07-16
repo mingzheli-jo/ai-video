@@ -22,6 +22,7 @@ mode 参数 auto（默认，align 失败降 ratio）| align | ratio。
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -253,9 +254,13 @@ def build_cue_timeline_align(
     """用 ASR 分段的字符时间线对齐原稿句子。
 
     把每个 ASR 分段按归一化字符数展开成一条"字符时间线"（每个字符占一段等长时间），
-    再把原稿句子按累计字符占比映射到这条时间线上取 start/end。原稿与 ASR 字符数
-    局部不一致（TTS 把 "30%" 念成 "百分之三十"）时按比例分摊，漂移天然限制在单句内。
-    ASR 空结果时抛错，交由上层降级到 ratio。
+    再把原稿句子的字符边界映射到这条时间线上取 start/end。
+
+    映射用 SequenceMatcher 逐块锚定（2026-07-16 修"字幕跑着跑着对不上"）：旧实现按
+    **全局**累计字符占比映射，TTS 把 "90%" 念成 "百分之九十" 这类字数膨胀会让映射
+    误差跨句累积——中段漂到秒级、结尾又归零。改为在归一化后的原稿串与 ASR 串上做
+    分块对齐：匹配块内一一对应，不匹配的空隙内按比例插值，误差被锁死在空隙局部，
+    不再全片累积。ASR 空结果时抛错，交由上层降级到 ratio。
     """
     if not sentences:
         raise SubtitlesError("没有句子可对齐。")
@@ -263,21 +268,65 @@ def build_cue_timeline_align(
     if not timeline:
         raise SubtitlesError("ASR 未返回任何有效时间分段，无法 align 对齐。")
     total_asr_chars = len(timeline)
-    total_src_chars = sum(max(1, len(s)) for s in sentences)
+
+    # 原稿侧同款标点归一化（与 _char_timeline 对 ASR 的处理口径一致），
+    # 记录每句在归一化大串里的 [start, end) 边界。
+    norm_parts = [_PUNCT_RE.sub("", s) for s in sentences]
+    boundaries: list[tuple[int, int]] = []
+    cursor = 0
+    for part in norm_parts:
+        boundaries.append((cursor, cursor + len(part)))
+        cursor += len(part)
+    src_all = "".join(norm_parts)
+    asr_all = "".join(
+        _PUNCT_RE.sub("", str(text)) for _, _, text in asr_segments
+    )
+    index_of = _build_char_index_map(src_all, asr_all)
+
     cues: list[Cue] = []
-    src_cursor = 0
-    for sentence in sentences:
-        length = max(1, len(sentence))
-        start_ratio = src_cursor / total_src_chars
-        end_ratio = (src_cursor + length) / total_src_chars
-        start_idx = min(total_asr_chars - 1, int(start_ratio * total_asr_chars))
-        end_idx = min(total_asr_chars - 1, max(start_idx, int(end_ratio * total_asr_chars) - 1))
+    for sentence, (b_start, b_end) in zip(sentences, boundaries):
+        start_idx = min(total_asr_chars - 1, index_of(b_start))
+        end_idx = min(total_asr_chars - 1, max(start_idx, index_of(max(b_start, b_end - 1))))
         start = timeline[start_idx][0]
         end = timeline[end_idx][1]
         cues.append(Cue(start, end if end > start else start + MIN_CUE_DURATION, sentence))
-        src_cursor += length
     total_duration = timeline[-1][1]
     return _enforce_min_duration(_redistribute_collided_cues(cues), total_duration)
+
+
+def _build_char_index_map(src: str, asr: str) -> Callable[[int], int]:
+    """返回 原稿字符位 → ASR 字符位 的映射函数（SequenceMatcher 分块锚定）。
+
+    匹配块内逐字符平移；块间空隙（TTS 数字展开、ASR 幻听/漏字）按空隙两端锚点
+    线性插值。src/asr 任一为空时退化为全局比例映射（与旧行为一致）。
+    """
+    if not src or not asr:
+        total_src = max(1, len(src))
+        return lambda i: int(i / total_src * max(1, len(asr)))
+    matcher = difflib.SequenceMatcher(None, src, asr, autojunk=False)
+    # 锚点表：[(src_pos, asr_pos)]，含起终点哨兵，保证全域可插值。
+    anchors: list[tuple[int, int]] = [(0, 0)]
+    for block in matcher.get_matching_blocks():
+        if block.size > 0:
+            anchors.append((block.a, block.b))
+            anchors.append((block.a + block.size, block.b + block.size))
+    anchors.append((len(src), len(asr)))
+    anchors.sort()
+
+    def index_of(src_pos: int) -> int:
+        # 找 src_pos 所在的锚点区间 [lo, hi)，区间内线性插值。
+        lo_s, lo_a = anchors[0]
+        for hi_s, hi_a in anchors[1:]:
+            if src_pos < hi_s:
+                span_s = hi_s - lo_s
+                if span_s <= 0:
+                    return lo_a
+                ratio = (src_pos - lo_s) / span_s
+                return lo_a + int(ratio * (hi_a - lo_a))
+            lo_s, lo_a = hi_s, hi_a
+        return len(asr) - 1 if asr else 0
+
+    return index_of
 
 
 def _redistribute_collided_cues(cues: list[Cue]) -> list[Cue]:

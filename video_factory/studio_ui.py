@@ -278,6 +278,14 @@ function updateTtsWarn() {
 }
 
 function renderAdvanced(meta) {
+  // BGM 下拉：项目根 music/ 目录下的音频（2026-07-16 用户定案，替代手填路径）。
+  const bgmSel = h('#f_bgm');
+  const musicFiles = meta.music_files || [];
+  bgmSel.innerHTML = '<option value="">无背景音乐</option>' +
+    musicFiles.map(f => `<option value="${esc(f.path)}">${esc(f.name)}</option>`).join('');
+  if (!musicFiles.length) {
+    bgmSel.innerHTML += '<option value="" disabled>（music/ 目录为空，放入 mp3/wav 后刷新）</option>';
+  }
   h('#f_aspect').innerHTML = meta.aspects.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
   const FIT_LABELS = { pad: '补黑边（pad·保内容全）', crop: '放大裁满（crop·可能裁掉边缘）', blur: '模糊背景填充（blur·竖屏推荐）' };
   h('#f_fit').innerHTML = meta.fits.map(f => `<option value="${esc(f)}">${esc(FIT_LABELS[f] || f)}</option>`).join('');
@@ -888,10 +896,10 @@ def _body() -> str:
           <label>音色（voice，留空用默认）</label>
           <input type="text" id="f_voice" placeholder="留空自动用引擎默认音色">
           <label>配音语速</label>
-          <input type="number" id="f_voice_speed" min="0.5" max="2.0" step="0.1" placeholder="留空=默认语速">
+          <input type="number" id="f_voice_speed" min="0.5" max="2.0" step="0.1" placeholder="留空=默认 1.1×">
           <p class="desc" style="margin-top:6px">1.0=原速，0.5~2.0；改语速后分镜/字幕自动跟随。</p>
           <label>背景音乐（BGM 路径，可选）</label>
-          <input type="text" id="f_bgm" placeholder="粘贴本机 BGM 路径">
+          <select id="f_bgm"><option value="">无背景音乐</option></select>
           <label>BGM 音量</label>
           <div class="range-wrap"><input type="range" id="f_bgmvol" min="0.05" max="0.4" step="0.01" value="0.2"><span class="range-val" id="bgmVolVal">0.2</span></div>
         </div>

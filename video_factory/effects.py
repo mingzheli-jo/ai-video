@@ -107,7 +107,12 @@ DENSITY_VACUUM_S = 20.0    # 间隔 > 20s → 补填一个规则抽取的 keywor
 
 # 开屏钩子序列（2026-07-15 用户点名，替代已退役的冷开场黑卡）：透明叠层在画面上、
 # start=0，2~3 条 LLM 钩子短句逐条弹入。时长 min(5s, 首节×0.9)，避免盖过正片开头。
+# 2026-07-16 修"开屏一闪而过"：单句短钩子会让首节只有 1~2s、开屏被压到 1.37s。
+# 开屏是透明叠层、可越节展示，时长下限 2.5s；timeline 命中时以"盖住 hook 口播
+# 终点 + 尾留白"为准（仍封顶 5s）。
 HOOK_OPENER_MAX_DURATION = 5.0
+HOOK_OPENER_MIN_DURATION = 2.5
+HOOK_OPENER_TAIL = 1.0           # hook 口播说完后的尾部留白（秒）
 HOOK_OPENER_FIRST_SECTION_RATIO = 0.9
 HOOK_OPENER_MAX_LINES = 3        # 最多 3 行钩子短句
 
@@ -313,17 +318,48 @@ def _find_timeline_sentence(timeline: list[dict] | None, text: str) -> dict | No
     return None
 
 
+# 强特征 token：数字短语（90%、5000、1506 等）。引号词由 _KEYWORD_QUOTE_RE 提取。
+_TOKEN_NUM_RE = re.compile(r"\d+(?:\.\d+)?%?")
+
+
+def _find_timeline_sentence_fuzzy(timeline: list[dict] | None, text: str) -> dict | None:
+    """全文包含匹配失败时，用 text 里的强特征 token（数字/「」引号词）二次锚定。
+
+    LLM 的 emphasis 常是口播的转述（"有句话说"vs"有句话讲"一字之差，2026-07-16
+    实锤 studio_0716_113911 金句因此早了 5.7s）：全文匹配整句失手，但数字与引号词
+    几乎不会被转述改写、全片唯一性也高。仅当 token 恰好命中一个句子才认，
+    多个命中即放弃（宁缺勿滥）。
+    """
+    sentence = _find_timeline_sentence(timeline, text)
+    if sentence is not None or not timeline:
+        return sentence
+    tokens = _TOKEN_NUM_RE.findall(text or "") + _KEYWORD_QUOTE_RE.findall(text or "")
+    for token in tokens:
+        norm_token = _normalize_for_match(token)
+        if not norm_token:
+            continue
+        hits = [
+            s for s in timeline
+            if norm_token in _normalize_for_match(s.get("text"))
+        ]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def _hook_offsets_from_timeline(
     lines: list[str], timeline: list[dict] | None, duration: float
-) -> list[float] | None:
+) -> tuple[list[float], float] | None:
     """逐行在 timeline 顺序匹配句子（从头消费防重复），命中取句 start 作 offset。
 
     任一行找不到匹配返回 None（调用方整体回落字符占比估算）。offset 相对开屏（start=0），
-    钳位到 [0, duration - 末行最短停留]。
+    钳位到 [0, duration - 末行最短停留]。返回 (offsets, hook 口播终点秒)——终点供
+    调用方把开屏时长拉到"盖住整段 hook 口播"（2026-07-16 修开屏一闪而过）。
     """
     if not timeline:
         return None
     offsets: list[float] = []
+    speech_end = 0.0
     cursor = 0
     for line in lines:
         norm_line = _normalize_for_match(line)
@@ -337,8 +373,9 @@ def _hook_offsets_from_timeline(
         if matched is None:
             return None
         start = float(matched.get("start") or 0.0)
+        speech_end = max(speech_end, float(matched.get("end") or 0.0))
         offsets.append(round(min(max(0.0, start), max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
-    return offsets
+    return offsets, speech_end
 
 
 def _build_opener(
@@ -358,10 +395,25 @@ def _build_opener(
         )
         if duration <= 0:
             duration = HOOK_OPENER_MAX_DURATION
-        # 有 timeline：逐行在真实句子起止时间上取 offset（本期核心——不再靠字符占比估算）。
+        # 单句短钩子首节可能只有 1~2s：开屏是透明叠层、可越节展示，托底 2.5s
+        # 不再一闪而过（2026-07-16 修复）。
+        duration = max(duration, HOOK_OPENER_MIN_DURATION)
+        # 有 timeline：逐行在真实句子起止时间上取 offset（不再靠字符占比估算），
+        # 并把时长拉到"盖住 hook 口播终点 + 尾留白"（仍封顶 5s）。
         # 任一行没匹配上 → 整体回落字符占比估算（口播占满首节，近匀速，误差可忽略）。
-        offsets = _hook_offsets_from_timeline(lines, timeline, duration)
-        if offsets is None:
+        matched = _hook_offsets_from_timeline(lines, timeline, HOOK_OPENER_MAX_DURATION)
+        if matched is not None:
+            offsets, speech_end = matched
+            duration = min(
+                HOOK_OPENER_MAX_DURATION,
+                max(duration, speech_end + HOOK_OPENER_TAIL),
+            )
+            # 用最终时长复钳位（匹配时用上限做的基准）。
+            offsets = [
+                round(min(o, max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3)
+                for o in offsets
+            ]
+        else:
             speech_span = first_duration if first_duration > 0 else duration
             offsets = _char_ratio_offsets(lines, speech_span, duration)
         return _frame_aligned(
@@ -654,10 +706,13 @@ def _derive_golden_events(
         golden_texts = golden_texts[:3]
         n = len(golden_texts)
         for idx, text in enumerate(golden_texts):
-            sentence = _find_timeline_sentence(timeline, text)
+            # 转述容错：全文匹配 → 数字/引号词二次锚定（2026-07-16 修金句早 5.7s）。
+            sentence = _find_timeline_sentence_fuzzy(timeline, text)
             if sentence is not None:
                 events.append((float(sentence.get("start") or 0.0), text))
-            else:
+            elif not timeline:
+                # 无主时间轴（旧链路）才允许均匀分布估算；有 timeline 却对不上的
+                # 一律丢弃——估算落点的"突兀特效"已被用户多次点名（宁缺勿滥）。
                 offset = (idx + 1) / (n + 1) * sec_dur
                 events.append((sec_start + offset, text))
     return events
@@ -674,13 +729,18 @@ def _build_golden_lines(
 
     有 timeline 命中：duration = min(该句时长 + 尾留白, 4.5)，行内 offsets 按字符占比
     分摊到句时长；无 timeline：回落 GOLDEN_CARD_DURATION 时长与同款分摊。
+    命中时屏幕文字用**口播原句**而非 LLM 转述（2026-07-16：所见即所听，
+    "有句话说"vs"有句话讲"的转述差异不再上屏）。
     """
-    sentence = _find_timeline_sentence(timeline, text)
+    sentence = _find_timeline_sentence_fuzzy(timeline, text)
     if sentence is not None:
         span = max(0.0, float(sentence.get("end") or 0.0) - float(sentence.get("start") or 0.0))
         duration = min(span + GOLDEN_LINES_TAIL, GOLDEN_LINES_MAX_DURATION)
         if duration <= 0:
             duration = GOLDEN_CARD_DURATION
+        spoken = str(sentence.get("text") or "").strip()
+        if spoken:
+            text = spoken
     else:
         span = GOLDEN_CARD_DURATION
         duration = GOLDEN_CARD_DURATION

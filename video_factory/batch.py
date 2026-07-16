@@ -33,6 +33,9 @@ DEFAULT_DURATION = 90
 DEFAULT_SUBTITLES = False
 DEFAULT_EFFECTS = True
 DEFAULT_TTS = "doubao"
+# 配音语速默认 1.1×（2026-07-16 用户定案：略快于原速更有网感）。显式语速由 TTS
+# 侧直接合成，跳过 atempo 时长闭环——变长拍链路以实际音频为主时间轴，无碍。
+DEFAULT_VOICE_SPEED = 1.1
 
 # 合法取值集合（画幅/填充来自 assemble 的权威常量，避免拼写漂移）。
 VALID_ASPECTS = frozenset(ASPECT_PRESETS.keys())
@@ -175,7 +178,11 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         sfx_volume=raw.get("sfx_volume"),
         ambient_particles=bool(raw.get("ambient_particles") or False),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
-        voice_speed=float(raw["voice_speed"]) if raw.get("voice_speed") not in (None, "") else None,
+        voice_speed=(
+            float(raw["voice_speed"])
+            if raw.get("voice_speed") not in (None, "")
+            else DEFAULT_VOICE_SPEED
+        ),
     )
 
 

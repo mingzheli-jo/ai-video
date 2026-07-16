@@ -68,12 +68,6 @@ export const HookOpener: React.FC<HookOpenerProps> = ({ lines, offsets, accent }
           const y = interpolate(enter, [0, 1], [70 * s, 0]);
           const scale = interpolate(enter, [0, 1], [0.75, 1]);
           const color = HOOK_LINE_COLORS[i % HOOK_LINE_COLORS.length];
-          // 阴影脉冲（借鉴 Remotion 官网"阴影脉冲"）：文字入场后，同色发光的模糊半径按
-          // 正弦呼吸，让开屏大字"活"起来更抓眼。用 enter 系数把辉光随弹入渐显，避免文字
-          // 还没出现就先发光；~0.8Hz 一次呼吸，节奏舒缓不抢戏。
-          const glowPhase = Math.max(0, frame - enterFrame) / fps;
-          const glowPulse = 0.5 + 0.5 * Math.sin(glowPhase * Math.PI * 1.6);
-          const glow = (10 * s + 20 * s * glowPulse) * Math.min(1, enter * 1.4);
           return (
             <div
               key={i}
@@ -86,7 +80,8 @@ export const HookOpener: React.FC<HookOpenerProps> = ({ lines, offsets, accent }
                 letterSpacing: 3 * s,
                 WebkitTextStroke: `${stroke}px ${STROKE_COLOR}`,
                 paintOrder: "stroke fill",
-                textShadow: `0 0 ${glow}px ${color}, 0 ${5 * s}px ${30 * s}px rgba(0,0,0,0.55)`,
+                // 阴影脉冲辉光已退役（2026-07-16 用户点名取消首屏发光）：只留深色投影撑对比。
+                textShadow: `0 ${5 * s}px ${30 * s}px rgba(0,0,0,0.55)`,
                 textAlign: "center",
                 whiteSpace: "nowrap",
               }}

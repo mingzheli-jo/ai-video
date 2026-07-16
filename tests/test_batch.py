@@ -937,10 +937,11 @@ def test_run_job_clears_stale_stage_errors(tmp_path, patch_runners):
 
 def test_voice_speed_resolves_validates_and_routes(tmp_path):
     source, assets = _make_valid_paths(tmp_path)
-    # 未设 → None，不进 argv
+    # 未设 → 默认 1.1（2026-07-16 用户定案），照常进 argv
     plain = resolve_job({"source": source, "assets": assets}, 0)
-    assert plain.voice_speed is None
-    assert "--voice-speed" not in build_assemble_argv(plain, tmp_path / "o")
+    assert plain.voice_speed == pytest.approx(1.1)
+    asm_plain = build_assemble_argv(plain, tmp_path / "o")
+    assert asm_plain[asm_plain.index("--voice-speed") + 1] == "1.1"
     # 设了 → float 化、过校验、进 assemble argv
     job = resolve_job({"source": source, "assets": assets, "voice_speed": "1.2"}, 0)
     assert job.voice_speed == 1.2

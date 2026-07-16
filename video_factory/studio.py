@@ -96,6 +96,24 @@ def _persona_summary(persona: str) -> str:
     return (text[:40] + "…") if len(text) > 40 else text
 
 
+_MUSIC_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+
+
+def _list_music_files() -> list[dict]:
+    """项目根 music/ 目录下的 BGM 候选（表单下拉用，2026-07-16 用户定案）。
+
+    目录不存在/为空返回空列表；路径给绝对路径，assemble 直接可用。
+    """
+    music_dir = Path(__file__).resolve().parent.parent / "music"
+    if not music_dir.is_dir():
+        return []
+    return [
+        {"name": p.name, "path": str(p.resolve())}
+        for p in sorted(music_dir.iterdir(), key=lambda x: x.name.lower())
+        if p.is_file() and p.suffix.lower() in _MUSIC_EXTS
+    ]
+
+
 def build_meta() -> dict:
     """/api/meta：平台预设、风格、画幅/填充、TTS、默认音色、凭据与依赖布尔。"""
     platforms = {
@@ -128,6 +146,8 @@ def build_meta() -> dict:
         "voice_defaults": dict(VOICE_DEFAULTS),
         "credentials": _credential_flags(),
         "dependencies": _dependency_flags(),
+        # BGM 下拉候选：项目根 music/ 目录下的音频文件。
+        "music_files": _list_music_files(),
         # 生图风格提示词：当前生效值 + 内置默认（UI 用于回显与"恢复默认"提示）。
         "image_style_prompt": get_style_prompt(),
         "image_style_prompt_default": DEFAULT_STYLE_PROMPT,

@@ -1163,3 +1163,34 @@ def test_render_ass_karaoke_escapes_special_chars_per_char():
     ass = render_ass([Cue(0, 1, "a{b}c")], 1920, 1080, karaoke=True)
     dialogue = next(l for l in ass.splitlines() if l.startswith("Dialogue:"))
     assert "\\{" in dialogue and "\\}" in dialogue
+
+
+# ---- 2026-07-16 对齐锚定回归：TTS 数字展开不再让漂移跨句累积 ----
+
+
+def test_align_number_expansion_does_not_shift_later_sentences():
+    # 原稿"90%"被 TTS 念成"百分之九十"（ASR 侧字符膨胀）。旧的全局占比映射会把
+    # 膨胀点之后所有句子的时间往后推；新的分块锚定把误差锁在膨胀句内部：
+    # 第三句必须仍然精确落在自己的 ASR 分段起点 6.0s。
+    sentences = ["前面的话", "有90%的人", "后面的话"]
+    asr = [
+        (0.0, 2.0, "前面的话"),
+        (2.0, 6.0, "有百分之九十的人"),
+        (6.0, 8.0, "后面的话"),
+    ]
+    cues = build_cue_timeline_align(sentences, asr)
+    assert cues[0].start == pytest.approx(0.0, abs=0.05)
+    assert cues[1].start == pytest.approx(2.0, abs=0.05)
+    assert cues[2].start == pytest.approx(6.0, abs=0.10)
+    assert cues[2].end == pytest.approx(8.0, abs=0.10)
+
+
+def test_align_identical_text_maps_exactly():
+    # 原稿与 ASR 完全一致时逐字符一一对应：每句起止 = 各自分段起止。
+    sentences = ["第一句话", "第二句话"]
+    asr = [(0.0, 3.0, "第一句话"), (3.0, 7.0, "第二句话")]
+    cues = build_cue_timeline_align(sentences, asr)
+    assert cues[0].start == pytest.approx(0.0, abs=0.01)
+    assert cues[0].end == pytest.approx(3.0, abs=0.01)
+    assert cues[1].start == pytest.approx(3.0, abs=0.01)
+    assert cues[1].end == pytest.approx(7.0, abs=0.01)
