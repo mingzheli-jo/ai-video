@@ -650,3 +650,26 @@ def test_upload_truncated_stream_rejected_and_partial_deleted(server):
     # 半截文件必须被清掉
     partial = server["output_root"] / "studio" / "uploads" / "source" / "broken.mp4"
     assert not partial.exists()
+
+
+# ---------- 风格提示词透明化 + 批量表单统一（2026-07-17） ----------
+
+def test_meta_styles_carry_full_prompt(server):
+    _, meta = _json(server["port"], "GET", "/api/meta")
+    for s in meta["styles"]:
+        # 每个风格下发真实组装的完整 system prompt（含硬性要求与 JSON 格式约束）
+        assert "硬性要求" in s["prompt"]
+        assert "publish_titles" in s["prompt"]
+
+
+def test_page_has_style_prompt_button_and_unified_batch_form():
+    from video_factory import studio_ui
+
+    html = studio_ui.render_page()
+    # 风格卡"提示词"按钮 + 弹窗
+    assert "btn-style-prompt" in html
+    assert 'id="promptModal"' in html
+    # 批量表单：平台预设残留清除，画幅二选 + 双画幅开关 + BGM 下拉对齐单任务口径
+    assert "跟随平台预设" not in html
+    assert "BATCH_ASPECT_OPTS" in html
+    assert html.count("双画幅都出") >= 2  # 单任务表单 + 批量行各一处

@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 from video_factory import batch, credentials_store, settings_store, studio_ui
 from video_factory.image_gen import DEFAULT_STYLE_PROMPT, get_style_prompt
-from video_factory.rewrite import get_rewrite_style_prompt
+from video_factory.rewrite import build_rewrite_prompts, get_rewrite_style_prompt
 from video_factory.subtitles import (
     SUBTITLE_FONT_OPTIONS,
     get_subtitle_font_name,
@@ -135,6 +135,9 @@ def build_meta() -> dict:
             "label": s.label,
             "tts_hint": s.tts_hint,
             "persona": _persona_summary(s.persona),
+            # 内置提示词透明化（2026-07-17 用户点名去黑盒）：下发该风格真实组装的
+            # 完整 system prompt（含用户自定义全局指令），前端"提示词"按钮原文展示。
+            "prompt": build_rewrite_prompts("", style=s.key)[0],
         }
         for s in STYLES.values()
     ]

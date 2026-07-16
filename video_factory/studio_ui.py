@@ -96,6 +96,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--gold); box-shado
 .style-card {
   border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; cursor: pointer;
   background: var(--panel-2); transition: all .14s ease;
+  display: flex; flex-direction: column; align-items: flex-start;
 }
 .style-card:hover { border-color: var(--gold-dim); }
 .style-card.active { border-color: var(--gold); background: #2b2820; }
@@ -264,12 +265,28 @@ function selectAspect(value) {
 function renderStyles(styles) {
   const wrap = h('#styleGrid');
   wrap.innerHTML = styles.map(s =>
-    `<div class="style-card" data-style="${esc(s.key)}"><strong>${esc(s.label)}</strong><span>${esc(s.tts_hint)}</span></div>`).join('');
+    `<div class="style-card" data-style="${esc(s.key)}"><strong>${esc(s.label)}</strong><span>${esc(s.tts_hint)}</span>` +
+    `<button type="button" class="btn btn-ghost btn-style-prompt" data-prompt-style="${esc(s.key)}" style="margin-top:8px;align-self:flex-start;font-size:11px;padding:2px 10px">提示词</button></div>`).join('');
   wrap.querySelectorAll('.style-card').forEach(c => c.addEventListener('click', () => {
     S.style = c.dataset.style;
     wrap.querySelectorAll('.style-card').forEach(x => x.classList.toggle('active', x === c));
   }));
+  // 提示词按钮（2026-07-17 用户点名去黑盒）：查看该风格真实下发给 LLM 的完整提示词。
+  // stopPropagation 防止点按钮误选中风格卡。
+  wrap.querySelectorAll('.btn-style-prompt').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openStylePrompt(b.dataset.promptStyle);
+  }));
 }
+
+function openStylePrompt(key) {
+  const s = (S.meta.styles || []).find(x => x.key === key);
+  if (!s) return;
+  h('#promptModalTitle').textContent = `「${s.label}」内置提示词（实际下发给写稿 AI 的完整 system prompt）`;
+  h('#promptModalBody').textContent = s.prompt || '（该风格未下发提示词）';
+  h('#promptModal').style.display = 'flex';
+}
+function closeStylePrompt() { h('#promptModal').style.display = 'none'; }
 
 function renderTtsProviders(meta) {
   const sel = h('#f_tts');
@@ -627,8 +644,11 @@ async function refreshTasks() {
 function copyText(txt) { navigator.clipboard && navigator.clipboard.writeText(txt); }
 
 // ----- 批量：表单化任务清单（不再手写 JSON）-----
-// 三态开关：空=跟随平台预设、on=开、off=关。留空的高级字段一律不下发，交后端套平台预设。
-const BATCH_TOGGLE_OPTS = [['', '跟随平台预设'], ['on', '开'], ['off', '关']];
+// 三态开关：空=默认（后端全默认开，2026-07-16 定案）、on=开、off=关。
+// 平台预设已退役（2026-07-17 清理历史残留）：批量行与单任务表单口径统一。
+const BATCH_TOGGLE_OPTS = [['', '默认（开）'], ['on', '开'], ['off', '关']];
+// 画幅二选（与单任务表单同款）：值 → 自动联动的填充方式。
+const BATCH_ASPECT_OPTS = [['9:16', '9:16 竖屏'], ['16:9', '16:9 横屏']];
 
 function newGroup() { return 'bg' + Date.now() + Math.random().toString(36).slice(2, 6); }
 
@@ -636,9 +656,10 @@ const VISUAL_OPTS = [['video', '视频素材'], ['ai_image', 'AI 生图（豆包
 
 function blankBatchJob() {
   const tts = (S.meta && S.meta.tts_providers && S.meta.tts_providers[0]) || 'doubao';
-  return { name: '', platform: '', style: '', source: '', assets: '', brief: '', tts,
-    voice: '', bgm: '', duration: '', aspect: '', fit: '', subtitles: '', effects: '',
-    sfx: '', lower_thirds: false, visual_source: 'video', _grp: newGroup() };
+  return { name: '', style: '', source: '', assets: '', brief: '', tts,
+    voice: '', bgm: '', duration: '', aspect: '9:16', dual_aspect: false,
+    subtitles: '', effects: '', sfx: '', ambient: '',
+    lower_thirds: false, visual_source: 'video', _grp: newGroup() };
 }
 
 function addBatchJob(seed) {
@@ -667,11 +688,11 @@ function optionsHtml(list, sel) {
 
 function renderBatchJobs() {
   const meta = S.meta || {};
-  const platforms = meta.platforms ? Object.keys(meta.platforms) : [];
   const styles = meta.styles || [];
   const tts = meta.tts_providers || [];
-  const aspects = meta.aspects || [];
-  const fits = meta.fits || [];
+  const musicFiles = meta.music_files || [];
+  const bgmOptions = (sel) => '<option value="">无背景音乐</option>' +
+    musicFiles.map(f => `<option value="${esc(f.path)}"${f.path === sel ? ' selected' : ''}>${esc(f.name)}</option>`).join('');
   h('#batchJobs').innerHTML = S.batchJobs.map((j, i) => `
     <div class="batch-job" data-idx="${i}">
       <div class="bj-head">
@@ -683,10 +704,11 @@ function renderBatchJobs() {
       </div>
       <div class="bj-grid">
         <div><label>任务名（可选）</label><input type="text" data-idx="${i}" data-f="name" value="${esc(j.name)}" placeholder="留空自动命名"></div>
-        <div><label>平台</label><select data-idx="${i}" data-f="platform"><option value="">自定义 / 不指定</option>${platforms.map(k => `<option value="${esc(k)}"${k === j.platform ? ' selected' : ''}>${esc(meta.platforms[k].label)}</option>`).join('')}</select></div>
+        <div><label>画幅</label><select data-idx="${i}" data-f="aspect">${optionsHtml(BATCH_ASPECT_OPTS, j.aspect || '9:16')}</select></div>
         <div><label>文案风格</label><select data-idx="${i}" data-f="style"><option value="">不指定</option>${styles.map(s => `<option value="${esc(s.key)}"${s.key === j.style ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}</select></div>
         <div><label>配音引擎</label><select data-idx="${i}" data-f="tts">${tts.map(p => `<option value="${esc(p)}"${p === j.tts ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
       </div>
+      <div class="switch-row" style="margin-top:8px"><span>双画幅都出（9:16 + 16:9 各自原生配图，耗时/生图费约 ×2）</span><label class="switch"><input type="checkbox" data-idx="${i}" data-f="dual_aspect"${j.dual_aspect ? ' checked' : ''}><span class="slider"></span></label></div>
       <label>视觉来源</label>
       <select data-idx="${i}" data-f="visual_source">${VISUAL_OPTS.map(([v, l]) => `<option value="${v}"${v === (j.visual_source || 'video') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <label>原片 / 字幕 / 文本（source）</label>
@@ -696,18 +718,17 @@ function renderBatchJobs() {
       <label>创作简报（brief，可选）</label>
       <textarea data-idx="${i}" data-f="brief" placeholder="目标人群、重点、禁忌等">${esc(j.brief)}</textarea>
       <details class="bj-adv">
-        <summary>高级：时长 / 音色 / BGM / 画幅 / 字幕特效开关（留空跟随平台预设）</summary>
+        <summary>高级：时长 / 音色 / BGM / 字幕特效开关（留空即默认，与单任务口径一致）</summary>
         <div class="bj-grid">
-          <div><label>时长（秒）</label><input type="number" min="1" data-idx="${i}" data-f="duration" value="${esc(j.duration)}" placeholder="平台预设"></div>
+          <div><label>时长（秒）</label><input type="number" min="1" data-idx="${i}" data-f="duration" value="${esc(j.duration)}" placeholder="默认 90"></div>
           <div><label>音色（voice）</label><input type="text" data-idx="${i}" data-f="voice" value="${esc(j.voice)}" placeholder="默认音色"></div>
-          <div><label>画幅（aspect）</label><select data-idx="${i}" data-f="aspect"><option value="">跟随平台预设</option>${optionsHtml(aspects, j.aspect)}</select></div>
-          <div><label>填充方式（fit）</label><select data-idx="${i}" data-f="fit"><option value="">跟随平台预设</option>${optionsHtml(fits, j.fit)}</select></div>
           <div><label>字幕</label><select data-idx="${i}" data-f="subtitles">${optionsHtml(BATCH_TOGGLE_OPTS, j.subtitles)}</select></div>
           <div><label>特效</label><select data-idx="${i}" data-f="effects">${optionsHtml(BATCH_TOGGLE_OPTS, j.effects)}</select></div>
           <div><label>特效音</label><select data-idx="${i}" data-f="sfx">${optionsHtml(BATCH_TOGGLE_OPTS, j.sfx)}</select></div>
+          <div><label>氛围粒子</label><select data-idx="${i}" data-f="ambient">${optionsHtml(BATCH_TOGGLE_OPTS, j.ambient)}</select></div>
         </div>
-        <label>背景音乐（BGM 路径，可选）</label>
-        <input type="text" data-idx="${i}" data-f="bgm" value="${esc(j.bgm)}" placeholder="粘贴本机 BGM 路径">
+        <label>背景音乐（music/ 目录下拉选择）</label>
+        <select data-idx="${i}" data-f="bgm">${bgmOptions(j.bgm)}</select>
         <div class="switch-row" style="margin-top:10px"><span>底部花字条（每节小标题横条）</span><label class="switch"><input type="checkbox" data-idx="${i}" data-f="lower_thirds"${j.lower_thirds ? ' checked' : ''}><span class="slider"></span></label></div>
       </details>
     </div>`).join('');
@@ -744,7 +765,6 @@ function collectBatchJobs() {
     const o = {};
     const put = (k, v) => { if (v !== '' && v != null) o[k] = v; };
     put('name', (j.name || '').trim());
-    if (j.platform) o.platform = j.platform;
     if (j.style) o.style = j.style;
     put('source', (j.source || '').trim());
     put('assets', (j.assets || '').trim());
@@ -753,11 +773,15 @@ function collectBatchJobs() {
     put('voice', (j.voice || '').trim());
     put('bgm', (j.bgm || '').trim());
     put('duration', ('' + (j.duration || '')).trim());
-    if (j.aspect) o.aspect = j.aspect;
-    if (j.fit) o.fit = j.fit;
+    // 画幅二选 + 自动联动填充（与单任务表单同款：竖屏模糊填充、横屏补边）
+    const aspect = j.aspect || '9:16';
+    o.aspect = aspect;
+    o.fit = aspect === '9:16' ? 'blur' : 'pad';
+    if (j.dual_aspect) o.dual_aspect = true;
     if (j.subtitles === 'on') o.subtitles = true; else if (j.subtitles === 'off') o.subtitles = false;
     if (j.effects === 'on') o.effects = true; else if (j.effects === 'off') o.effects = false;
     if (j.sfx === 'on') o.sfx = true; else if (j.sfx === 'off') o.sfx = false;
+    if (j.ambient === 'on') o.ambient_particles = true; else if (j.ambient === 'off') o.ambient_particles = false;
     if (j.lower_thirds) o.lower_thirds = true;
     if (j.visual_source === 'ai_image') o.visual_source = 'ai_image';
     return o;
@@ -913,6 +937,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // 文案对比弹窗：点 × 或遮罩空白处关闭（点框体内部不关）。
   h('#compareClose').addEventListener('click', closeCompare);
   h('#compareModal').addEventListener('click', e => { if (e.target === h('#compareModal')) closeCompare(); });
+  h('#promptClose').addEventListener('click', closeStylePrompt);
+  h('#promptModal').addEventListener('click', e => { if (e.target === h('#promptModal')) closeStylePrompt(); });
   // 批量清单用事件委托：字段编辑只改数据不重渲染（不丢焦点/光标），增删复制才重渲染。
   // 严禁把用户数据插进内联 onclick（HTML 实体在进 JS 前已解码，esc() 防不住该上下文）。
   const bwrap = h('#batchJobs');
@@ -1122,6 +1148,17 @@ def _body() -> str:
         <div class="compare-col"><h3>原视频文案</h3><div class="compare-content" id="compareSource"></div></div>
         <div class="compare-col"><h3>AI 改写稿</h3><div class="compare-content" id="compareRewrite"></div></div>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="promptModal" style="display:none">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span class="modal-title" id="promptModalTitle">内置提示词</span>
+        <button type="button" class="modal-close" id="promptClose" aria-label="关闭">×</button>
+      </div>
+      <pre id="promptModalBody" style="white-space:pre-wrap;max-height:64vh;overflow:auto;padding:14px 16px;background:#101014;border-radius:10px;font-size:12.5px;line-height:1.8"></pre>
+      <p class="desc" style="margin-top:8px">想统一调整所有风格的口吻？去「设置」页的「改写文风指令」加一条全局指令（会追加在上面提示词末尾，冲突时以你的为准）。</p>
     </div>
   </div>
 """
