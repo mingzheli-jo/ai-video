@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -101,6 +102,20 @@ TYPEWRITER_MAX_DURATION = 4.5
 # 氛围粒子（2026-07-16，默认关按选题开）：只渲染一小段无缝循环，ffmpeg -stream_loop
 # 循环铺满全片——2 分钟正片只需 8s 的 ProRes 4444 粒子层，成本可控。
 AMBIENT_LOOP_SECONDS = 8.0
+
+# 首屏式同步时刻（2026-07-16 用户定案：中段特效文字必须与字幕语音对接上）：
+# 行文本、逐行弹入时刻、时长全部取自 timeline 真句——和首屏同一套对接方式。
+# 次数随片长动态：每 ~35s 一次，3 分钟约 5~6 次，封顶 6 次。
+SYNC_MOMENT_EVERY_S = 35.0
+SYNC_MOMENT_MAX_COUNT = 6
+SYNC_MOMENT_MIN_GAP = 8.0        # 相邻时刻最小间隔（秒）
+SYNC_RUN_MAX_LINES = 3           # 一个时刻最多叠 3 行（首屏同款）
+SYNC_RUN_LINE_MAX_CHARS = 14     # 并入后续句的单行字数上限（长句自己成段更清晰）
+SYNC_RUN_MAX_GAP = 0.8           # 相邻句并入的最大静默间隙（秒）
+SYNC_RUN_MAX_SPAN = 6.0          # 并入后总口播跨度上限（秒）
+SYNC_MOMENT_MAX_DURATION = 7.0   # 多句时刻的时长封顶
+SYNC_FILL_MIN_CHARS = 6          # 补填候选句的最短字数（太短没内容感）
+SYNC_FILL_MAX_CHARS = 16         # 补填候选句的最长字数（单行放得下）
 # 密度控制阈值（秒）：相邻 keyword_pop 事件最小间隔 / 真空补填触发间隔。
 DENSITY_MIN_GAP_S = 8.0    # 间隔 < 8s → 抽稀（删后出现的事件）
 DENSITY_VACUUM_S = 20.0    # 间隔 > 20s → 补填一个规则抽取的 keyword_pop
@@ -909,62 +924,202 @@ def _build_rich_effects(
     ]
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
-    # 金句开屏三行式（golden_lines，黑卡退役后的形态）：kind=golden emphasis 单独派生，
-    # 密度控制 + 保护窗口碰撞检查（沿用原 golden 的 20s 间隔/撞窗规则）。
-    # 保护窗口：开屏动效（hook_opener/intro，占 [0, opener_end]）/ 各章节卡
-    # （避免金句卡与这些固定特效叠加）。
+    # 中段时刻（2026-07-16 二次定案：**首屏式同步**）：
+    # 实锤事故 studio_0716_125928——真空补填事件带着估算时间进最终循环，行文本取自
+    # 69.68s 的真句、落点却用了 79.97s 的估算值，特效与字幕语音整整错开 10 秒。
+    # 根治规则：凡进成片的中段时刻，**起点/行文本/逐行弹入/时长全部取自 timeline
+    # 真句**（估算时间只用于候选排序，绝不落屏）；次数随片长 ceil(总长/35s) 动态
+    # 控制在 1~6 次，候选不足时从 timeline 里挑适配短句补足。
     golden_events = _derive_golden_events(sections, rewrite_sections, starts, timeline)
-    protected: list[tuple[float, float]] = [
-        (0.0, opener_end),  # 开屏动效时间窗
-    ]
-    for i in range(1, len(sections)):
-        protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
-    golden_events = _apply_golden_density_control(golden_events, protected, total_duration)
-    # 收集最终金句卡时间窗，用于后续过滤 keyword_pop
-    golden_windows: list[tuple[float, float]] = []
-    for gtime, gtext in golden_events:
-        spec = _build_golden_lines(gtext, gtime, timeline, fps, accent)
-        rich.append(spec)
-        golden_windows.append((spec.start, spec.start + spec.duration))
-
-    # 中段时刻派生（2026-07-16 用户定案，keyword_pop 彻底退役）：
-    # - "第一幕：聚会"式的标题弹词是特效乱掉的最后源头——标题不是口播内容、落点
-    #   无从对齐。规则改为**只认命中主时间轴的事件**：没找到对应口播句子的直接丢弃
-    #   （宁缺勿滥），找到的隔条轮替两种形态：
-    #   1) 金句开屏时刻（golden_lines，与首屏同样式同 spring 弹入 + 逐行"刷"）：
-    #      把真正说出的那句话按子句切行放大展示——"也放金句"；
-    #   2) 荧光笔高亮（highlight_sweep）：句子上下文浮现、金笔扫过关键词。
-    # - 避开金句卡/打字机时间窗 ±1s（中央卡片与中央大字叠一起会糊）。
-    avoid_windows = golden_windows + quote_windows
-    matched_idx = 0
-    for kw_start, keyword in keyword_events:
-        if any(ws - 1.0 <= kw_start <= we + 1.0 for ws, we in avoid_windows):
-            continue
-        sentence = _find_timeline_sentence(timeline, keyword)
-        if sentence is None:
-            continue  # 估算落点的标签弹词已退役：对不上口播的一律不出
-        matched_idx += 1
-        if matched_idx % 2 == 1:
-            # 第 1、3、5…个：金句开屏时刻，内容 = 含关键词的完整口播句。
-            spec = _build_golden_lines(
-                str(sentence.get("text") or "").strip() or keyword,
-                kw_start, timeline, fps, accent,
-            )
-            rich.append(spec)
-            avoid_windows.append((spec.start, spec.start + spec.duration))
-        else:
-            context = _clip_context(str(sentence.get("text") or ""), keyword)
-            rich.append(_frame_aligned(
-                EffectSpec(
-                    type="highlight_sweep",
-                    start=kw_start,
-                    duration=HIGHLIGHT_SWEEP_DURATION,
-                    props={"text": context, "keyword": keyword, "accent": accent},
-                ),
-                fps,
-            ))
+    if timeline:
+        rich.extend(_build_sync_layer(
+            timeline, golden_events, keyword_events,
+            opener_end, quote_windows, total_duration, fps, accent,
+        ))
+    else:
+        # 无主时间轴（旧链路兼容）：沿用金句估算 + 密度/撞窗控制；
+        # 关键词时刻无从对接语音，一律不出。
+        protected: list[tuple[float, float]] = [(0.0, opener_end)]
+        for i in range(1, len(sections)):
+            protected.append((starts[i], starts[i] + CHAPTER_CARD_DURATION))
+        golden_events = _apply_golden_density_control(golden_events, protected, total_duration)
+        for gtime, gtext in golden_events:
+            rich.append(_build_golden_lines(gtext, gtime, timeline, fps, accent))
 
     return rich
+
+
+def _sentence_index_near(timeline: list[dict], start: float, tol: float = 0.06) -> int | None:
+    """按起点时间（容差内）反查句子下标；找不到返回 None。"""
+    for i, s in enumerate(timeline):
+        if abs(float(s.get("start") or 0.0) - start) <= tol:
+            return i
+    return None
+
+
+def _build_sync_moment(
+    timeline: list[dict], idx: int, fps: int, accent: str
+) -> EffectSpec:
+    """以第 idx 句为首，构造一个首屏式同步时刻（golden_lines）。
+
+    多句成段：后续句子足够短（≤14 字）、紧邻（静默 <0.8s）、总跨度 ≤6s 时并入，
+    最多 3 行；每行弹入时刻 = 该句真实起点（特效音逐行"刷"随之对齐）。
+    首句过长或无可并句时退化为单句模式（子句拆行 + 字符占比 offsets）。
+    """
+    base = timeline[idx]
+    start = float(base.get("start") or 0.0)
+    base_text = str(base.get("text") or "").strip()
+    run = [base]
+    if len(base_text) <= SYNC_RUN_LINE_MAX_CHARS:
+        j = idx + 1
+        while len(run) < SYNC_RUN_MAX_LINES and j < len(timeline):
+            nxt = timeline[j]
+            text = str(nxt.get("text") or "").strip()
+            if not text or len(text) > SYNC_RUN_LINE_MAX_CHARS:
+                break
+            if float(nxt.get("start") or 0.0) - float(run[-1].get("end") or 0.0) > SYNC_RUN_MAX_GAP:
+                break
+            if float(nxt.get("end") or 0.0) - start > SYNC_RUN_MAX_SPAN:
+                break
+            run.append(nxt)
+            j += 1
+    if len(run) == 1:
+        return _build_golden_lines(base_text, start, timeline, fps, accent)
+    lines = [str(s.get("text") or "").strip() for s in run]
+    offsets = [round(float(s.get("start") or 0.0) - start, 3) for s in run]
+    end = float(run[-1].get("end") or 0.0)
+    duration = min(end - start + GOLDEN_LINES_TAIL, SYNC_MOMENT_MAX_DURATION)
+    return _frame_aligned(
+        EffectSpec(
+            type="golden_lines",
+            start=start,
+            duration=duration,
+            props={"lines": lines, "offsets": offsets, "accent": accent},
+        ),
+        fps,
+    )
+
+
+def _build_sync_layer(
+    timeline: list[dict],
+    golden_events: list[tuple[float, str]],
+    keyword_events: list[tuple[float, str]],
+    opener_end: float,
+    quote_windows: list[tuple[float, float]],
+    total_duration: float,
+    fps: int,
+    accent: str,
+) -> list[EffectSpec]:
+    """统一派生全部中段时刻：候选重锚真句 → 目标次数均匀选取/补填 → 成段产出。
+
+    候选优先级：0=金句 emphasis（LLM 点名的记忆点）> 1=关键词事件 > 2=补填短句。
+    关键词候选隔条轮替荧光笔高亮（也锚真句起点），其余全部是首屏式同步时刻。
+    """
+    avoid = [(0.0, opener_end)] + list(quote_windows)
+
+    def blocked(t: float) -> bool:
+        return any(ws - 1.0 <= t <= we + 1.0 for ws, we in avoid)
+
+    # 候选收集：sentence 下标 → (优先级, 关键词)。金句先到先得，关键词不覆盖金句。
+    candidates: dict[int, tuple[int, str | None]] = {}
+    for gstart, _gtext in golden_events:
+        gidx = _sentence_index_near(timeline, gstart)
+        if gidx is not None and gidx not in candidates:
+            candidates[gidx] = (0, None)
+    for _kstart, keyword in keyword_events:
+        sentence = _find_timeline_sentence(timeline, keyword)
+        if sentence is None:
+            continue  # 对不上口播的一律不出（估算时间绝不落屏）
+        kidx = _sentence_index_near(timeline, float(sentence.get("start") or 0.0))
+        if kidx is not None and kidx not in candidates:
+            candidates[kidx] = (1, keyword)
+
+    pool = [
+        (idx, prio, kw) for idx, (prio, kw) in candidates.items()
+        if not blocked(float(timeline[idx].get("start") or 0.0))
+    ]
+    target = max(1, min(SYNC_MOMENT_MAX_COUNT, math.ceil(total_duration / SYNC_MOMENT_EVERY_S)))
+
+    # 超额：按均匀理想槽位就近选取；金句候选减 2s 加权（等距时金句赢）。
+    if len(pool) > target:
+        slots = [total_duration * (k + 0.5) / target for k in range(target)]
+        chosen: list[tuple[int, int, str | None]] = []
+        taken: set[int] = set()
+        for slot in slots:
+            best = None
+            best_score = float("inf")
+            for cand in pool:
+                if cand[0] in taken:
+                    continue
+                t = float(timeline[cand[0]].get("start") or 0.0)
+                score = abs(t - slot) - (2.0 if cand[1] == 0 else 0.0)
+                if score < best_score:
+                    best, best_score = cand, score
+            if best is not None:
+                taken.add(best[0])
+                chosen.append(best)
+        pool = chosen
+
+    # 缺口：从 timeline 里补适配短句（6~16 字、不撞窗、与已选间隔 ≥8s）。
+    if len(pool) < target:
+        used = {idx for idx, _, _ in pool}
+        picked_times = [float(timeline[idx].get("start") or 0.0) for idx, _, _ in pool]
+        missing = target - len(pool)
+        slots = [total_duration * (k + 0.5) / (missing + 1) for k in range(1, missing + 1)]
+        for slot in slots:
+            best_idx = None
+            best_dist = float("inf")
+            for i, s in enumerate(timeline):
+                if i in used:
+                    continue
+                text = str(s.get("text") or "").strip()
+                if not (SYNC_FILL_MIN_CHARS <= len(text) <= SYNC_FILL_MAX_CHARS):
+                    continue
+                t = float(s.get("start") or 0.0)
+                if blocked(t):
+                    continue
+                if any(abs(t - pt) < SYNC_MOMENT_MIN_GAP for pt in picked_times):
+                    continue
+                if abs(t - slot) < best_dist:
+                    best_idx, best_dist = i, abs(t - slot)
+            if best_idx is not None:
+                used.add(best_idx)
+                picked_times.append(float(timeline[best_idx].get("start") or 0.0))
+                pool.append((best_idx, 2, None))
+
+    # 时间排序 + 最小间隔兜底（过近保留先出现的；金句优先已由选取阶段保证）。
+    pool.sort(key=lambda c: float(timeline[c[0]].get("start") or 0.0))
+    picked: list[tuple[int, int, str | None]] = []
+    for cand in pool:
+        t = float(timeline[cand[0]].get("start") or 0.0)
+        if picked and t - float(timeline[picked[-1][0]].get("start") or 0.0) < SYNC_MOMENT_MIN_GAP:
+            continue
+        picked.append(cand)
+
+    # 产出：关键词候选隔条轮替荧光笔（第 2、4…个），其余首屏式同步时刻。
+    specs: list[EffectSpec] = []
+    kw_ordinal = 0
+    for idx, prio, keyword in picked:
+        sentence = timeline[idx]
+        s_start = float(sentence.get("start") or 0.0)
+        if prio == 1 and keyword:
+            kw_ordinal += 1
+            if kw_ordinal % 2 == 0:
+                span = max(0.0, float(sentence.get("end") or 0.0) - s_start)
+                duration = min(max(span + 0.4, HIGHLIGHT_SWEEP_DURATION), 3.2)
+                context = _clip_context(str(sentence.get("text") or ""), keyword)
+                specs.append(_frame_aligned(
+                    EffectSpec(
+                        type="highlight_sweep",
+                        start=s_start,
+                        duration=duration,
+                        props={"text": context, "keyword": keyword, "accent": accent},
+                    ),
+                    fps,
+                ))
+                continue
+        specs.append(_build_sync_moment(timeline, idx, fps, accent))
+    return specs
 
 
 def _frame_aligned(spec: EffectSpec, fps: int) -> EffectSpec:

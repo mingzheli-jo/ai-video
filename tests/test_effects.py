@@ -1812,7 +1812,8 @@ def test_golden_paraphrase_rescued_by_number_token_and_shows_spoken_text():
 
 
 def test_golden_unmatched_dropped_when_timeline_present():
-    # 有主时间轴却完全对不上（无数字/引号可救）→ 丢弃，不再估算落点（宁缺勿滥）。
+    # 有主时间轴却完全对不上（无数字/引号可救）→ 该 emphasis 丢弃，转述文本绝不上屏；
+    # 补填可以另选真句成刻，但出现的时刻必须锚在真句起点、内容为口播原文。
     plan = {"sections": [
         {"index": 0, "title": "hook", "duration_seconds": 5.0},
         {"index": 1, "title": "节一", "duration_seconds": 60.0},
@@ -1823,7 +1824,11 @@ def test_golden_unmatched_dropped_when_timeline_present():
     }]}
     timeline = [{"text": "口播的真实句子", "start": 10.0, "end": 13.0}]
     manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
-    assert all(e["type"] != "golden_lines" for e in manifest["effects"])
+    for e in manifest["effects"]:
+        if e["type"] == "golden_lines":
+            assert "转述" not in "".join(e["lines"])          # 转述内容绝不上屏
+            assert e["lines"] == ["口播的真实句子"]            # 上屏 = 口播原句
+            assert e["start"] == pytest.approx(10.0, abs=1 / 30)  # 锚在真句起点
 
 
 def test_hook_opener_floor_duration_covers_short_single_clause_hook():
@@ -1839,3 +1844,49 @@ def test_hook_opener_floor_duration_covers_short_single_clause_hook():
     opener = manifest["effects"][0]
     assert opener["type"] == "hook_opener"
     assert opener["duration"] >= 2.5 - 1 / 30
+
+
+# ---- 2026-07-16 首屏式同步时刻：多句成段逐行卡语音 / 动态密度补填 ----
+
+
+def test_sync_moment_merges_consecutive_short_sentences_with_real_offsets():
+    # 3 个紧邻短句成段：行=各句原文，逐行弹入=各句真实起点差，时长盖到末句结束+尾留白。
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 5.0},
+        {"index": 1, "title": "节一", "duration_seconds": 30.0},
+    ]}
+    rewrite = {"sections": [{"narration": "先讲「心即理」的概念"}]}
+    timeline = [
+        {"text": "心即理是什么", "start": 10.0, "end": 12.0},
+        {"text": "心外无物", "start": 12.2, "end": 13.6},
+        {"text": "心外无事", "start": 13.8, "end": 15.2},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    mids = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    assert len(mids) == 1
+    m = mids[0]
+    assert m["lines"] == ["心即理是什么", "心外无物", "心外无事"]
+    assert m["start"] == pytest.approx(10.0, abs=1 / 30)
+    assert m["offsets"][0] == pytest.approx(0.0, abs=0.05)
+    assert m["offsets"][1] == pytest.approx(2.2, abs=0.05)
+    assert m["offsets"][2] == pytest.approx(3.8, abs=0.05)
+    # 时长 = 15.2-10.0+1.2 = 6.4（≤7 封顶）
+    assert m["duration"] == pytest.approx(6.4, abs=1 / 15)
+
+
+def test_sync_layer_fills_from_timeline_when_candidates_short():
+    # 无 emphasis、关键词也对不上 → 从 timeline 补适配短句（6~16 字）凑目标次数。
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 5.0},
+        {"index": 1, "title": "节一", "duration_seconds": 65.0},
+    ]}
+    timeline = [
+        {"text": "开场", "start": 0.0, "end": 4.0},           # 2 字，不够补填资格
+        {"text": "这句话足够有分量", "start": 20.0, "end": 23.0},   # 8 字 ✓
+        {"text": "这一句也可以成段", "start": 45.0, "end": 48.0},   # 8 字 ✓
+    ]
+    manifest = build_effects_manifest(plan, None, timeline=timeline)
+    mids = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
+    # 70s → 目标 ceil(70/35)=2 次，全部来自补填
+    assert len(mids) == 2
+    assert {round(m["start"], 1) for m in mids} == {20.0, 45.0}
