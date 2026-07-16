@@ -394,6 +394,7 @@ function collectForm() {
   put('sfx_volume', h('#f_sfxvol').value);
   f.lower_thirds = h('#f_lower').checked;
   f.ambient_particles = h('#f_ambient').checked;
+  f.dual_aspect = h('#f_dual').checked;
   return f;
 }
 
@@ -443,8 +444,19 @@ function renderTask(t) {
     body += `<details class="err-detail" open><summary>失败：${esc(t.stage_failed || '')} 阶段</summary><pre>${esc(t.error)}</pre></details>`;
   }
   if (t.status === 'ok' && t.final) {
-    body += `<video controls src="/media?path=${encodeURIComponent(t.final)}"></video>`;
-    body += `<div class="path-row"><code title="${esc(t.final)}">${esc(t.final)}</code><button class="btn copy-btn" data-open="${esc(t.final)}">打开文件夹</button></div>`;
+    // 双画幅（2026-07-16）：final 是主画幅成片，另一画幅从 outputs 的 _9x16/_16x9
+    // 后缀键里找，两支并排回显、各带画幅角标与"打开文件夹"。
+    const vids = [{ src: t.final, label: '' }];
+    const o = t.outputs || {};
+    [['_9x16', '9:16'], ['_16x9', '16:9']].forEach(([sfx, label]) => {
+      const v = o['subtitled' + sfx] || o['effects' + sfx] || o['release' + sfx];
+      if (v && v !== t.final) vids.push({ src: v, label });
+    });
+    vids.forEach(v => {
+      if (v.label) body += `<div class="task-meta">画幅 ${esc(v.label)}</div>`;
+      body += `<video controls src="/media?path=${encodeURIComponent(v.src)}"></video>`;
+      body += `<div class="path-row"><code title="${esc(v.src)}">${esc(v.src)}</code><button class="btn copy-btn" data-open="${esc(v.src)}">打开文件夹</button></div>`;
+    });
     const links = [];
     if (t.outputs.rewrite) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.rewrite)}" target="_blank">rewrite.json</a>`);
     if (t.outputs.assembly_plan) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.assembly_plan)}" target="_blank">assembly_plan.json</a>`);
@@ -568,6 +580,7 @@ async function openCompare(taskId) {
 function taskSig(t) {
   return [t.status, t.current_stage || '', (t.stages_done || []).join('.'),
           t.stage_failed || '', t.error || '', t.final || '',
+          Object.keys(t.outputs || {}).length,  // 双画幅第二支成片落盘时触发重渲
           (t.elapsed_seconds || 0)].join('|');
 }
 
@@ -962,6 +975,7 @@ def _body() -> str:
           <h2>画幅</h2>
           <p class="desc">竖屏 9:16（抖音/快手/视频号/小红书）或横屏 16:9（B站/西瓜），自动联动填充方式。</p>
           <div class="chips" id="aspectChips"></div>
+          <div class="switch-row" style="margin-top:10px"><span>双画幅都出（9:16 + 16:9 各自原生配图，耗时/生图费约 ×2）</span><label class="switch"><input type="checkbox" id="f_dual"><span class="slider"></span></label></div>
         </div>
 
         <div class="card">

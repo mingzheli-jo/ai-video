@@ -1085,3 +1085,99 @@ def test_validate_job_rejects_zero_byte_source(tmp_path):
     job = resolve_job({"source": str(source), "assets": str(assets)}, 0)
     errors = validate_job(job)
     assert any("空文件" in e and "重新上传" in e for e in errors)
+
+
+# ---------- 双画幅（2026-07-16 用户定案 A 方案：勾选才双出） ----------
+
+def test_dual_aspect_default_off_and_resolve(tmp_path):
+    source, assets = _make_valid_paths(tmp_path)
+    plain = resolve_job({"source": source, "assets": assets}, 0)
+    assert plain.dual_aspect is False
+    dual = resolve_job({"source": source, "assets": assets, "dual_aspect": True}, 0)
+    assert dual.dual_aspect is True
+
+
+def test_dual_aspect_stage_flow_runs_per_aspect_then_publish_once(tmp_path, patch_runners):
+    recorder = patch_runners(RunnerRecorder())
+    source, assets = _make_valid_paths(tmp_path)
+    job = resolve_job({
+        "name": "dual", "source": source, "assets": assets,
+        "aspect": "9:16", "dual_aspect": True,
+        "output": str(tmp_path / "out"),
+    }, 0)
+    report = run_job(job)
+
+    assert report.status == "ok"
+    # rewrite/voice 共享一次；assemble/effects/subtitles 按画幅各一遍；publish 收尾一次
+    assert recorder.stages == [
+        "rewrite", "voice",
+        "assemble", "effects", "subtitles",
+        "assemble", "effects", "subtitles",
+        "publish",
+    ]
+    # 两轮 assemble 的画幅：主画幅 9:16 先行，另一画幅 16:9 随后；产物落各自子目录
+    asm_argvs = [argv for stage, argv in recorder.calls if stage == "assemble"]
+    assert asm_argvs[0][asm_argvs[0].index("--aspect") + 1] == "9:16"
+    assert asm_argvs[1][asm_argvs[1].index("--aspect") + 1] == "16:9"
+    assert "9x16" in asm_argvs[0][asm_argvs[0].index("--rewrite") + 1]
+    assert "16x9" in asm_argvs[1][asm_argvs[1].index("--rewrite") + 1]
+
+
+def test_dual_aspect_seeds_shared_artifacts_into_subdirs(tmp_path, monkeypatch):
+    source, assets = _make_valid_paths(tmp_path)
+    out = tmp_path / "out"
+
+    def make_runner(stage):
+        def runner(job, job_dir):
+            if stage == "voice":
+                # voice 在根目录落共享产物
+                (job_dir / "rewrite.json").write_text("{}", encoding="utf-8")
+                (job_dir / "voiceover.wav").write_bytes(b"wav")
+                (job_dir / "timeline.json").write_text("{}", encoding="utf-8")
+            if stage == "assemble":
+                # 画幅子目录里必须已被播种共享产物（argv builder 全靠 job_dir 组路径）
+                assert (job_dir / "voiceover.wav").exists(), f"{job_dir} 缺 voiceover"
+                assert (job_dir / "timeline.json").exists()
+            return 0
+        return runner
+
+    monkeypatch.setattr(batch, "STAGE_RUNNERS", {
+        s: make_runner(s)
+        for s in ("rewrite", "voice", "image_gen", "assemble", "effects", "subtitles", "publish")
+    })
+    job = resolve_job({
+        "name": "seed", "source": source, "assets": assets,
+        "aspect": "9:16", "dual_aspect": True, "output": str(out),
+    }, 0)
+    report = run_job(job)
+    assert report.status == "ok"
+    assert (out / "9x16" / "voiceover.wav").exists()
+    assert (out / "16x9" / "voiceover.wav").exists()
+
+
+def test_dual_aspect_outputs_suffixed_and_final_prefers_primary(tmp_path):
+    from video_factory.batch import _collect_outputs, _final_output
+
+    source, assets = _make_valid_paths(tmp_path)
+    job = resolve_job({"source": source, "assets": assets, "dual_aspect": True}, 0)
+    job_dir = tmp_path / "out"
+    for d in ("9x16", "16x9"):
+        (job_dir / d).mkdir(parents=True)
+        (job_dir / d / "release_subtitled.mp4").write_bytes(b"v")
+    outputs = _collect_outputs(job, job_dir)
+    assert "subtitled_9x16" in outputs and "subtitled_16x9" in outputs
+    assert _final_output(outputs) == outputs["subtitled_9x16"]  # 竖屏优先
+
+
+def test_build_publish_argv_dual_video_from_primary_subdir(tmp_path):
+    source, assets = _make_valid_paths(tmp_path)
+    job = resolve_job({
+        "source": source, "assets": assets,
+        "aspect": "9:16", "dual_aspect": True,
+    }, 0)
+    job_dir = tmp_path / "out"
+    (job_dir / "9x16").mkdir(parents=True)
+    (job_dir / "9x16" / "release_subtitled.mp4").write_bytes(b"v")
+    argv = build_publish_argv(job, job_dir)
+    video = argv[argv.index("--video") + 1]
+    assert "9x16" in video and video.endswith("release_subtitled.mp4")

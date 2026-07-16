@@ -59,10 +59,19 @@ def _load_json(path: Path, label: str) -> dict:
 def pick_cover_background(
     job_dir: Path, video: Path | None, runner: Runner = subprocess.run
 ) -> tuple[Path | None, list[str]]:
-    """封面底图：优先生图素材首图（构图干净无字），否则从成片 3s 处抽一帧。"""
+    """封面底图：优先生图素材首图（构图干净无字），否则从成片 3s 处抽一帧。
+
+    双画幅（2026-07-16）时生图在 9x16/、16x9/ 子目录：依序找第一个非空的
+    gen_assets——两张封面共用同一底图，正好保证用户要的"封面一致、首页板正"。
+    """
     warnings: list[str] = []
-    gen_dir = job_dir / "gen_assets"
-    if gen_dir.is_dir():
+    for gen_dir in (
+        job_dir / "gen_assets",
+        job_dir / "9x16" / "gen_assets",
+        job_dir / "16x9" / "gen_assets",
+    ):
+        if not gen_dir.is_dir():
+            continue
         images = sorted(
             p for p in gen_dir.iterdir()
             if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")

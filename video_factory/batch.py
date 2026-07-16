@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -97,6 +98,10 @@ class ResolvedJob:
     sfx_volume: float | None = None
     # 氛围粒子：全片低密度金色微尘上浮加质感（2026-07-16 二次定案：默认开）。
     ambient_particles: bool = True
+    # 双画幅（2026-07-16 用户定案 A 方案）：勾选后 rewrite/voice 共享，
+    # image_gen→subtitles 按画幅在 9x16/、16x9/ 子目录各跑一遍（配图各自原生构图）。
+    # 默认关：只出所选画幅。
+    dual_aspect: bool = False
     # 配音语速（None=默认；0.5~2.0，1.0=原速）。仅对现场 TTS 生效；分镜/字幕以
     # 音频时长为轴自动跟随，无需额外字段。
     voice_speed: float | None = None
@@ -177,6 +182,7 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         sfx=bool(_pick(raw, "sfx", None, True)),
         sfx_volume=raw.get("sfx_volume"),
         ambient_particles=bool(_pick(raw, "ambient_particles", None, True)),
+        dual_aspect=bool(raw.get("dual_aspect") or False),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
         voice_speed=(
             float(raw["voice_speed"])
@@ -594,12 +600,25 @@ def _run_subtitles(job: ResolvedJob, job_dir: Path) -> int:
 
 
 def build_publish_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
-    """发布物料阶段参数：成片按最终优先级（字幕>特效>原片）作封面底图抽帧兜底。"""
+    """发布物料阶段参数：成片按最终优先级（字幕>特效>原片）作封面底图抽帧兜底。
+
+    双画幅时成片在画幅子目录：按 主画幅子目录 > 根目录 > 另一画幅子目录 的顺序找。
+    """
     argv = ["--rewrite", str(job_dir / "rewrite.json"), "--output", str(job_dir)]
+    search_dirs = [job_dir]
+    if job.dual_aspect:
+        ordered = [_ASPECT_DIRNAMES[a] for a in _dual_aspects(job.aspect)]
+        search_dirs = [job_dir / ordered[0], job_dir, job_dir / ordered[1]]
+    found = None
     for name in ("release_subtitled.mp4", "release_with_effects.mp4", "release.mp4"):
-        if (job_dir / name).exists():
-            argv += ["--video", str(job_dir / name)]
+        for base in search_dirs:
+            if (base / name).exists():
+                found = base / name
+                break
+        if found is not None:
             break
+    if found is not None:
+        argv += ["--video", str(found)]
     if job.llm:
         argv += ["--llm", job.llm]
     return argv
@@ -643,7 +662,10 @@ def _stages_for(job: ResolvedJob) -> list[str]:
 
 
 def _collect_outputs(job: ResolvedJob, job_dir: Path) -> dict[str, str]:
-    """收集本 job 已产出的关键文件路径（只收存在的，路径统一 posix 风格）。"""
+    """收集本 job 已产出的关键文件路径（只收存在的，路径统一 posix 风格）。
+
+    双画幅时成片在 9x16/、16x9/ 子目录，键加 _9x16/_16x9 后缀区分。
+    """
     candidates = {
         "rewrite": job_dir / "rewrite.json",
         "release": job_dir / "release.mp4",
@@ -654,12 +676,26 @@ def _collect_outputs(job: ResolvedJob, job_dir: Path) -> dict[str, str]:
         "cover_9x16": job_dir / "publish" / "cover_9x16.jpg",
         "publish_kit": job_dir / "publish" / "publish_kit.json",
     }
+    for dirname in _ASPECT_DIRNAMES.values():
+        sub = job_dir / dirname
+        if not sub.is_dir():
+            continue
+        for key, rel in (
+            ("release", "release.mp4"),
+            ("effects", "release_with_effects.mp4"),
+            ("subtitled", "release_subtitled.mp4"),
+        ):
+            candidates[f"{key}_{dirname}"] = sub / rel
     return {key: str(path) for key, path in candidates.items() if path.exists()}
 
 
 def _final_output(outputs: dict[str, str]) -> str:
-    """本 job 的最终成片：字幕 > 特效 > 原片，逐级回落。"""
-    for key in ("subtitled", "effects", "release"):
+    """本 job 的最终成片：字幕 > 特效 > 原片，逐级回落；双画幅时竖屏（主战场）优先。"""
+    for key in (
+        "subtitled", "subtitled_9x16", "subtitled_16x9",
+        "effects", "effects_9x16", "effects_16x9",
+        "release", "release_9x16", "release_16x9",
+    ):
         if key in outputs:
             return outputs[key]
     return ""
@@ -714,66 +750,151 @@ def _clear_stale_outputs(job_dir: Path) -> None:
     stage_report.clear_stage_errors(job_dir)
 
 
+# ---------- 双画幅（2026-07-16 用户定案 A 方案：勾选才双出，配图各自原生构图） ----------
+
+# 画幅 → 子目录名（Windows 目录名不能含冒号）。
+_ASPECT_DIRNAMES = {"9:16": "9x16", "16:9": "16x9"}
+# rewrite/voice 的共享产物：双画幅时复制进各画幅子目录，后续阶段的 argv builder
+# 全部从 job_dir 组路径，播种后无需任何改动即可在子目录里工作。
+_SHARED_ARTIFACTS = (
+    "rewrite.json",
+    "voiceover.wav",
+    "voiceover_fitted.wav",
+    "voiceover.txt",
+    "voiceover_notes.txt",
+    "timeline.json",
+)
+
+
+def _dual_aspects(primary: str) -> list[str]:
+    """双画幅的执行顺序：所选画幅优先（final 回显以它为主），另一画幅随后。"""
+    if primary not in _ASPECT_DIRNAMES:
+        primary = "9:16"
+    other = "16:9" if primary == "9:16" else "9:16"
+    return [primary, other]
+
+
+def _seed_shared_artifacts(root: Path, sub: Path) -> None:
+    """把 rewrite/voice 的共享产物复制进画幅子目录（存在才复制，覆盖旧副本）。"""
+    for name in _SHARED_ARTIFACTS:
+        src = root / name
+        if src.exists():
+            shutil.copy2(src, sub / name)
+
+
+def _execute_stage(
+    report_job: ResolvedJob,
+    exec_job: ResolvedJob,
+    exec_dir: Path,
+    stage: str,
+    on_stage: Callable[[str], None] | None,
+    started: float,
+    error_prefix: str = "",
+) -> JobReport | None:
+    """执行单个阶段：成功返回 None，失败返回构造好的 JobReport（终止本 job）。
+
+    report_job 提供报告口径（name/platform/根 outputs）；exec_job/exec_dir 是实际
+    执行口径——双画幅时 exec 指向画幅子目录的克隆 job，单画幅两者相同。
+    """
+    root_dir = Path(report_job.output)
+    if on_stage is not None:
+        try:
+            on_stage(stage)
+        except Exception:
+            # 进度回调只是旁路观察者，坏回调绝不能打断任务执行。
+            pass
+    runner = STAGE_RUNNERS[stage]
+    try:
+        code = runner(exec_job, exec_dir)
+    except SystemExit as exc:
+        # argparse 参数不合法时抛 SystemExit（不继承 Exception！），
+        # 不单独接住会击穿整批。code 0（如 --help）视作该阶段正常结束。
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code != 0:
+            return JobReport(
+                name=report_job.name,
+                status="failed",
+                platform=report_job.platform,
+                stage_failed=stage,
+                error=f"{error_prefix}{stage} 阶段参数解析失败（SystemExit {code}）：请检查 batch 组装的 argv 与该阶段 CLI 定义是否一致。",
+                outputs=_collect_outputs(report_job, root_dir),
+                elapsed_seconds=time.monotonic() - started,
+            )
+        return None
+    except Exception as exc:  # 含惰性 import 失败（如 subtitles 尚未落地）
+        return JobReport(
+            name=report_job.name,
+            status="failed",
+            platform=report_job.platform,
+            stage_failed=stage,
+            error=f"{error_prefix}{stage} 阶段异常：{exc}",
+            outputs=_collect_outputs(report_job, root_dir),
+            elapsed_seconds=time.monotonic() - started,
+        )
+    if code != 0:
+        # 阶段失败时回读它落盘的 <stage>_error.txt，把真实原因带进报告/任务看板
+        # （阶段的 print 只在服务终端可见，光给退出码用户无从排障）。
+        detail = stage_report.read_stage_error(exec_dir, stage)
+        error = f"{error_prefix}{stage} 阶段返回非 0 退出码：{code}"
+        if detail:
+            error = f"{error}——{detail}"
+        return JobReport(
+            name=report_job.name,
+            status="failed",
+            platform=report_job.platform,
+            stage_failed=stage,
+            error=error,
+            outputs=_collect_outputs(report_job, root_dir),
+            elapsed_seconds=time.monotonic() - started,
+        )
+    return None
+
+
 def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> JobReport:
     """串行执行一个 job 的各阶段；任一阶段返回非 0 或抛异常即记 failed 并停止后续阶段。
 
     on_stage（可选）在每个阶段开始执行前以阶段名回调（用于 studio 的实时进度）；
     默认 None 时行为与历史完全一致。
+
+    双画幅（dual_aspect，2026-07-16 用户定案）：rewrite/voice 在根目录共享执行一次，
+    image_gen→subtitles 按画幅在 9x16/、16x9/ 子目录各跑一遍（共享产物先播种进
+    子目录，argv builder 全部无需改动），publish 最后在根目录跑一次（封面本就双份）。
     """
     started = time.monotonic()
     job_dir = Path(job.output)
     job_dir.mkdir(parents=True, exist_ok=True)
     _clear_stale_outputs(job_dir)  # 清上一轮遗留，防早期失败误报旧成片为本次 final
-    for stage in _stages_for(job):
-        if on_stage is not None:
-            try:
-                on_stage(stage)
-            except Exception:
-                # 进度回调只是旁路观察者，坏回调绝不能打断任务执行。
-                pass
-        runner = STAGE_RUNNERS[stage]
-        try:
-            code = runner(job, job_dir)
-        except SystemExit as exc:
-            # argparse 参数不合法时抛 SystemExit（不继承 Exception！），
-            # 不单独接住会击穿整批。code 0（如 --help）视作该阶段正常结束。
-            code = exc.code if isinstance(exc.code, int) else 1
-            if code != 0:
-                return JobReport(
-                    name=job.name,
-                    status="failed",
-                    platform=job.platform,
-                    stage_failed=stage,
-                    error=f"{stage} 阶段参数解析失败（SystemExit {code}）：请检查 batch 组装的 argv 与该阶段 CLI 定义是否一致。",
-                    outputs=_collect_outputs(job, job_dir),
-                    elapsed_seconds=time.monotonic() - started,
+    stages = _stages_for(job)
+
+    if not job.dual_aspect:
+        for stage in stages:
+            report = _execute_stage(job, job, job_dir, stage, on_stage, started)
+            if report is not None:
+                return report
+    else:
+        shared = [s for s in stages if s in ("rewrite", "voice")]
+        per_aspect = [s for s in stages if s not in ("rewrite", "voice", "publish")]
+        for stage in shared:
+            report = _execute_stage(job, job, job_dir, stage, on_stage, started)
+            if report is not None:
+                return report
+        for aspect in _dual_aspects(job.aspect):
+            sub = job_dir / _ASPECT_DIRNAMES[aspect]
+            sub.mkdir(parents=True, exist_ok=True)
+            _clear_stale_outputs(sub)
+            _seed_shared_artifacts(job_dir, sub)
+            sub_job = replace(job, aspect=aspect, output=sub)
+            for stage in per_aspect:
+                report = _execute_stage(
+                    job, sub_job, sub, stage, on_stage, started,
+                    error_prefix=f"[画幅 {aspect}] ",
                 )
-        except Exception as exc:  # 含惰性 import 失败（如 subtitles 尚未落地）
-            return JobReport(
-                name=job.name,
-                status="failed",
-                platform=job.platform,
-                stage_failed=stage,
-                error=f"{stage} 阶段异常：{exc}",
-                outputs=_collect_outputs(job, job_dir),
-                elapsed_seconds=time.monotonic() - started,
-            )
-        if code != 0:
-            # 阶段失败时回读它落盘的 <stage>_error.txt，把真实原因带进报告/任务看板
-            # （阶段的 print 只在服务终端可见，光给退出码用户无从排障）。
-            detail = stage_report.read_stage_error(job_dir, stage)
-            error = f"{stage} 阶段返回非 0 退出码：{code}"
-            if detail:
-                error = f"{error}——{detail}"
-            return JobReport(
-                name=job.name,
-                status="failed",
-                platform=job.platform,
-                stage_failed=stage,
-                error=error,
-                outputs=_collect_outputs(job, job_dir),
-                elapsed_seconds=time.monotonic() - started,
-            )
+                if report is not None:
+                    return report
+        report = _execute_stage(job, job, job_dir, "publish", on_stage, started)
+        if report is not None:
+            return report
+
     return JobReport(
         name=job.name,
         status="ok",
