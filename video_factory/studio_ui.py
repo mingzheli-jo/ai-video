@@ -145,6 +145,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--gold); box-shado
 .path-row code { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
 .copy-btn { font-size: 11px; padding: 6px 10px; border-radius: 6px; }
 .links { display: flex; gap: 12px; margin-top: 8px; font-size: 12px; }
+.bgm-warn { color: var(--red); font-size: 12px; font-weight: 700; margin-top: 6px; }
+#bgmPreview { width: 100%; margin-top: 8px; height: 34px; }
 .covers { display: flex; gap: 10px; margin-top: 10px; align-items: flex-start; }
 .cover-thumb { display: block; border-radius: 8px; border: 1px solid var(--line); background: #000; }
 .cover-thumb.wide { width: 240px; }
@@ -220,10 +222,10 @@ async function loadMeta() {
   const { data } = await api('/api/meta');
   S.meta = data;
   renderCredDots(data.credentials);
-  renderPlatforms(data.platforms);
   renderStyles(data.styles);
   renderTtsProviders(data);
   renderAdvanced(data);
+  renderAspectChips();  // 依赖 renderAdvanced 先填好 f_aspect/f_fit 选项
   renderCredPage(data);
   // meta 到位后再渲染批量清单：平台/风格/画幅等下拉需要 meta 填充选项。
   if (!S.batchJobs.length) addBatchJob(); else renderBatchJobs();
@@ -235,26 +237,28 @@ function renderCredDots(creds) {
     `<span class="dot ${creds[k] ? 'on' : 'off'}" title="${esc(k)}"></span>`).join('');
 }
 
-function renderPlatforms(platforms) {
-  const wrap = h('#platformChips');
-  const keys = Object.keys(platforms);
-  let html = keys.map(k => `<div class="chip" data-plat="${esc(k)}">${esc(platforms[k].label)}</div>`).join('');
-  html += `<div class="chip" data-plat="">自定义</div>`;
-  wrap.innerHTML = html;
-  wrap.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => selectPlatform(c.dataset.plat)));
+// 画幅二选（2026-07-16 用户定案：平台预设退役——实际只有竖/横两种格式，
+// 字幕/特效等开关已全默认开，预设的其余联动价值归零）。
+const ASPECT_CHIPS = [
+  ['9:16', '9:16 竖屏', 'blur'],
+  ['16:9', '16:9 横屏', 'pad'],
+];
+
+function renderAspectChips() {
+  const wrap = h('#aspectChips');
+  wrap.innerHTML = ASPECT_CHIPS.map(([v, label]) =>
+    `<div class="chip" data-aspect="${esc(v)}">${esc(label)}</div>`).join('');
+  wrap.querySelectorAll('.chip').forEach(c =>
+    c.addEventListener('click', () => selectAspect(c.dataset.aspect)));
+  selectAspect('9:16');  // 默认竖屏（主战场）
 }
 
-function selectPlatform(key) {
-  S.platform = key;
-  document.querySelectorAll('#platformChips .chip').forEach(c => c.classList.toggle('active', c.dataset.plat === key));
-  const p = S.meta.platforms[key];
-  if (p) {
-    h('#f_aspect').value = p.aspect;
-    h('#f_fit').value = p.fit;
-    h('#f_duration').value = p.duration;
-    h('#f_subtitles').checked = p.subtitles;
-    h('#f_effects').checked = p.effects;
-  }
+function selectAspect(value) {
+  document.querySelectorAll('#aspectChips .chip').forEach(c =>
+    c.classList.toggle('active', c.dataset.aspect === value));
+  const spec = ASPECT_CHIPS.find(([v]) => v === value);
+  h('#f_aspect').value = value;
+  if (spec) h('#f_fit').value = spec[2];  // 竖屏配模糊填充，横屏配补边
 }
 
 function renderStyles(styles) {
@@ -272,6 +276,24 @@ function renderTtsProviders(meta) {
   sel.innerHTML = meta.tts_providers.map(p => `<option value="${esc(p)}">${esc(p)}（默认 ${esc(meta.voice_defaults[p] || '')}）</option>`).join('');
   sel.addEventListener('change', updateTtsWarn);
   updateTtsWarn();
+}
+
+// BGM 试听（2026-07-16）：选了歌 → 隐藏红字警示、显示可拉进度条的播放器；
+// 未选 → 红字常驻提醒"成片将没有 BGM"。音频经 /media 流式下发（已支持 Range 拖动）。
+function updateBgmPreview() {
+  const value = h('#f_bgm').value;
+  const warn = h('#bgmWarn');
+  const audio = h('#bgmPreview');
+  if (value) {
+    warn.style.display = 'none';
+    const url = '/media?path=' + encodeURIComponent(value);
+    if (audio.dataset.src !== url) { audio.src = url; audio.dataset.src = url; }
+    audio.style.display = 'block';
+  } else {
+    warn.style.display = 'block';
+    audio.pause();
+    audio.style.display = 'none';
+  }
 }
 
 function updateTtsWarn() {
@@ -292,6 +314,8 @@ function renderAdvanced(meta) {
   if (!musicFiles.length) {
     bgmSel.innerHTML += '<option value="" disabled>（music/ 目录为空，放入 mp3/wav 后刷新）</option>';
   }
+  bgmSel.addEventListener('change', updateBgmPreview);
+  updateBgmPreview();
   h('#f_aspect').innerHTML = meta.aspects.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
   const FIT_LABELS = { pad: '补黑边（pad·保内容全）', crop: '放大裁满（crop·可能裁掉边缘）', blur: '模糊背景填充（blur·竖屏推荐）' };
   h('#f_fit').innerHTML = meta.fits.map(f => `<option value="${esc(f)}">${esc(FIT_LABELS[f] || f)}</option>`).join('');
@@ -351,7 +375,7 @@ function collectForm() {
   put('source', h('#f_source').value.trim());
   put('assets', h('#f_assets').value.trim());
   put('visual_source', S.visual);
-  put('platform', S.platform);
+  // 平台预设已退役（2026-07-16）：画幅直接下发 aspect/fit，不再下发 platform。
   put('style', S.style);
   put('brief', h('#f_brief').value.trim());
   put('tts', h('#f_tts').value);
@@ -927,9 +951,9 @@ def _body() -> str:
         </div>
 
         <div class="card">
-          <h2>平台预设</h2>
-          <p class="desc">选平台自动联动画幅 / 填充 / 时长 / 字幕 / 特效，仍可在下方覆盖。</p>
-          <div class="chips" id="platformChips"></div>
+          <h2>画幅</h2>
+          <p class="desc">竖屏 9:16（抖音/快手/视频号/小红书）或横屏 16:9（B站/西瓜），自动联动填充方式。</p>
+          <div class="chips" id="aspectChips"></div>
         </div>
 
         <div class="card">
@@ -946,8 +970,10 @@ def _body() -> str:
           <label>配音语速</label>
           <input type="number" id="f_voice_speed" min="0.5" max="2.0" step="0.1" placeholder="留空=默认 1.1×">
           <p class="desc" style="margin-top:6px">1.0=原速，0.5~2.0；改语速后分镜/字幕自动跟随。</p>
-          <label>背景音乐（BGM 路径，可选）</label>
+          <label>背景音乐（music/ 目录下拉选择）</label>
           <select id="f_bgm"><option value="">无背景音乐</option></select>
+          <div id="bgmWarn" class="bgm-warn">⚠ 尚未选择背景音乐，成片将没有 BGM</div>
+          <audio id="bgmPreview" controls preload="none" style="display:none"></audio>
           <label>BGM 音量</label>
           <div class="range-wrap"><input type="range" id="f_bgmvol" min="0.05" max="0.4" step="0.01" value="0.2"><span class="range-val" id="bgmVolVal">0.2</span></div>
         </div>
@@ -967,10 +993,10 @@ def _body() -> str:
             <div><label>素材不合画幅时怎么放（fit）</label><select id="f_fit"></select></div>
           </div>
           <div style="margin-top:12px">
-            <div class="switch-row"><span>字幕</span><label class="switch"><input type="checkbox" id="f_subtitles"><span class="slider"></span></label></div>
+            <div class="switch-row"><span>字幕</span><label class="switch"><input type="checkbox" id="f_subtitles" checked><span class="slider"></span></label></div>
             <div class="switch-row"><span>特效</span><label class="switch"><input type="checkbox" id="f_effects" checked><span class="slider"></span></label></div>
             <div class="switch-row"><span>特效音（片头/章节卡/花字条音效）</span><label class="switch"><input type="checkbox" id="f_sfx" checked><span class="slider"></span></label></div>
-            <div class="switch-row"><span>氛围粒子（全片金色微尘上浮，按选题开）</span><label class="switch"><input type="checkbox" id="f_ambient"><span class="slider"></span></label></div>
+            <div class="switch-row"><span>氛围粒子（全片金色微尘上浮）</span><label class="switch"><input type="checkbox" id="f_ambient" checked><span class="slider"></span></label></div>
             <div class="switch-row"><span>底部花字条（每节小标题横条）</span><label class="switch"><input type="checkbox" id="f_lower"><span class="slider"></span></label></div>
           </div>
           <label>特效音音量</label>

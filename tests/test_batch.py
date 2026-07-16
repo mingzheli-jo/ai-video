@@ -100,8 +100,10 @@ def test_resolve_job_falls_back_to_global_defaults_without_platform(tmp_path):
     assert job.aspect == batch.DEFAULT_ASPECT == "16:9"
     assert job.fit == "pad"
     assert job.duration == 90
-    assert job.subtitles is False
+    # 2026-07-16 用户定案：字幕/氛围粒子与特效一样全默认开
+    assert job.subtitles is True
     assert job.effects is True
+    assert job.ambient_particles is True
     assert job.name == "job_03"  # index 2 → job_03
 
 
@@ -1065,8 +1067,9 @@ def test_run_image_gen_uses_timeline_beats_when_present(tmp_path, monkeypatch):
 def test_build_effects_argv_ambient_particles_flag(tmp_path):
     from video_factory.batch import build_effects_argv, resolve_job
 
-    on = resolve_job({"source": "s.mp4", "assets": "a", "ambient_particles": True}, 0)
+    # 2026-07-16 二次定案：氛围粒子默认开（缺省即带 flag），显式 False 才关。
+    on = resolve_job({"source": "s.mp4", "assets": "a"}, 0)
     assert "--ambient-particles" in build_effects_argv(on, tmp_path)
 
-    off = resolve_job({"source": "s.mp4", "assets": "a"}, 0)
+    off = resolve_job({"source": "s.mp4", "assets": "a", "ambient_particles": False}, 0)
     assert "--ambient-particles" not in build_effects_argv(off, tmp_path)

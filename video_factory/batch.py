@@ -30,7 +30,7 @@ from video_factory.rewrite_styles import STYLES
 DEFAULT_ASPECT = "16:9"
 DEFAULT_FIT = "pad"
 DEFAULT_DURATION = 90
-DEFAULT_SUBTITLES = False
+DEFAULT_SUBTITLES = True  # 2026-07-16 用户定案：字幕/特效/特效音/氛围粒子全默认开
 DEFAULT_EFFECTS = True
 DEFAULT_TTS = "doubao"
 # 配音语速默认 1.1×（2026-07-16 用户定案：略快于原速更有网感）。显式语速由 TTS
@@ -95,8 +95,8 @@ class ResolvedJob:
     # 特效音总开关（默认开：为片头/章节卡/花字条配音效）与音量（None=用 effects 默认 0.35）。
     sfx: bool = True
     sfx_volume: float | None = None
-    # 氛围粒子（2026-07-16，默认关按选题开）：全片低密度金色微尘上浮加质感。
-    ambient_particles: bool = False
+    # 氛围粒子：全片低密度金色微尘上浮加质感（2026-07-16 二次定案：默认开）。
+    ambient_particles: bool = True
     # 配音语速（None=默认；0.5~2.0，1.0=原速）。仅对现场 TTS 生效；分镜/字幕以
     # 音频时长为轴自动跟随，无需额外字段。
     voice_speed: float | None = None
@@ -176,7 +176,7 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         platform=platform,
         sfx=bool(_pick(raw, "sfx", None, True)),
         sfx_volume=raw.get("sfx_volume"),
-        ambient_particles=bool(raw.get("ambient_particles") or False),
+        ambient_particles=bool(_pick(raw, "ambient_particles", None, True)),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
         voice_speed=(
             float(raw["voice_speed"])

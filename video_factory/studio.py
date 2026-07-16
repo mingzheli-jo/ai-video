@@ -373,6 +373,21 @@ def _within_output(path: Path) -> bool:
     return resolved == root or root in resolved.parents
 
 
+def _within_music(path: Path) -> bool:
+    """BGM 试听白名单：项目根 music/ 目录树内（2026-07-16 选歌可播可拉进度）。"""
+    try:
+        resolved = path.resolve()
+        root = (Path(__file__).resolve().parent.parent / "music").resolve()
+    except OSError:
+        return False
+    return root in resolved.parents
+
+
+def _media_allowed(path: Path) -> bool:
+    """/media 可访问范围：output 产物树 + music BGM 库（试听）。"""
+    return _within_output(path) or _within_music(path)
+
+
 _MEDIA_TYPES = {
     ".mp4": "video/mp4",
     ".json": "application/json; charset=utf-8",
@@ -463,7 +478,7 @@ def make_handler(store: TaskStore):
                 return
             if parsed.path == "/media":
                 target = Path((parse_qs(parsed.query).get("path") or [""])[0])
-                if not str(target) or not _within_output(target):
+                if not str(target) or not _media_allowed(target):
                     self.send_response(HTTPStatus.FORBIDDEN)
                     self.end_headers()
                     return
@@ -494,8 +509,8 @@ def make_handler(store: TaskStore):
                 self._send_json({"error": "缺少 path 参数。"}, HTTPStatus.BAD_REQUEST)
                 return
             target = Path(raw_path)
-            if not _within_output(target):
-                self._send_json({"error": "禁止访问 output 目录之外的文件。"}, HTTPStatus.FORBIDDEN)
+            if not _media_allowed(target):
+                self._send_json({"error": "禁止访问 output/music 目录之外的文件。"}, HTTPStatus.FORBIDDEN)
                 return
             if not target.exists() or not target.is_file():
                 self._send_json({"error": "文件不存在。"}, HTTPStatus.NOT_FOUND)
@@ -506,7 +521,11 @@ def make_handler(store: TaskStore):
             ctype = _MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream")
             size = target.stat().st_size
             range_header = self.headers.get("Range", "")
-            if target.suffix.lower() == ".mp4" and range_header.startswith("bytes="):
+            # 视频 + 音频都吃 Range：BGM 试听的进度条拖动靠它（2026-07-16）。
+            if (
+                target.suffix.lower() in (".mp4", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+                and range_header.startswith("bytes=")
+            ):
                 self._serve_range(target, size, ctype, range_header)
                 return
             self.send_response(HTTPStatus.OK)
