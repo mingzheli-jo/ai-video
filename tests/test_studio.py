@@ -371,9 +371,11 @@ def test_page_copy_button_uses_data_attribute_not_inline_onclick():
     from video_factory import studio_ui
 
     html = studio_ui.render_page()
-    assert "data-copy=" in html
+    # 成片路径行已改"打开文件夹"（2026-07-16 用户点名，data-open 同款事件委托模式）
+    assert "data-open=" in html
     # 内联 onclick 注入面已移除（HTML 实体在进 JS 前已解码，esc() 防不住该上下文）
     assert 'onclick="copyText(' not in html
+    assert 'onclick="openFolder(' not in html
 
 
 def test_head_index_and_media(server):
@@ -592,3 +594,33 @@ def test_page_has_subtitle_style_card():
     assert 'id="subFontSize"' in html
     assert 'id="subFontName"' in html
     assert 'id="subStyleSave"' in html
+
+
+# ---------- 打开文件夹（2026-07-16 用户点名替代复制路径） ----------
+
+def test_open_folder_rejects_outside_output(server):
+    status, data = _json(server["port"], "POST", "/api/open-folder",
+                         {"path": str(server["tmp"] / "secret.txt")})
+    assert status == 403
+    assert "禁止" in data["error"]
+
+
+def test_open_folder_missing_file_404(server):
+    target = server["output_root"] / "studio" / "jobs" / "nope.mp4"
+    status, data = _json(server["port"], "POST", "/api/open-folder", {"path": str(target)})
+    assert status == 404
+
+
+def test_open_folder_launches_explorer_for_in_tree_file(server, monkeypatch):
+    target = server["output_root"] / "studio" / "jobs" / "final.mp4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"v")
+    launched = []
+    monkeypatch.setattr(studio.subprocess, "Popen", lambda args, **kw: launched.append(args))
+
+    status, data = _json(server["port"], "POST", "/api/open-folder", {"path": str(target)})
+
+    assert status == 200 and data["ok"] is True
+    assert len(launched) == 1
+    # 参数里必须带上目标文件（win: explorer /select,<path>；其他平台带路径/父目录）
+    assert any("final.mp4" in str(part) or str(target.parent) in str(part) for part in launched[0])

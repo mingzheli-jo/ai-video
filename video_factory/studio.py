@@ -20,6 +20,8 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -604,9 +606,41 @@ def make_handler(store: TaskStore):
                 if path == "/api/batch/run":
                     self._handle_batch_run()
                     return
+                if path == "/api/open-folder":
+                    self._handle_open_folder()
+                    return
                 self._send_json({"error": "未找到该路径。"}, HTTPStatus.NOT_FOUND)
             except Exception as exc:
                 self._send_json({"error": f"服务器内部错误：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        def _handle_open_folder(self) -> None:
+            """在本机资源管理器里打开成片所在文件夹并选中文件（2026-07-16 用户点名，
+            替代任务卡上的"复制路径"）。仅限 output 目录内的既有文件——与 /media
+            同一道防线，杜绝借本接口探测/唤起任意路径。"""
+            body = self._read_json_body()
+            if body is None:
+                self._send_json({"error": "请求体不是合法 JSON。"}, HTTPStatus.BAD_REQUEST)
+                return
+            target = Path(str(body.get("path") or ""))
+            if not str(target) or not _within_output(target):
+                self._send_json({"error": "禁止打开 output 目录之外的路径。"}, HTTPStatus.FORBIDDEN)
+                return
+            if not target.exists():
+                self._send_json({"error": "文件不存在。"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                if sys.platform == "win32":
+                    # explorer /select, 打开所在目录并选中该文件；explorer 恒返回非零，
+                    # 不检查退出码。
+                    subprocess.Popen(["explorer", f"/select,{target.resolve()}"])
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", "-R", str(target.resolve())])
+                else:
+                    subprocess.Popen(["xdg-open", str(target.resolve().parent)])
+            except OSError as exc:
+                self._send_json({"error": f"打开文件夹失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json({"ok": True})
 
         def _handle_credentials(self) -> None:
             body = self._read_json_body()

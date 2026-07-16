@@ -420,7 +420,7 @@ function renderTask(t) {
   }
   if (t.status === 'ok' && t.final) {
     body += `<video controls src="/media?path=${encodeURIComponent(t.final)}"></video>`;
-    body += `<div class="path-row"><code title="${esc(t.final)}">${esc(t.final)}</code><button class="btn copy-btn" data-copy="${esc(t.final)}">复制</button></div>`;
+    body += `<div class="path-row"><code title="${esc(t.final)}">${esc(t.final)}</code><button class="btn copy-btn" data-open="${esc(t.final)}">打开文件夹</button></div>`;
     const links = [];
     if (t.outputs.rewrite) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.rewrite)}" target="_blank">rewrite.json</a>`);
     if (t.outputs.assembly_plan) links.push(`<a href="/media?path=${encodeURIComponent(t.outputs.assembly_plan)}" target="_blank">assembly_plan.json</a>`);
@@ -459,11 +459,26 @@ function statusLabel(s) { return {queued:'排队中',running:'生产中',ok:'完
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.copy-btn');
   if (btn && btn.dataset.copy) copyText(btn.dataset.copy);
+  if (btn && btn.dataset.open) openFolder(btn.dataset.open);
   const cmp = e.target.closest('[data-compare]');
   if (cmp && cmp.dataset.compare) openCompare(cmp.dataset.compare);
   const kit = e.target.closest('.btn-kit');
   if (kit && kit.dataset.kitPath) toggleKit(kit.dataset.task, kit.dataset.kitPath);
 });
+
+// 打开成片所在文件夹（2026-07-16 用户点名替代复制路径）：服务端唤起资源管理器并选中文件。
+async function openFolder(path) {
+  try {
+    const { status, data } = await api('/api/open-folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    if (status !== 200) alert((data && data.error) || '打开文件夹失败');
+  } catch (err) {
+    alert('打开文件夹失败：' + err);
+  }
+}
 
 // 发布物料折叠面板：优先读人类可读的 发布物料.txt（同目录），失败回落 kit JSON。
 // 内容一律 textContent 注入（物料含任意字符，绝不进 innerHTML）。
