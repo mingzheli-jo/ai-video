@@ -1133,6 +1133,7 @@ def _body() -> str:
           <datalist id="imageModelList">
             <option value="doubao-seedream-4-0-250828">
             <option value="doubao-seedream-3-0-t2i-250415">
+            <option value="doubao-seedream-5-0-pro-260628">
           </datalist>
           <button type="button" class="btn" id="imageModelSave">保存模型</button>
           <span id="imageModelMsg" class="task-meta"></span>
