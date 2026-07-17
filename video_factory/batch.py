@@ -436,8 +436,11 @@ def _run_image_gen_section_fallback(
         dst = gen_dir / f"img_{i:02d}{src.suffix.lower() or '.png'}"
         dst.write_bytes(src.read_bytes())
         copied += 1
-    for warning in report.get("warnings") or []:
+    section_warnings = [str(w) for w in (report.get("warnings") or [])]
+    for warning in section_warnings:
         print(f"生图告警：{warning}")
+    if section_warnings:
+        _write_image_gen_warnings(job_dir, section_warnings)
     if copied == 0:
         print("生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）")
         stage_report.write_stage_error(
@@ -510,6 +513,10 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     generated = 0
     reused = 0
     capped = False
+    # 失败/告警收集（2026-07-17 实锤 studio_0717_163927：5.0 pro 限额打满，8/9 拍
+    # 静默失败、兜底用 1 张图糊满全片，用户肉眼才发现）。全部落盘进
+    # image_gen_warnings.json，任务卡黄条可见；不再只打服务器控制台。
+    failures: list[str] = []
     # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
     # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
     style = image_gen.get_style_prompt()
@@ -550,7 +557,9 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             try:
                 img_bytes = image_gen.generate_image(f"{prompt}。{style}。{no_text_guard}", size=size)
             except RuntimeError as exc:
-                print(f"生图告警：拍 {beat_idx} 生成失败（{exc}），跳过。")
+                message = f"拍 {beat_idx} 生成失败：{exc}"
+                print(f"生图告警：{message}，跳过。")
+                failures.append(message)
                 continue
             dst = dst_prefix.with_suffix(".png")
             dst.write_bytes(img_bytes)
@@ -570,14 +579,48 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             except OSError as exc:
                 print(f"生图告警：拍 {beat_idx} 入库失败（{exc}），本单不受影响但该图未积累进图库。")
 
+    if failures:
+        _write_image_gen_warnings(job_dir, failures, beats=len(beats), copied=copied,
+                                  generated=generated, reused=reused)
+
+    last_reason = f"——最后一次失败原因：{failures[-1]}" if failures else ""
     if copied == 0:
-        print("生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）")
-        stage_report.write_stage_error(
-            job_dir, "image_gen", "生图失败：未产出任何可用配图（检查 ARK_API_KEY 与网络）"
+        error = f"生图失败：未产出任何可用配图（检查 ARK_API_KEY 与额度）{last_reason}"
+        print(error)
+        stage_report.write_stage_error(job_dir, "image_gen", error)
+        return 1
+    # 成图率红线（2026-07-17 用户拍板"宁失败勿糊弄"）：可用图不足一半时，兜底循环
+    # 会让少数图片糊满全片——白白烧掉后续特效/字幕的时间，不如就地判失败。
+    if copied * 2 < len(beats):
+        error = (
+            f"生图成图率过低：{len(beats)} 拍只成 {copied} 张（<50%），判任务失败以免"
+            f"少量图片循环糊满全片{last_reason}"
         )
+        print(error)
+        stage_report.write_stage_error(job_dir, "image_gen", error)
         return 1
     print(f"生图完成（拍级模式）：{copied} 张（新生成 {generated}、库复用 {reused}，共 {len(beats)} 拍）")
     return 0
+
+
+IMAGE_GEN_WARNINGS_FILENAME = "image_gen_warnings.json"
+
+
+def _write_image_gen_warnings(
+    job_dir: Path, warnings: list[str], beats: int = 0,
+    copied: int = 0, generated: int = 0, reused: int = 0,
+) -> None:
+    """生图告警落盘（任务卡黄条的数据源）；写失败只打印，绝不阻断生图流程。"""
+    try:
+        (Path(job_dir) / IMAGE_GEN_WARNINGS_FILENAME).write_text(
+            json.dumps({
+                "warnings": warnings, "beats": beats, "copied": copied,
+                "generated": generated, "reused": reused,
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"生图告警落盘失败（不影响流程）：{exc}")
 
 
 def _run_assemble(job: ResolvedJob, job_dir: Path) -> int:
@@ -710,6 +753,8 @@ class JobReport:
     stage_failed: str | None = None
     error: str | None = None
     outputs: dict[str, str] = field(default_factory=dict)
+    # 非致命告警（生图部分失败等）：任务卡黄条展示（2026-07-17）。
+    warnings: list[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
 
     def to_dict(self) -> dict:
@@ -722,8 +767,31 @@ class JobReport:
             payload["error"] = self.error
         payload["outputs"] = dict(self.outputs)
         payload["final"] = _final_output(self.outputs)
+        if self.warnings:
+            payload["warnings"] = list(self.warnings)
         payload["elapsed_seconds"] = round(self.elapsed_seconds, 3)
         return payload
+
+
+def _collect_job_warnings(job_dir: Path) -> list[str]:
+    """汇总本 job 的非致命告警（根目录 + 双画幅子目录的 image_gen_warnings.json）。"""
+    collected: list[str] = []
+    dirs = [job_dir] + [job_dir / d for d in _ASPECT_DIRNAMES.values()]
+    for base in dirs:
+        path = base / IMAGE_GEN_WARNINGS_FILENAME
+        if not path.exists():
+            continue
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        prefix = f"[{base.name}] " if base != job_dir else ""
+        beats, copied_n = body.get("beats"), body.get("copied")
+        if isinstance(beats, int) and isinstance(copied_n, int) and beats > 0:
+            collected.append(f"{prefix}生图 {beats} 拍成 {copied_n} 张")
+        for w in body.get("warnings") or []:
+            collected.append(f"{prefix}{w}")
+    return collected
 
 
 # (重)跑前先清掉上一轮遗留，避免本轮在早期阶段就失败时，_collect_outputs 把上次遗留的旧
@@ -738,6 +806,8 @@ _OUTPUT_ARTIFACTS = (
     "assembly_plan.json",
     "release_with_effects.mp4",
     "release_subtitled.mp4",
+    # 上一轮的生图告警不清会串进本轮任务卡黄条（2026-07-17）。
+    "image_gen_warnings.json",
 )
 
 
@@ -819,6 +889,7 @@ def _execute_stage(
                 stage_failed=stage,
                 error=f"{error_prefix}{stage} 阶段参数解析失败（SystemExit {code}）：请检查 batch 组装的 argv 与该阶段 CLI 定义是否一致。",
                 outputs=_collect_outputs(report_job, root_dir),
+            warnings=_collect_job_warnings(root_dir),
                 elapsed_seconds=time.monotonic() - started,
             )
         return None
@@ -830,6 +901,7 @@ def _execute_stage(
             stage_failed=stage,
             error=f"{error_prefix}{stage} 阶段异常：{exc}",
             outputs=_collect_outputs(report_job, root_dir),
+            warnings=_collect_job_warnings(root_dir),
             elapsed_seconds=time.monotonic() - started,
         )
     if code != 0:
@@ -846,6 +918,7 @@ def _execute_stage(
             stage_failed=stage,
             error=error,
             outputs=_collect_outputs(report_job, root_dir),
+            warnings=_collect_job_warnings(root_dir),
             elapsed_seconds=time.monotonic() - started,
         )
     return None
@@ -901,6 +974,7 @@ def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> 
         status="ok",
         platform=job.platform,
         outputs=_collect_outputs(job, job_dir),
+        warnings=_collect_job_warnings(job_dir),
         elapsed_seconds=time.monotonic() - started,
     )
 

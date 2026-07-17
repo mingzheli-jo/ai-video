@@ -141,6 +141,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--gold); box-shado
 .err-detail { margin-top: 8px; }
 .err-detail summary { cursor: pointer; color: var(--red); font-size: 12px; font-weight: 700; }
 .err-detail pre { white-space: pre-wrap; color: var(--red); font-size: 12px; background: rgba(224,90,82,.06); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
+.warn-detail { margin-top: 8px; }
+.warn-detail summary { cursor: pointer; color: var(--gold); font-size: 12px; font-weight: 700; }
+.warn-detail pre { white-space: pre-wrap; color: var(--gold); font-size: 12px; background: rgba(232,184,75,.07); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
 .task video { width: 100%; border-radius: 8px; margin-top: 10px; background: #000; }
 .path-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .path-row code { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; }
@@ -460,6 +463,11 @@ function renderTask(t) {
   if (t.status === 'failed' && t.error) {
     body += `<details class="err-detail" open><summary>失败：${esc(t.stage_failed || '')} 阶段</summary><pre>${esc(t.error)}</pre></details>`;
   }
+  // 非致命告警黄条（2026-07-17：生图部分失败曾只打服务器控制台，任务卡毫无痕迹，
+  // 用户看成片才发现"一张图糊满全片"——现在落盘并在这里可见）。
+  if (t.warnings && t.warnings.length) {
+    body += `<details class="warn-detail"><summary>⚠ ${t.warnings.length} 条告警（点开细看，成片可能受影响）</summary><pre>${esc(t.warnings.join('\n'))}</pre></details>`;
+  }
   if (t.status === 'ok' && t.final) {
     // 双画幅（2026-07-16）：final 是主画幅成片，另一画幅从 outputs 的 _9x16/_16x9
     // 后缀键里找，两支并排回显、各带画幅角标与"打开文件夹"。
@@ -601,6 +609,7 @@ function taskSig(t) {
   return [t.status, t.current_stage || '', (t.stages_done || []).join('.'),
           t.stage_failed || '', t.error || '', t.final || '',
           Object.keys(t.outputs || {}).length,  // 双画幅第二支成片落盘时触发重渲
+          (t.warnings || []).length,  // 告警黄条出现时触发重渲
           (t.elapsed_seconds || 0)].join('|');
 }
 

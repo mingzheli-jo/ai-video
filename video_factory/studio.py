@@ -254,6 +254,8 @@ class TaskStore:
                 error=report.error,
                 final=payload.get("final", ""),
                 outputs=payload.get("outputs", {}),
+                # 非致命告警（生图部分失败等）：任务卡黄条（2026-07-17）。
+                warnings=payload.get("warnings", []),
                 elapsed_seconds=payload.get("elapsed_seconds", 0.0),
             )
 

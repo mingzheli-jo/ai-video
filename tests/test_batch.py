@@ -996,6 +996,9 @@ def test_beat_image_gen_appends_style_and_ingests_to_library(tmp_path, monkeypat
     matches = [{"beat_index": 0, "action": "generate", "file": None, "prompt": "城市夜景",
                 "category": "场景", "tags": ["城市"]}]
     gen_prompts, ingested = [], []
+    # 拍数与匹配数对齐为 1：本测试只验证风格拼接与入库，不测成图率红线
+    # （红线以 len(beats) 为分母，2026-07-17 引入）。
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()])
     monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
     monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "测试美漫风")
     monkeypatch.setattr(image_gen, "generate_image",
@@ -1181,3 +1184,88 @@ def test_build_publish_argv_dual_video_from_primary_subdir(tmp_path):
     argv = build_publish_argv(job, job_dir)
     video = argv[argv.index("--video") + 1]
     assert "9x16" in video and video.endswith("release_subtitled.mp4")
+
+
+# ---------- 生图告警落盘 + 成图率红线（2026-07-17 实锤 5.0 pro 限额事故） ----------
+
+def _gen_rate_scaffold(tmp_path, monkeypatch, fail_beats):
+    """拍级生图脚手架：4 拍 generate，fail_beats 里的拍抛 429；返回 (job, job_dir)。"""
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "output": str(job_dir)}, 0)
+    matches = [{"beat_index": i, "action": "generate", "file": None,
+                "prompt": f"p{i}", "category": "场景", "tags": []} for i in range(4)]
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()] * 4)
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "风")
+    monkeypatch.setattr(image_gen, "ingest_generated_image", lambda img, **kw: tmp_path / "l.png")
+
+    def gen(prompt, size):
+        for i in fail_beats:
+            if f"p{i}" in prompt:
+                raise RuntimeError("生图 HTTP 429 SetLimitExceeded")
+        return b"png"
+
+    monkeypatch.setattr(image_gen, "generate_image", gen)
+    return job, job_dir
+
+
+def test_image_gen_fails_below_half_success_rate(tmp_path, monkeypatch):
+    # 4 拍只成 1 张（<50%）→ 判失败（宁失败勿糊弄），错误带最后一次失败原因；
+    # 告警落盘供任务卡黄条展示。
+    job, job_dir = _gen_rate_scaffold(tmp_path, monkeypatch, fail_beats={1, 2, 3})
+
+    assert batch._run_image_gen(job, job_dir) == 1
+    from video_factory import stage_report as sr
+    error = sr.read_stage_error(job_dir, "image_gen")
+    assert "成图率过低" in error and "SetLimitExceeded" in error
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    assert warn["beats"] == 4 and warn["copied"] == 1
+    assert len(warn["warnings"]) == 3
+
+
+def test_image_gen_passes_at_exactly_half_with_warnings(tmp_path, monkeypatch):
+    # 恰好 50%（4 拍成 2 张）不触发红线，任务照常，但告警必须落盘可见。
+    job, job_dir = _gen_rate_scaffold(tmp_path, monkeypatch, fail_beats={2, 3})
+
+    assert batch._run_image_gen(job, job_dir) == 0
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    assert warn["copied"] == 2 and len(warn["warnings"]) == 2
+
+
+def test_run_job_surfaces_image_gen_warnings_in_report(tmp_path, monkeypatch):
+    # run_job 把落盘告警带进报告（任务卡黄条数据源）：含"N 拍成 M 张"摘要行。
+    source, assets = _make_valid_paths(tmp_path)
+    out = tmp_path / "out"
+
+    def make_runner(stage):
+        def runner(job, job_dir):
+            if stage == "image_gen":
+                batch._write_image_gen_warnings(
+                    job_dir, ["拍 3 生成失败：HTTP 429"], beats=4, copied=3,
+                    generated=3, reused=0,
+                )
+            return 0
+        return runner
+
+    monkeypatch.setattr(batch, "STAGE_RUNNERS", {
+        s: make_runner(s)
+        for s in ("rewrite", "voice", "image_gen", "assemble", "effects", "subtitles", "publish")
+    })
+    job = resolve_job({"name": "w", "source": source, "assets": assets,
+                       "visual_source": "ai_image", "output": str(out)}, 0)
+    report = run_job(job)
+
+    assert report.status == "ok"
+    payload = report.to_dict()
+    assert any("4 拍成 3 张" in w for w in payload["warnings"])
+    assert any("HTTP 429" in w for w in payload["warnings"])
