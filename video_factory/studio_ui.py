@@ -826,7 +826,7 @@ function renderCredPage(meta) {
   const sp = h('#stylePrompt');
   if (sp) sp.value = meta.image_style_prompt || '';
   const im = h('#imageModel');
-  if (im) im.value = meta.image_model || '';
+  if (im) { im.value = meta.image_model || ''; syncImageModelChips(); }
   const rp = h('#rewritePrompt');
   if (rp) rp.value = meta.rewrite_style_prompt || '';
   const sfp = h('#subFontSizeP');
@@ -858,6 +858,14 @@ async function saveStylePrompt() {
   setTimeout(() => { msg.textContent = ''; }, 4000);
 }
 
+// 模型快捷芯片：点选填入输入框（datalist 会按已填内容过滤候选、看起来"只剩一项"，
+// 2026-07-17 用户反馈不好使后改为芯片直选）；输入框内容命中芯片时高亮选中态。
+function syncImageModelChips() {
+  const value = (h('#imageModel').value || '').trim();
+  document.querySelectorAll('#imageModelChips .chip').forEach(c =>
+    c.classList.toggle('active', c.dataset.model === value));
+}
+
 async function saveImageModel() {
   // 生图模型可配（2026-07-17）：方舟按版本各给免费额度，切版本吃额度；
   // 尺寸适配在后端 generate_image 里自动做，这里只存模型 ID。
@@ -866,6 +874,7 @@ async function saveImageModel() {
   const msg = h('#imageModelMsg');
   if (status === 200) {
     h('#imageModel').value = data.value || '';
+    syncImageModelChips();
     msg.textContent = value ? '已保存并生效（下一支视频起用此模型）' : '已恢复默认 4.0';
     S.meta.image_model = data.value;
   } else {
@@ -949,6 +958,11 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#batchAddBtn').addEventListener('click', () => addBatchJob());
   h('#stylePromptSave').addEventListener('click', saveStylePrompt);
   h('#imageModelSave').addEventListener('click', saveImageModel);
+  document.querySelectorAll('#imageModelChips .chip').forEach(c => c.addEventListener('click', () => {
+    h('#imageModel').value = c.dataset.model;
+    syncImageModelChips();
+  }));
+  h('#imageModel').addEventListener('input', syncImageModelChips);
   h('#rewritePromptSave').addEventListener('click', saveRewritePrompt);
   h('#subStyleSave').addEventListener('click', saveSubtitleStyle);
   h('#subFontName').addEventListener('change', syncSubPreview);
@@ -1127,14 +1141,14 @@ def _body() -> str:
         <p class="desc">方舟按<b>模型版本</b>分别赠送免费额度：4.0 额度用完可切 3.0 等版本继续用，用完再切回。
         切版本<b>不用改任何尺寸</b>——生图尺寸会按所选模型的上限自动等比适配（如 3.0 上限 2048，竖屏 1440×2560 自动变 1152×2048）。
         模型 ID 以方舟控制台「开通管理」页显示的为准；清空保存 = 恢复默认 4.0。</p>
+        <div class="chips" id="imageModelChips" style="margin-bottom:10px">
+          <div class="chip" data-model="doubao-seedream-4-0-250828">Seedream 4.0（默认）</div>
+          <div class="chip" data-model="doubao-seedream-3-0-t2i-250415">Seedream 3.0</div>
+          <div class="chip" data-model="doubao-seedream-5-0-pro-260628">Seedream 5.0 pro</div>
+        </div>
         <div class="batch-actions" style="align-items:flex-end;flex-wrap:wrap;gap:14px">
-          <label style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:300px">模型 ID
-            <input type="text" id="imageModel" list="imageModelList" placeholder="doubao-seedream-4-0-250828（默认）"></label>
-          <datalist id="imageModelList">
-            <option value="doubao-seedream-4-0-250828">
-            <option value="doubao-seedream-3-0-t2i-250415">
-            <option value="doubao-seedream-5-0-pro-260628">
-          </datalist>
+          <label style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:300px">模型 ID（点上方快捷选择，或手填控制台里的任意 ID）
+            <input type="text" id="imageModel" placeholder="doubao-seedream-4-0-250828（默认）"></label>
           <button type="button" class="btn" id="imageModelSave">保存模型</button>
           <span id="imageModelMsg" class="task-meta"></span>
         </div>
