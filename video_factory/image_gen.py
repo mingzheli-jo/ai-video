@@ -664,6 +664,9 @@ def _pack_timeline_beats(
 _PREFILTER_PER_BEAT = 20
 _PREFILTER_CAP = 150
 _PREFILTER_COLD_FALLBACK = 50
+# 复用优先兜底的最低相关分（2026-07-17 成本优先）：一个标签命中(+3)或 3 个中文
+# 二元组重合即达标。调高更保质（多花生成费），调低更省钱（复用更激进）。
+_REUSE_FALLBACK_MIN_SCORE = 3
 
 _BIGRAM_CLEAN_RE = re.compile(r"[^\w一-鿿]")
 
@@ -810,9 +813,12 @@ def match_beats_to_library(
         '禁止画面中出现任何文字/对话气泡/字幕/水印/logo；reuse 时填空串）", '
         f'"category": "generate 时从：{"、".join(CATEGORIES)} 中选一（reuse 时填空串）", '
         '"tags": ["generate 时给 3~6 个中文标签（主体/场景/情绪，供图库日后检索复用）；reuse 时空数组"]}\n'
-        "2. reuse 要求 file 是图片库里 file 字段的原值；无把握时选 generate。\n"
-        "3. 每张库图最多用一次（不同拍要用不同 file）。\n"
-        "4. 只输出 JSON 数组，不要其他文字或代码块标记。"
+        "2. 【成本原则，最高优先级】复用免费、生成花钱：库里有画面主体或场景与该拍内容"
+        "大致相关的图就必须选 reuse——不追求完美贴合，意境相通即可；"
+        "只有全库确实没有一张沾边的图时才允许 generate。\n"
+        "3. reuse 的 file 必须是图片库里 file 字段的原值，一字不差。\n"
+        "4. 每张库图最多用一次（不同拍要用不同 file）。\n"
+        "5. 只输出 JSON 数组，不要其他文字或代码块标记。"
     )
     user_content = json.dumps(
         {"beats": beats_payload, "library": lib_entries},
@@ -835,6 +841,38 @@ def match_beats_to_library(
             elif f:
                 seen.add(f)
         deduped.append(item)
+
+    # 复用优先兜底（2026-07-17 用户定案：成本优先——复用免费、生成花钱）：
+    # LLM 判 generate 的拍，本地按 prefilter 同款评分再扫一遍未用候选，相关度
+    # 达标即改回 reuse。不指望 LLM 完全服从提示词的成本原则，用确定性规则兜住。
+    # candidates 已按目标画幅过滤，batch 侧复用前还有像素级铁闸复核，画幅安全。
+    beat_by_index = {b.global_index: b for b in beats}
+    for item in deduped:
+        if item["action"] != "generate":
+            continue
+        beat = beat_by_index.get(item["beat_index"])
+        if beat is None:
+            continue
+        text = f"{getattr(beat, 'section_title', '')} {getattr(beat, 'narration_slice', '')}"
+        beat_bg = _text_bigrams(text)
+        best_file, best_score = "", 0
+        for entry in candidates:
+            f = str(entry.get("file") or "")
+            if not f or f in seen:
+                continue
+            score = 0
+            for tag in entry.get("tags") or []:
+                tag_text = str(tag or "")
+                if tag_text and tag_text in text:
+                    score += 3
+            score += len(beat_bg & _text_bigrams(str(entry.get("prompt") or "")))
+            if score > best_score:
+                best_file, best_score = f, score
+        if best_score >= _REUSE_FALLBACK_MIN_SCORE:
+            item["action"] = "reuse"
+            item["file"] = best_file
+            item["prompt"] = ""
+            seen.add(best_file)
     return deduped
 
 

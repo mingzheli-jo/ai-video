@@ -684,3 +684,73 @@ def test_prefilter_library_filters_by_target_aspect():
     assert files == {"b.png", "c.png"}
     # 不传 target_size 维持旧行为（全量）
     assert len(_prefilter_library([], entries)) == 4
+
+
+# ---- 复用优先（2026-07-17 成本策略：复用免费、生成花钱） ----
+
+
+def _reuse_first_scaffold(monkeypatch, llm_reply, library):
+    """match_beats_to_library 脚手架：伪 LLM 回 llm_reply，库为 library；单拍文案含"打坐"。"""
+    from types import SimpleNamespace
+
+    from video_factory.image_gen import match_beats_to_library
+
+    captured = {}
+    monkeypatch.setattr("video_factory.rewrite.resolve_llm_provider", lambda x: "deepseek")
+
+    def fake_chat(system_prompt, user_content, config):
+        captured["system_prompt"] = system_prompt
+        return llm_reply
+
+    monkeypatch.setattr("video_factory.llm.chat_completion", fake_chat)
+    beats = [SimpleNamespace(global_index=0, section_title="静坐",
+                             narration_slice="王阳明每日打坐修身养性")]
+    result = match_beats_to_library(beats, library)
+    return result, captured
+
+
+def test_generate_flipped_to_reuse_when_related_candidate_exists(monkeypatch):
+    # LLM 判 generate，但库里有标签命中（打坐 +3 ≥ 阈值）的图 → 本地兜底改回 reuse。
+    library = [{"file": "zuo.png", "size": "1440x2560", "prompt": "老者静坐", "tags": ["打坐"]}]
+    reply = '[{"beat_index": 0, "action": "generate", "file": "", "prompt": "画个打坐", "category": "场景", "tags": []}]'
+    result, captured = _reuse_first_scaffold(monkeypatch, reply, library)
+
+    assert result[0]["action"] == "reuse"
+    assert result[0]["file"] == "zuo.png"
+    assert result[0]["prompt"] == ""
+    # 提示词已植入成本原则（复用优先的第一层）
+    assert "成本原则" in captured["system_prompt"]
+    assert "必须选 reuse" in captured["system_prompt"]
+
+
+def test_generate_stays_when_no_related_candidate(monkeypatch):
+    # 库里只有毫不相关的图（零标签命中、零二元组重合）→ 维持 generate，不硬凑。
+    library = [{"file": "car.png", "size": "1440x2560", "prompt": "跑车飞驰", "tags": ["汽车"]}]
+    reply = '[{"beat_index": 0, "action": "generate", "file": "", "prompt": "画个打坐", "category": "场景", "tags": []}]'
+    result, _ = _reuse_first_scaffold(monkeypatch, reply, library)
+
+    assert result[0]["action"] == "generate"
+    assert result[0]["file"] is None
+
+
+def test_fallback_respects_already_used_files(monkeypatch):
+    # 相关库图已被 LLM 分配给别的拍 → 兜底不重复占用（一图一拍规则不破）。
+    from types import SimpleNamespace
+
+    from video_factory.image_gen import match_beats_to_library
+
+    monkeypatch.setattr("video_factory.rewrite.resolve_llm_provider", lambda x: "deepseek")
+    reply = (
+        '[{"beat_index": 0, "action": "reuse", "file": "zuo.png", "prompt": "", "category": "", "tags": []},'
+        ' {"beat_index": 1, "action": "generate", "file": "", "prompt": "画个打坐", "category": "场景", "tags": []}]'
+    )
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: reply)
+    library = [{"file": "zuo.png", "size": "1440x2560", "prompt": "老者静坐", "tags": ["打坐"]}]
+    beats = [
+        SimpleNamespace(global_index=0, section_title="静坐", narration_slice="打坐修身"),
+        SimpleNamespace(global_index=1, section_title="静坐", narration_slice="继续打坐参悟"),
+    ]
+    result = match_beats_to_library(beats, library)
+
+    assert result[0]["action"] == "reuse" and result[0]["file"] == "zuo.png"
+    assert result[1]["action"] == "generate"  # 唯一相关图已被占用，不重复复用
