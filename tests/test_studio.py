@@ -36,7 +36,7 @@ def server(monkeypatch, tmp_path):
     # 凭据/设置 YAML 都重定向到 tmp，绝不写到项目真实文件
     monkeypatch.setattr(credentials_store, "CREDENTIALS_PATH", tmp_path / "credentials.yaml")
     monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.yaml")
-    for _env in ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
+    for _env in ("IMAGE_STYLE_PROMPT", "ARK_IMAGE_MODEL", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
         monkeypatch.delenv(_env, raising=False)
     for d in (studio_root, studio_root / "uploads", studio_root / "jobs"):
         d.mkdir(parents=True, exist_ok=True)
@@ -55,7 +55,7 @@ def server(monkeypatch, tmp_path):
         # /api/settings 处理器直接写 os.environ（绕过 monkeypatch），而 monkeypatch.delenv
         # 对「原本不存在」的 env 不注册 undo → 会泄漏到后续测试文件（例如污染 test_subtitles
         # 读到的 SUBTITLE_FONT_NAME）。这里显式清掉本套设置项 env，保证测试隔离。
-        for _env in ("IMAGE_STYLE_PROMPT", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
+        for _env in ("IMAGE_STYLE_PROMPT", "ARK_IMAGE_MODEL", "REWRITE_STYLE_PROMPT", "SUBTITLE_FONT_SIZE", "SUBTITLE_FONT_NAME"):
             os.environ.pop(_env, None)
 
 
@@ -673,3 +673,18 @@ def test_page_has_style_prompt_button_and_unified_batch_form():
     assert "跟随平台预设" not in html
     assert "BATCH_ASPECT_OPTS" in html
     assert html.count("双画幅都出") >= 2  # 单任务表单 + 批量行各一处
+
+
+def test_settings_ark_image_model_roundtrip_and_meta(server):
+    port = server["port"]
+    status, data = _json(port, "POST", "/api/settings",
+                         {"name": "ARK_IMAGE_MODEL", "value": "doubao-seedream-3-0-t2i-250415"})
+    assert status == 200
+    assert data["value"] == "doubao-seedream-3-0-t2i-250415"
+    _, meta = _json(port, "GET", "/api/meta")
+    assert meta["image_model"] == "doubao-seedream-3-0-t2i-250415"
+    assert meta["image_model_default"]  # 默认值随 meta 下发供 UI 提示
+    # 清空 = 恢复默认
+    status, data = _json(port, "POST", "/api/settings", {"name": "ARK_IMAGE_MODEL", "value": ""})
+    assert status == 200
+    assert data["value"] == meta["image_model_default"]

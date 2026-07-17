@@ -16,6 +16,8 @@ SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.yaml"
 # 设置白名单：新增设置项时在这里登记（studio 的 /api/settings 只认白名单）。
 SETTING_NAMES = (
     "IMAGE_STYLE_PROMPT",
+    # 生图模型 ID（2026-07-17：方舟按版本各给免费额度，可切版本吃额度）。
+    "ARK_IMAGE_MODEL",
     "REWRITE_STYLE_PROMPT",
     "SUBTITLE_FONT_SIZE",
     # 竖/横屏独立字号系数（2026-07-16 用户定案）；缺失回落通用 SUBTITLE_FONT_SIZE。

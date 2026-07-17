@@ -566,3 +566,68 @@ def test_match_beats_feeds_prefiltered_candidates_to_llm(monkeypatch):
     result = match_beats_to_library(beats, _mk_entries(500))  # 500 张库
     assert result is not None
     assert len(captured["payload"]["library"]) <= _PREFILTER_CAP  # LLM 只看到粗排候选
+
+
+# ---- 生图模型可配 + 尺寸随模型适配（2026-07-17 切版本吃免费额度） ----
+
+
+def test_fit_size_for_model_clamps_by_family():
+    from video_factory.image_gen import _fit_size_for_model
+
+    # 3.0 上限 2048：4.0 的 2K 尺寸等比缩进盒内（8 的倍数）
+    assert _fit_size_for_model("1440x2560", "doubao-seedream-3-0-t2i-250415") == "1152x2048"
+    assert _fit_size_for_model("2560x1440", "doubao-seedream-3-0-t2i-250415") == "2048x1152"
+    assert _fit_size_for_model("2048x2048", "doubao-seedream-3-0-t2i-250415") == "2048x2048"
+    # 4.0：本就合规，原样
+    assert _fit_size_for_model("1440x2560", "doubao-seedream-4-0-250828") == "1440x2560"
+    # 未知模型族/非法格式：原样放行（不猜未知模型的约束）
+    assert _fit_size_for_model("1440x2560", "some-future-model-5-0") == "1440x2560"
+    assert _fit_size_for_model("原样", "doubao-seedream-3-0-t2i-250415") == "原样"
+
+
+def test_get_image_model_chain(monkeypatch):
+    from video_factory.image_gen import ARK_IMAGE_DEFAULT_MODEL, get_image_model
+
+    # 默认：无 env 无 settings
+    monkeypatch.delenv("ARK_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr("video_factory.settings_store.load_settings", lambda: {})
+    assert get_image_model() == ARK_IMAGE_DEFAULT_MODEL
+    # settings.yaml 兜底
+    monkeypatch.setattr(
+        "video_factory.settings_store.load_settings",
+        lambda: {"ARK_IMAGE_MODEL": "doubao-seedream-3-0-t2i-250415"},
+    )
+    assert get_image_model() == "doubao-seedream-3-0-t2i-250415"
+    # 环境变量最高优先
+    monkeypatch.setenv("ARK_IMAGE_MODEL", "doubao-seedream-4-0-250828")
+    assert get_image_model() == "doubao-seedream-4-0-250828"
+
+
+def test_generate_image_uses_configured_model_and_adapted_size(monkeypatch):
+    import base64 as _b64
+
+    monkeypatch.setenv("ARK_API_KEY", "ark-test-2")
+    monkeypatch.setenv("ARK_IMAGE_MODEL", "doubao-seedream-3-0-t2i-250415")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            data = _b64.b64encode(b"png").decode("ascii")
+            return json.dumps({"data": [{"b64_json": data}]}).encode("utf-8")
+
+    monkeypatch.setattr(
+        "video_factory.image_gen.urlopen",
+        lambda request, timeout: captured.update(request=request) or FakeResponse(),
+    )
+    generate_image("测试", size="1440x2560")
+
+    body = json.loads(captured["request"].data.decode("utf-8"))
+    # 模型取自配置；尺寸随 3.0 上限自动等比适配，不再被服务端整单拒掉
+    assert body["model"] == "doubao-seedream-3-0-t2i-250415"
+    assert body["size"] == "1152x2048"

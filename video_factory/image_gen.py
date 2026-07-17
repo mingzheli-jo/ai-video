@@ -76,6 +76,51 @@ def get_style_prompt() -> str:
     return saved or DEFAULT_STYLE_PROMPT
 
 
+def get_image_model() -> str:
+    """当前生效的生图模型 ID：环境变量 > settings.yaml > 内置默认（Seedream 4.0）。
+
+    2026-07-17 用户定案：模型版本可配——方舟按模型版本各给免费额度，4.0 额度用完
+    可切 3.0 等版本继续白嫖；设置页「生图模型」即此值。
+    """
+    env_value = (os.getenv(ARK_IMAGE_MODEL_ENV) or "").strip()
+    if env_value:
+        return env_value
+    from video_factory.settings_store import load_settings
+
+    saved = (load_settings().get(ARK_IMAGE_MODEL_ENV) or "").strip()
+    return saved or ARK_IMAGE_DEFAULT_MODEL
+
+
+# 各模型族的单边像素上限。3.0(t2i) 上限 2048——直接把 4.0 的 1440x2560 发给它
+# 会被整单拒掉，所以超上限时按模型自动等比缩小（2026-07-17 换版本吃免费额度的配套）。
+# 只管"超上限"这一种跨版本必炸的情况；下限/取值细则各版本口径不一且服务端会给
+# 明确报错，不在客户端瞎猜（也保住 4.0 对 1080x1920 等旧尺寸的原样放行行为）。
+_MODEL_SIZE_MAX = (
+    ("seedream-3", 2048),
+    ("seedream-4", 4096),
+)
+
+
+def _fit_size_for_model(size: str, model: str) -> str:
+    """请求尺寸超出模型单边上限时等比缩小（未知模型族/非法格式原样放行）。
+
+    缩放后各边取 8 的倍数（生图服务普遍要求对齐）；不超上限直接原样返回。
+    """
+    match = re.fullmatch(r"(\d+)x(\d+)", (size or "").strip())
+    if not match:
+        return size
+    width, height = int(match.group(1)), int(match.group(2))
+    if width <= 0 or height <= 0:
+        return size
+    hi = next((cap for key, cap in _MODEL_SIZE_MAX if key in (model or "")), None)
+    if hi is None or max(width, height) <= hi:
+        return size
+    scale = hi / max(width, height)
+    fitted_w = max(8, int(round(width * scale / 8)) * 8)
+    fitted_h = max(8, int(round(height * scale / 8)) * 8)
+    return f"{fitted_w}x{fitted_h}"
+
+
 class ImageGenError(RuntimeError):
     pass
 
@@ -236,11 +281,13 @@ def generate_image(prompt: str, size: str = DEFAULT_SIZE) -> bytes:
             f"未配置 {ARK_API_KEY_ENV}（火山方舟控制台的 API Key，与 TTS 的 VOLC_TTS_APIKEY 不是同一个）。"
             "请在工作台「凭据与依赖」页配置后再用生图。"
         )
-    model = (os.getenv(ARK_IMAGE_MODEL_ENV) or "").strip() or ARK_IMAGE_DEFAULT_MODEL
+    model = get_image_model()
     payload = {
         "model": model,
         "prompt": prompt,
-        "size": size,
+        # 尺寸随模型族自动适配（如切 3.0 吃免费额度时 1440x2560 → 1152x2048），
+        # 否则跨版本切换会被服务端整单拒掉。
+        "size": _fit_size_for_model(size, model),
         "response_format": "b64_json",
         "watermark": False,
     }
