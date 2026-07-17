@@ -250,13 +250,18 @@ def find_reusable(
     entries: list[dict],
     library_root: Path | str = LIBRARY_ROOT,
 ) -> Path | None:
-    """按 类目相同 + 尺寸相同 + 标签重合>=MIN_TAG_OVERLAP 检索可复用图；
-    取重合度最高（并列取最新）。文件已被删的条目跳过。"""
+    """按 类目相同 + 画幅相同 + 标签重合>=MIN_TAG_OVERLAP 检索可复用图；
+    取重合度最高（并列取最新）。文件已被删的条目跳过。
+
+    画幅判定用 _same_aspect（2026-07-17 与拍级路径统一口径）：跨模型的同画幅
+    尺寸（1152x2048 与 1440x2560 同为 9:16）互认，横竖画幅绝不互认。"""
     root = Path(library_root)
     best: tuple[int, float, Path] | None = None
     want = set(item.tags)
     for entry in entries:
-        if entry.get("category") != item.category or entry.get("size") != size:
+        if entry.get("category") != item.category:
+            continue
+        if not _same_aspect(str(entry.get("size") or ""), size):
             continue
         overlap = len(want & set(entry.get("tags") or []))
         if overlap < MIN_TAG_OVERLAP:
@@ -669,8 +674,49 @@ def _text_bigrams(text: str) -> set[str]:
     return {chars[i : i + 2] for i in range(len(chars) - 1)}
 
 
-def _prefilter_library(beats: list, entries: list[dict]) -> list[dict]:
+def _same_aspect(size_a: str, size_b: str, tolerance: float = 0.02) -> bool:
+    """两个 "WxH" 尺寸是否同画幅（宽高比相对差 ≤ tolerance）。
+
+    比"尺寸串相等"宽（跨模型适配后 1440x2560 与 1152x2048 都是 9:16，应互认），
+    比"横竖粗分"严（1:1 与 3:4 不互认）。任一侧缺失/非法一律 False——
+    复用闸门宁缺勿滥（2026-07-17 用户实锤：16:9 视频复用进 9:16 图，整片报废）。
+    """
+    def _ratio(size: str) -> float | None:
+        match = re.fullmatch(r"(\d+)x(\d+)", (size or "").strip())
+        if not match:
+            return None
+        width, height = int(match.group(1)), int(match.group(2))
+        if width <= 0 or height <= 0:
+            return None
+        return width / height
+
+    ra, rb = _ratio(size_a), _ratio(size_b)
+    if ra is None or rb is None:
+        return False
+    return abs(ra - rb) / rb <= tolerance
+
+
+def image_file_matches_aspect(path: Path | str, size: str) -> bool:
+    """读图片文件的真实像素判画幅是否与 size 一致（复用执行前的最后铁闸）。
+
+    以文件为准而非登记簿——index 记录可被手工改库/搬移弄脏。读图失败视为不符
+    （严格执行：宁可现场重新生成，不能让错画幅图混进成片）。
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            width, height = img.size
+    except Exception:
+        return False
+    return _same_aspect(f"{width}x{height}", size)
+
+
+def _prefilter_library(beats: list, entries: list[dict], target_size: str = "") -> list[dict]:
     """二级检索第一级：本地粗排出与本片各拍相关的库图候选（喂 LLM 精选用）。
+
+    target_size 非空时先按画幅硬过滤（2026-07-17 用户定案：16:9 视频绝不给 LLM
+    看 9:16 的图——错画幅复用等于整片报废）；登记簿无 size 的条目一并剔除。
 
     评分：条目标签在拍文案中出现 +3/个；条目提示词与拍文案的中文二元组重合 +1/个。
     每拍取分数>0 的前 _PREFILTER_PER_BEAT 条，全片并集（同图取最高分）按分排序
@@ -678,6 +724,8 @@ def _prefilter_library(beats: list, entries: list[dict]) -> list[dict]:
     ——新图的风格/质量最贴近当前生产，绝不能像旧实现那样取最老的。
     """
     valid = [e for e in entries if e.get("file")]
+    if target_size:
+        valid = [e for e in valid if _same_aspect(str(e.get("size") or ""), target_size)]
     if len(valid) <= _PREFILTER_CAP:
         return valid  # 小库全量直喂，无信息损失
     entry_bigrams = [_text_bigrams(str(e.get("prompt") or "")) for e in valid]
@@ -711,9 +759,12 @@ def match_beats_to_library(
     beats: list[Beat],
     library_index: list[dict],
     library_root: Path | str = LIBRARY_ROOT,
+    target_size: str = "",
 ) -> list[dict] | None:
     """一次 LLM 调用为每拍选库图或给生成提示词；同拍不重复（同 file 第二次改 generate）。
 
+    target_size 非空时库候选先按画幅硬过滤（16:9 任务绝不复用 9:16 图，
+    2026-07-17 用户定案严格执行）。
     无 LLM 凭据、回复无法解析、条数不符时返回 None（调用方回落每节1图路径）。
     返回列表每项：{"beat_index": int, "action": "reuse"|"generate",
                    "file": str|None, "prompt": str}
@@ -730,7 +781,7 @@ def match_beats_to_library(
     # 二级检索（2026-07-15，库将涨到千级）：先本地粗排出与本片各拍相关的候选，
     # 再喂 LLM 精选。旧实现直接切 [:50]——取的还是登记簿最老的 50 张，库一大
     # LLM 就对 95% 的库存失明，复用率崩塌。
-    candidates = _prefilter_library(beats, library_index or [])
+    candidates = _prefilter_library(beats, library_index or [], target_size)
     lib_entries = [
         {
             "file": str(e.get("file") or ""),

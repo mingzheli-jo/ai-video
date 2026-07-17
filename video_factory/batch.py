@@ -492,7 +492,10 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             beats = plan_beats(rewrite_data, section_durs)
         library_root = image_gen.LIBRARY_ROOT
         library_index = image_gen.load_index(library_root)
-        beat_matches = match_beats_to_library(beats, library_index, library_root)
+        # 画幅硬过滤（2026-07-17 用户定案严格执行）：16:9 任务的库候选只留 16:9 图。
+        beat_matches = match_beats_to_library(
+            beats, library_index, library_root, target_size=size
+        )
     except Exception:
         beat_matches = None  # 任何异常均回落节级
 
@@ -534,13 +537,23 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
             file_rel = match.get("file") or ""
             src = Path(library_root) / file_rel if file_rel else None
             if src and src.exists():
-                dst = dst_prefix.with_suffix(src.suffix.lower() or ".png")
-                dst.write_bytes(src.read_bytes())
-                copied += 1
-                reused += 1
-                continue
-            # 文件缺失：降级为 generate（下面接着处理）。
-            action = "generate"
+                # 铁闸（2026-07-17 用户定案严格执行）：复用前读文件真实像素复核画幅，
+                # 不符降级现场生成——检索层/LLM 层任何一环漏了，这里也绝不放行
+                # （实锤 studio_0717_223252：16:9 成片混进 9:16 库图，整片报废）。
+                if not image_gen.image_file_matches_aspect(src, size):
+                    message = f"拍 {beat_idx} 复用图画幅与 {size} 不符（{src.name}），已改为现场生成"
+                    print(f"生图告警：{message}。")
+                    failures.append(message)
+                    action = "generate"
+                else:
+                    dst = dst_prefix.with_suffix(src.suffix.lower() or ".png")
+                    dst.write_bytes(src.read_bytes())
+                    copied += 1
+                    reused += 1
+                    continue
+            else:
+                # 文件缺失：降级为 generate（下面接着处理）。
+                action = "generate"
 
         if action == "generate":
             if generated >= MAX_GENERATED_PER_JOB:

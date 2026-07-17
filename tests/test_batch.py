@@ -1046,8 +1046,9 @@ def test_run_image_gen_uses_timeline_beats_when_present(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_match(beats, index, root):
+    def fake_match(beats, index, root, **kwargs):
         captured["n_beats"] = len(beats)
+        captured["target_size"] = kwargs.get("target_size")
         # 每拍一条 generate 匹配，img_NN 用全局拍序命名，避免同节 beat_index 冲突。
         return [{"beat_index": b.global_index, "action": "generate", "file": None,
                  "prompt": "p", "category": "场景", "tags": []} for b in beats]
@@ -1269,3 +1270,51 @@ def test_run_job_surfaces_image_gen_warnings_in_report(tmp_path, monkeypatch):
     payload = report.to_dict()
     assert any("4 拍成 3 张" in w for w in payload["warnings"])
     assert any("HTTP 429" in w for w in payload["warnings"])
+
+
+def test_reuse_rejects_wrong_aspect_file_and_regenerates(tmp_path, monkeypatch):
+    """复用执行铁闸（2026-07-17）：库文件真实像素与目标画幅不符 → 降级现场生成
+    并落告警；画幅相符的正常复用不受影响。"""
+    from PIL import Image
+
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    # 16:9 任务
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "aspect": "16:9", "output": str(job_dir)}, 0)
+    # 图库：一张竖图（画幅不符）+ 一张横图（相符）
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    Image.new("RGB", (90, 160)).save(lib / "portrait.png")
+    Image.new("RGB", (160, 90)).save(lib / "landscape.png")
+    monkeypatch.setattr(image_gen, "LIBRARY_ROOT", lib)
+
+    matches = [
+        {"beat_index": 0, "action": "reuse", "file": "portrait.png", "prompt": "p0",
+         "category": "场景", "tags": []},
+        {"beat_index": 1, "action": "reuse", "file": "landscape.png", "prompt": "p1",
+         "category": "场景", "tags": []},
+    ]
+    generated = []
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()] * 2)
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "风")
+    monkeypatch.setattr(image_gen, "generate_image",
+                        lambda prompt, size: generated.append(prompt) or b"png")
+    monkeypatch.setattr(image_gen, "ingest_generated_image", lambda img, **kw: tmp_path / "l.png")
+
+    assert batch._run_image_gen(job, job_dir) == 0
+    # 竖图被铁闸拦下 → 现场生成兜位；横图正常复用（不触发生成）
+    assert len(generated) == 1 and "p0" in generated[0]
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    assert any("画幅" in w and "portrait.png" in w for w in warn["warnings"])
+    assert (job_dir / "gen_assets" / "img_00.png").exists()
+    assert (job_dir / "gen_assets" / "img_01.png").exists()

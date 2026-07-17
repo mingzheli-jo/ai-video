@@ -631,3 +631,56 @@ def test_generate_image_uses_configured_model_and_adapted_size(monkeypatch):
     # 模型取自配置；尺寸随 3.0 上限自动等比适配，不再被服务端整单拒掉
     assert body["model"] == "doubao-seedream-3-0-t2i-250415"
     assert body["size"] == "1152x2048"
+
+
+# ---- 画幅铁闸（2026-07-17 实锤 studio_0717_223252：16:9 成片混进 9:16 库图） ----
+
+
+def test_same_aspect_cross_model_and_orientation():
+    from video_factory.image_gen import _same_aspect
+
+    # 跨模型同画幅互认（都是 9:16 / 都是 16:9）
+    assert _same_aspect("1440x2560", "1152x2048")
+    assert _same_aspect("2560x1440", "2048x1152")
+    # 横竖/异画幅绝不互认
+    assert not _same_aspect("1440x2560", "2560x1440")
+    assert not _same_aspect("2048x2048", "1536x2048")
+    # 缺失/非法一律 False（宁缺勿滥）
+    assert not _same_aspect("", "2560x1440")
+    assert not _same_aspect("坏值", "2560x1440")
+
+
+def test_image_file_matches_aspect_reads_real_pixels(tmp_path):
+    from PIL import Image
+
+    from video_factory.image_gen import image_file_matches_aspect
+
+    portrait = tmp_path / "p.png"
+    Image.new("RGB", (90, 160)).save(portrait)
+    landscape = tmp_path / "l.png"
+    Image.new("RGB", (160, 90)).save(landscape)
+
+    assert image_file_matches_aspect(landscape, "2560x1440")
+    assert not image_file_matches_aspect(portrait, "2560x1440")
+    assert image_file_matches_aspect(portrait, "1440x2560")
+    # 读图失败视为不符
+    broken = tmp_path / "b.png"
+    broken.write_bytes(b"not-an-image")
+    assert not image_file_matches_aspect(broken, "2560x1440")
+
+
+def test_prefilter_library_filters_by_target_aspect():
+    from video_factory.image_gen import _prefilter_library
+
+    entries = [
+        {"file": "a.png", "size": "1440x2560", "prompt": "竖图", "tags": []},
+        {"file": "b.png", "size": "2560x1440", "prompt": "横图", "tags": []},
+        {"file": "c.png", "size": "2048x1152", "prompt": "横图2", "tags": []},
+        {"file": "d.png", "prompt": "无尺寸旧条目", "tags": []},
+    ]
+    kept = _prefilter_library([], entries, target_size="2560x1440")
+    files = {e["file"] for e in kept}
+    # 只留 16:9；竖图与无 size 的旧条目一并剔除（严格执行）
+    assert files == {"b.png", "c.png"}
+    # 不传 target_size 维持旧行为（全量）
+    assert len(_prefilter_library([], entries)) == 4
