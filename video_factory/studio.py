@@ -35,6 +35,7 @@ from video_factory.image_gen import (
     ARK_IMAGE_DEFAULT_MODEL,
     DEFAULT_STYLE_PROMPT,
     get_image_model,
+    get_style_presets,
     get_style_prompt,
 )
 from video_factory.rewrite import build_rewrite_prompts, get_rewrite_style_prompt
@@ -164,6 +165,8 @@ def build_meta() -> dict:
         # 生图模型 ID（2026-07-17：可切版本吃各版本免费额度，尺寸自动适配）。
         "image_model": get_image_model(),
         "image_model_default": ARK_IMAGE_DEFAULT_MODEL,
+        # 生图风格预设库（2026-07-18 多套切换）：设置页管理 + 批量行按任务选用。
+        "image_style_presets": get_style_presets(),
         # 改写文风指令（DeepSeek 提示词自定义，同款机制）：空=只用内置内容类型模板。
         "rewrite_style_prompt": get_rewrite_style_prompt(),
         # 字幕样式（用户可调）：当前生效字号系数、字体族，以及字体白名单（前端下拉用）。
@@ -723,6 +726,7 @@ def make_handler(store: TaskStore):
             # 回显该设置项自己的当前生效值（历史 bug：曾硬编码回显生图提示词）。
             effective = {
                 "IMAGE_STYLE_PROMPT": get_style_prompt,
+                "IMAGE_STYLE_PRESETS": lambda: json.dumps(get_style_presets(), ensure_ascii=False),
                 "ARK_IMAGE_MODEL": get_image_model,
                 "REWRITE_STYLE_PROMPT": get_rewrite_style_prompt,
                 # 字号回显生效系数（钳位/回落后的数字，字符串化便于前端 number 输入回填）。

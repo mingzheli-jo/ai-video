@@ -34,10 +34,26 @@ export const CoverCard: React.FC<CoverCardProps> = ({ title, tag, accent, bg }) 
   return (
     <AbsoluteFill style={{ background: "#14120e", fontFamily: FONT_STACK }}>
       {bg ? (
-        <Img
-          src={bg}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-        />
+        <>
+          {/* 2026-07-18 用户实锤：cover 裁切会砍掉人物，抖音封面检测人物不全影响流量。
+              改双层：底层模糊铺满补边，前景 contain 完整显示——底图与画幅比例无论
+              差多少，人物永远完整。放大 1.15 把模糊边缘推出画外。 */}
+          <Img
+            src={bg}
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              objectFit: "cover", filter: "blur(36px) brightness(0.72)",
+              transform: "scale(1.15)",
+            }}
+          />
+          <Img
+            src={bg}
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              objectFit: "contain",
+            }}
+          />
+        </>
       ) : null}
       {/* 压暗渐变：底部重、顶部轻，保标题可读又不闷死画面 */}
       <div

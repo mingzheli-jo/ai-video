@@ -76,6 +76,39 @@ def get_style_prompt() -> str:
     return saved or DEFAULT_STYLE_PROMPT
 
 
+IMAGE_STYLE_PRESETS_ENV = "IMAGE_STYLE_PRESETS"
+
+
+def get_style_presets() -> list[dict]:
+    """生图风格预设库：[{"name": str, "prompt": str}, ...]（2026-07-18 多套切换）。
+
+    环境变量 > settings.yaml；解析失败/非法条目宽容跳过，永远返回合法列表。
+    「启用」动作由 UI 完成——把选中预设的 prompt 写进 IMAGE_STYLE_PROMPT，
+    流水线只读 get_style_prompt()，零改动。
+    """
+    raw = (os.getenv(IMAGE_STYLE_PRESETS_ENV) or "").strip()
+    if not raw:
+        from video_factory.settings_store import load_settings
+
+        raw = (load_settings().get(IMAGE_STYLE_PRESETS_ENV) or "").strip()
+    if not raw:
+        return []
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    presets: list[dict] = []
+    if isinstance(body, list):
+        for item in body:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            prompt = str(item.get("prompt") or "").strip()
+            if name and prompt:
+                presets.append({"name": name, "prompt": prompt})
+    return presets
+
+
 def get_image_model() -> str:
     """当前生效的生图模型 ID：环境变量 > settings.yaml > 内置默认（Seedream 4.0）。
 

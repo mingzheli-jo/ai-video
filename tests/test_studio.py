@@ -443,7 +443,10 @@ def test_page_contains_style_prompt_card():
     from video_factory import studio_ui
 
     html = studio_ui.render_page()
-    assert 'id="stylePrompt"' in html and 'id="stylePromptSave"' in html
+    # 2026-07-18 多套预设改造：编辑区 + 保存/启用/删除 + 预设芯片 + 批量行图片风格下拉
+    assert 'id="stylePrompt"' in html and 'id="stylePresetSave"' in html
+    assert 'id="stylePresetEnable"' in html and 'id="stylePresetChips"' in html
+    assert 'data-f="image_style"' in html
 
 
 def test_page_has_transcript_compare_button_and_modal():

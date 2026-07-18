@@ -16,6 +16,9 @@ SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.yaml"
 # 设置白名单：新增设置项时在这里登记（studio 的 /api/settings 只认白名单）。
 SETTING_NAMES = (
     "IMAGE_STYLE_PROMPT",
+    # 生图风格预设库（2026-07-18 用户定案：多套提示词、启用其一，切风格不丢词）。
+    # 值为单行 JSON 数组：[{"name": "美式漫画", "prompt": "..."}, ...]
+    "IMAGE_STYLE_PRESETS",
     # 生图模型 ID（2026-07-17：方舟按版本各给免费额度，可切版本吃额度）。
     "ARK_IMAGE_MODEL",
     "REWRITE_STYLE_PROMPT",

@@ -167,6 +167,57 @@ def _archive_videos(
     return archived, warnings
 
 
+def pick_cover_backgrounds(
+    job_dir: Path, video: Path | None, runner: Runner = subprocess.run
+) -> tuple[dict[str, Path | None], list[str]]:
+    """逐封面按画幅选底图（2026-07-18 用户实锤：16:9 封面配竖图会裁掉人物）。
+
+    候选 = 根/9x16/16x9 三处 gen_assets 的全部图片，按 PIL 真实像素分横竖：
+    16x9 封面优先配横图，9x16/3x4 封面优先配竖图；对应向没有图时回落任意首图
+    （CoverCard 已改 contain 渲染，人物依然完整，只是留模糊边），再回落成片抽帧。
+    """
+    warnings: list[str] = []
+    landscape: Path | None = None
+    portrait: Path | None = None
+    first_any: Path | None = None
+    for gen_dir in (
+        job_dir / "gen_assets",
+        job_dir / "9x16" / "gen_assets",
+        job_dir / "16x9" / "gen_assets",
+    ):
+        if not gen_dir.is_dir():
+            continue
+        for image in sorted(gen_dir.iterdir()):
+            if not image.is_file() or image.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                continue
+            if first_any is None:
+                first_any = image
+            if landscape is not None and portrait is not None:
+                break
+            try:
+                from PIL import Image
+
+                with Image.open(image) as img:
+                    width, height = img.size
+            except Exception:
+                continue
+            if width > height and landscape is None:
+                landscape = image
+            elif height >= width and portrait is None:
+                portrait = image
+    fallback = first_any
+    if fallback is None:
+        # 全无生图 → 沿用旧逻辑从成片抽帧（三张封面共用）。
+        fallback, frame_warnings = pick_cover_background(job_dir, video, runner)
+        warnings += frame_warnings
+    bgs = {
+        "16x9": landscape or fallback,
+        "9x16": portrait or fallback,
+        "3x4": portrait or fallback,
+    }
+    return bgs, warnings
+
+
 def _data_uri(path: Path) -> str:
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -186,13 +237,17 @@ def _cover_title(rewrite: dict) -> str:
 def render_covers(
     title: str,
     tag: str,
-    bg: Path | None,
+    bgs: dict[str, Path | None] | Path | None,
     output_dir: Path,
     runner: Runner = subprocess.run,
     remotion_dir: Path | str | None = None,
     accent: str = "#e8b84b",
 ) -> tuple[dict[str, str], list[str]]:
-    """Remotion still 渲染两张统一模板封面；npx 缺失/单张失败留痕跳过。"""
+    """Remotion still 渲染三张统一模板封面；npx 缺失/单张失败留痕跳过。
+
+    bgs 支持逐封面底图（{"16x9": 横图, "9x16": 竖图, ...}，2026-07-18 画幅匹配防裁人）；
+    传单个 Path/None 时三张共用（向后兼容旧调用）。
+    """
     warnings: list[str] = []
     covers: dict[str, str] = {}
     npx = shutil.which("npx")
@@ -205,15 +260,18 @@ def render_covers(
     # jpg 写到 remotion/ 下的错误位置（render_effects 同款坑，2026-07-16 实测复现）。
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    props = {
-        "title": title,
-        "tag": tag,
-        "accent": accent,
-        "bg": _data_uri(bg) if bg is not None and bg.exists() else "",
-    }
-    props_path = output_dir / "cover.props.json"
-    props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+    if not isinstance(bgs, dict):
+        bgs = {key: bgs for _c, _f, key in COVER_SPECS}
     for composition, filename, key in COVER_SPECS:
+        bg = bgs.get(key)
+        props = {
+            "title": title,
+            "tag": tag,
+            "accent": accent,
+            "bg": _data_uri(bg) if bg is not None and bg.exists() else "",
+        }
+        props_path = output_dir / f"cover.props.{key}.json"
+        props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
         out_path = output_dir / filename
         command = [
             npx, "remotion", "still", str(entry), composition, str(out_path),
@@ -351,10 +409,11 @@ def generate_publish_kit(
     video_path = Path(video) if video else None
 
     warnings: list[str] = []
-    bg, bg_warnings = pick_cover_background(job_dir, video_path, runner)
+    # 逐封面画幅匹配底图（2026-07-18）：16x9 封面配横图、竖封面配竖图，防裁人。
+    bgs, bg_warnings = pick_cover_backgrounds(job_dir, video_path, runner)
     warnings += bg_warnings
     covers, cover_warnings = render_covers(
-        _cover_title(rewrite), tag, bg, publish_dir, runner, remotion_dir
+        _cover_title(rewrite), tag, bgs, publish_dir, runner, remotion_dir
     )
     warnings += cover_warnings
     description, tags, desc_warnings = build_description_and_tags(rewrite, provider)

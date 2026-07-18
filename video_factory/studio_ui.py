@@ -667,7 +667,7 @@ function blankBatchJob() {
   const tts = (S.meta && S.meta.tts_providers && S.meta.tts_providers[0]) || 'doubao';
   return { name: '', style: '', source: '', assets: '', brief: '', tts,
     voice: '', bgm: '', duration: '', aspect: '9:16', dual_aspect: false,
-    subtitles: '', effects: '', sfx: '', ambient: '',
+    image_style: '', subtitles: '', effects: '', sfx: '', ambient: '',
     lower_thirds: false, visual_source: 'video', _grp: newGroup() };
 }
 
@@ -735,6 +735,7 @@ function renderBatchJobs() {
           <div><label>特效</label><select data-idx="${i}" data-f="effects">${optionsHtml(BATCH_TOGGLE_OPTS, j.effects)}</select></div>
           <div><label>特效音</label><select data-idx="${i}" data-f="sfx">${optionsHtml(BATCH_TOGGLE_OPTS, j.sfx)}</select></div>
           <div><label>氛围粒子</label><select data-idx="${i}" data-f="ambient">${optionsHtml(BATCH_TOGGLE_OPTS, j.ambient)}</select></div>
+          <div><label>图片风格</label><select data-idx="${i}" data-f="image_style"><option value="">跟随当前启用</option>${(meta.image_style_presets || []).map(p => `<option value="${esc(p.name)}"${p.name === j.image_style ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
         </div>
         <label>背景音乐（music/ 目录下拉选择）</label>
         <select data-idx="${i}" data-f="bgm">${bgmOptions(j.bgm)}</select>
@@ -791,6 +792,11 @@ function collectBatchJobs() {
     if (j.effects === 'on') o.effects = true; else if (j.effects === 'off') o.effects = false;
     if (j.sfx === 'on') o.sfx = true; else if (j.sfx === 'off') o.sfx = false;
     if (j.ambient === 'on') o.ambient_particles = true; else if (j.ambient === 'off') o.ambient_particles = false;
+    // 图片风格按行选预设：提交时把预设名解析成提示词全文下发（后端零查表）。
+    if (j.image_style) {
+      const preset = (S.meta.image_style_presets || []).find(p => p.name === j.image_style);
+      if (preset) o.image_style_prompt = preset.prompt;
+    }
     if (j.lower_thirds) o.lower_thirds = true;
     if (j.visual_source === 'ai_image') o.visual_source = 'ai_image';
     return o;
@@ -834,6 +840,7 @@ function renderCredPage(meta) {
     </div>`).join('');
   const sp = h('#stylePrompt');
   if (sp) sp.value = meta.image_style_prompt || '';
+  renderStylePresetChips();
   const im = h('#imageModel');
   if (im) { im.value = meta.image_model || ''; syncImageModelChips(); }
   const rp = h('#rewritePrompt');
@@ -853,18 +860,72 @@ function renderCredPage(meta) {
     `<div class="dep-item"><span class="dot ${meta.dependencies[k]?'on':'off'}"></span><span>${esc(deps[k]||k)}</span></div>`).join('');
 }
 
-async function saveStylePrompt() {
-  const value = h('#stylePrompt').value.trim();
-  const { status, data } = await api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: 'IMAGE_STYLE_PROMPT', value }) });
+// ----- 生图风格多套预设（2026-07-18：多套保存、启用其一，切风格不丢词） -----
+
+function styleMsg(text) {
   const msg = h('#stylePromptMsg');
-  if (status === 200) {
-    h('#stylePrompt').value = data.value || '';
-    msg.textContent = value ? '已保存并生效' : '已恢复内置默认';
-    S.meta.image_style_prompt = data.value;
-  } else {
-    msg.textContent = '保存失败：' + esc(data.error || status);
-  }
+  msg.textContent = text;
   setTimeout(() => { msg.textContent = ''; }, 4000);
+}
+
+function renderStylePresetChips() {
+  const wrap = h('#stylePresetChips');
+  if (!wrap) return;
+  const presets = S.meta.image_style_presets || [];
+  const active = (S.meta.image_style_prompt || '').trim();
+  wrap.innerHTML = presets.map(p =>
+    `<div class="chip${p.prompt.trim() === active ? ' active' : ''}" data-preset="${esc(p.name)}">${esc(p.name)}${p.prompt.trim() === active ? '（启用中）' : ''}</div>`
+  ).join('') || '<span class="task-meta">还没有预设：起个名、填好提示词，点「保存此套」。</span>';
+  wrap.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    const preset = presets.find(p => p.name === c.dataset.preset);
+    if (!preset) return;
+    h('#stylePresetName').value = preset.name;
+    h('#stylePrompt').value = preset.prompt;
+  }));
+}
+
+async function _postSetting(name, value) {
+  return api('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, value }) });
+}
+
+async function saveStylePreset(silent) {
+  const name = h('#stylePresetName').value.trim();
+  const prompt = h('#stylePrompt').value.trim();
+  if (!name || !prompt) { styleMsg('预设名和提示词内容都不能为空'); return false; }
+  const presets = (S.meta.image_style_presets || []).filter(p => p.name !== name);
+  presets.push({ name, prompt });
+  const { status, data } = await _postSetting('IMAGE_STYLE_PRESETS', JSON.stringify(presets));
+  if (status !== 200) { styleMsg('保存失败：' + esc(data.error || status)); return false; }
+  S.meta.image_style_presets = presets;
+  renderStylePresetChips();
+  renderBatchJobs();  // 批量行的图片风格下拉同步新预设
+  if (!silent) styleMsg('已保存预设「' + name + '」');
+  return true;
+}
+
+async function enableStylePreset() {
+  const prompt = h('#stylePrompt').value.trim();
+  if (prompt && h('#stylePresetName').value.trim()) {
+    const ok = await saveStylePreset(true);
+    if (!ok) return;
+  }
+  const { status, data } = await _postSetting('IMAGE_STYLE_PROMPT', prompt);
+  if (status !== 200) { styleMsg('启用失败：' + esc(data.error || status)); return; }
+  S.meta.image_style_prompt = data.value;
+  renderStylePresetChips();
+  styleMsg(prompt ? '已启用，此后生图都用这套' : '已恢复内置默认（美式漫画）');
+}
+
+async function deleteStylePreset() {
+  const name = h('#stylePresetName').value.trim();
+  const presets = (S.meta.image_style_presets || []).filter(p => p.name !== name);
+  if (presets.length === (S.meta.image_style_presets || []).length) { styleMsg('没有叫这个名的预设'); return; }
+  const { status, data } = await _postSetting('IMAGE_STYLE_PRESETS', JSON.stringify(presets));
+  if (status !== 200) { styleMsg('删除失败：' + esc(data.error || status)); return; }
+  S.meta.image_style_presets = presets;
+  renderStylePresetChips();
+  renderBatchJobs();
+  styleMsg('已删除预设「' + name + '」（当前启用的提示词不受影响）');
 }
 
 // 模型快捷芯片：点选填入输入框（datalist 会按已填内容过滤候选、看起来"只剩一项"，
@@ -965,7 +1026,9 @@ document.addEventListener('DOMContentLoaded', () => {
   h('#batchValidateBtn').addEventListener('click', batchValidate);
   h('#batchRunBtn').addEventListener('click', batchRun);
   h('#batchAddBtn').addEventListener('click', () => addBatchJob());
-  h('#stylePromptSave').addEventListener('click', saveStylePrompt);
+  h('#stylePresetSave').addEventListener('click', () => saveStylePreset(false));
+  h('#stylePresetEnable').addEventListener('click', enableStylePreset);
+  h('#stylePresetDelete').addEventListener('click', deleteStylePreset);
   h('#imageModelSave').addEventListener('click', saveImageModel);
   document.querySelectorAll('#imageModelChips .chip').forEach(c => c.addEventListener('click', () => {
     h('#imageModel').value = c.dataset.model;
@@ -1136,12 +1199,17 @@ def _body() -> str:
         <div id="credRows"></div>
       </div>
       <div class="card">
-        <h2>生图风格</h2>
-        <p class="desc">AI 配图的统一画风提示词：自动追加到每条生图提示词之后，保证整个账号画风一致。
-        默认为美式漫画插画风（参考爆款账号风格）；改完点保存立即生效并写入 settings.yaml。清空保存 = 恢复默认。</p>
-        <textarea id="stylePrompt" style="min-height:96px" placeholder="加载中…"></textarea>
+        <h2>生图风格（多套预设，启用其一）</h2>
+        <p class="desc">可保存多套画风提示词（如「美式漫画」「古风淡彩」），<b>启用哪套，单任务生图就用哪套</b>；
+        切风格做别的账号、再切回来，提示词一字不丢（2026-07-18）。批量生产里还可以按任务行单独选用某套预设。
+        金色高亮 = 当前启用。清空内容点启用 = 恢复内置默认（美式漫画）。</p>
+        <div class="chips" id="stylePresetChips" style="margin-bottom:10px"></div>
+        <input type="text" id="stylePresetName" placeholder="预设名（如：古风淡彩）" style="margin-bottom:8px">
+        <textarea id="stylePrompt" style="min-height:96px" placeholder="画风提示词内容…"></textarea>
         <div class="batch-actions">
-          <button type="button" class="btn" id="stylePromptSave">保存风格</button>
+          <button type="button" class="btn" id="stylePresetSave">保存此套</button>
+          <button type="button" class="btn" id="stylePresetEnable">启用此套</button>
+          <button type="button" class="btn btn-ghost" id="stylePresetDelete">删除此套</button>
           <span id="stylePromptMsg" class="task-meta"></span>
         </div>
       </div>

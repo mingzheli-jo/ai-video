@@ -71,7 +71,8 @@ def test_generate_publish_kit_end_to_end_offline(tmp_path, monkeypatch):
     comps = [c[c.index("still") + 2] for c in runner.commands if "still" in c]
     assert comps == ["Cover16x9", "Cover9x16", "Cover3x4"]
     # props：标题取 publish_titles[0]、底图 data URI 来自 gen_assets 首图
-    props = json.loads((job_dir / "publish" / "cover.props.json").read_text(encoding="utf-8"))
+    # 2026-07-18 起 props 逐封面独立（画幅匹配底图防裁人），抽 16x9 那份验证
+    props = json.loads((job_dir / "publish" / "cover.props.16x9.json").read_text(encoding="utf-8"))
     assert props["title"].startswith("王阳明")
     assert props["tag"] == "心学频道"
     assert props["bg"].startswith("data:image/png;base64,")
@@ -200,3 +201,30 @@ def test_publish_archives_single_root_video_without_npx(tmp_path, monkeypatch):
 
     assert set(kit["videos"]) == {"横版_16x9"}
     assert (job_dir / "publish" / "视频_横版_16x9.mp4").exists()
+
+
+def test_pick_cover_backgrounds_matches_aspect_per_cover(tmp_path):
+    # 2026-07-18 防裁人：16x9 封面配横图、9x16/3x4 封面配竖图；无对应向回落任意首图。
+    from PIL import Image
+
+    from video_factory.publish import pick_cover_backgrounds
+
+    job_dir = tmp_path / "job"
+    gen = job_dir / "gen_assets"
+    gen.mkdir(parents=True)
+    Image.new("RGB", (90, 160)).save(gen / "a_portrait.png")
+    Image.new("RGB", (160, 90)).save(gen / "b_landscape.png")
+
+    bgs, warnings = pick_cover_backgrounds(job_dir, None)
+    assert bgs["16x9"].name == "b_landscape.png"
+    assert bgs["9x16"].name == "a_portrait.png"
+    assert bgs["3x4"].name == "a_portrait.png"
+    assert warnings == []
+
+    # 只有竖图 → 16x9 回落首图（CoverCard contain 渲染保人物完整）
+    job2 = tmp_path / "job2"
+    gen2 = job2 / "gen_assets"
+    gen2.mkdir(parents=True)
+    Image.new("RGB", (90, 160)).save(gen2 / "only_portrait.png")
+    bgs2, _ = pick_cover_backgrounds(job2, None)
+    assert bgs2["16x9"].name == "only_portrait.png"

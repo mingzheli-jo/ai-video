@@ -754,3 +754,22 @@ def test_fallback_respects_already_used_files(monkeypatch):
 
     assert result[0]["action"] == "reuse" and result[0]["file"] == "zuo.png"
     assert result[1]["action"] == "generate"  # 唯一相关图已被占用，不重复复用
+
+
+def test_get_style_presets_parses_and_tolerates_garbage(monkeypatch):
+    from video_factory.image_gen import get_style_presets
+
+    monkeypatch.delenv("IMAGE_STYLE_PRESETS", raising=False)
+    presets_json = '[{"name": "古风淡彩", "prompt": "中国风淡彩插画"}, {"name": "", "prompt": "无名"}, "坏条目"]'
+    monkeypatch.setattr(
+        "video_factory.settings_store.load_settings",
+        lambda: {"IMAGE_STYLE_PRESETS": presets_json},
+    )
+    presets = get_style_presets()
+    assert presets == [{"name": "古风淡彩", "prompt": "中国风淡彩插画"}]
+    # 非法 JSON → 空列表不炸
+    monkeypatch.setattr(
+        "video_factory.settings_store.load_settings",
+        lambda: {"IMAGE_STYLE_PRESETS": "not-json"},
+    )
+    assert get_style_presets() == []

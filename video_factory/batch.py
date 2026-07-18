@@ -107,6 +107,9 @@ class ResolvedJob:
     voice_speed: float | None = None
     # 视觉来源：video=用上传的视频素材目录（默认，向后兼容）；ai_image=豆包生图为每节配图。
     visual_source: str = "video"
+    # 本任务专属生图风格提示词（2026-07-18 批量按行选预设）：非空时覆盖全局启用的
+    # 风格；空=用 get_style_prompt() 当前启用值。
+    image_style_prompt: str = ""
     # resolve 阶段字段解析失败的错误（如 duration 非数字）；非空即整个 job 记 invalid。
     resolve_errors: tuple[str, ...] = ()
 
@@ -184,6 +187,7 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
         ambient_particles=bool(_pick(raw, "ambient_particles", None, True)),
         dual_aspect=bool(raw.get("dual_aspect") or False),
         visual_source=_normalize_visual_source(raw.get("visual_source")),
+        image_style_prompt=str(raw.get("image_style_prompt") or "").strip(),
         voice_speed=(
             float(raw["voice_speed"])
             if raw.get("voice_speed") not in (None, "")
@@ -522,7 +526,8 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     failures: list[str] = []
     # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
     # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
-    style = image_gen.get_style_prompt()
+    # 2026-07-18：批量行可按任务选预设——job 专属风格非空时覆盖全局启用值。
+    style = job.image_style_prompt.strip() or image_gen.get_style_prompt()
     # 第二道禁文字保险：除了上游 LLM 写提示词时的约束，最终喂给 Seedream 的提示词里
     # 也钉死（实测拍级图冒出"苦涩/回甘"贴字和乱码气泡——生图模型对提示词内的
     # 负向约束服从度远高于指望上游转述）。
