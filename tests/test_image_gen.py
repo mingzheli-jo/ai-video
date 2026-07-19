@@ -199,7 +199,9 @@ def test_settings_store_roundtrip_and_flatten(tmp_path):
     path = tmp_path / "settings.yaml"
     settings_store.save_setting("IMAGE_STYLE_PROMPT", "第一行\n第二行", path=path)
     saved = settings_store.load_settings(path)
-    assert saved["IMAGE_STYLE_PROMPT"] == "第一行 第二行"  # 换行折成空格（扁平 YAML 单行）
+    # 2026-07-19 起 JSON 转义落盘：换行无损还原（旧实现折成空格，且会丢双引号——
+    # 正是"预设重启蒸发"的根因）。
+    assert saved["IMAGE_STYLE_PROMPT"] == "第一行\n第二行"
     settings_store.save_setting("IMAGE_STYLE_PROMPT", "", path=path)
     assert "IMAGE_STYLE_PROMPT" not in settings_store.load_settings(path)  # 清空=恢复默认
 

@@ -6,9 +6,8 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-
-from video_factory.credentials_store import _parse_flat_yaml, save_credential as _save_line
 
 # 项目根 settings.yaml（基于本文件定位，不随 CWD 变化）。
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.yaml"
@@ -51,18 +50,64 @@ _HEADER = (
 
 
 def load_settings(path: Path | None = None) -> dict[str, str]:
-    """读 settings.yaml 里的白名单设置（文件缺失返回空 dict）。"""
+    """读 settings.yaml 里的白名单设置（文件缺失返回空 dict）。
+
+    2026-07-19 修复：不再复用凭据层的解析——那套会剥引号且配套的写入会**丢弃值内
+    全部双引号**（对 API Key 是防注入，对含 JSON 的预设值是毁灭：引号剥光、重启后
+    解析失败、预设蒸发，用户"每次重启都要重新设定"的根因）。
+    新格式值为 JSON 字符串字面量（见 save_setting），旧格式裸值/成对引号兼容读取。
+    """
     target = Path(path) if path is not None else SETTINGS_PATH
     if not target.exists():
         return {}
-    return _parse_flat_yaml(
-        target.read_text(encoding="utf-8", errors="replace"), frozenset(SETTING_NAMES)
-    )
+    allowed = frozenset(SETTING_NAMES)
+    result: dict[str, str] = {}
+    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        if key not in allowed:
+            continue
+        value = value.strip()
+        if value.startswith('"'):
+            try:
+                # 新格式：完整 JSON 字符串（内层引号 \" 、换行 \n 均无损还原）。
+                # 旧格式 `KEY: "简单值"` 恰好也是合法 JSON 字符串，同路兼容。
+                value = str(json.loads(value))
+            except json.JSONDecodeError:
+                # 旧坏行（曾被剥引号的残值）：按旧规则剥成对引号兜底。
+                if len(value) >= 2 and value[0] == value[-1]:
+                    value = value[1:-1]
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] == "'":
+            value = value[1:-1]
+        if value:
+            result[key] = value
+    return result
 
 
 def save_setting(name: str, value: str, path: Path | None = None) -> None:
-    """按行更新/插入一个设置（保留注释与其余行）。换行折成空格——扁平 YAML 只支持单行。"""
+    """按行更新/插入一个设置（保留注释与其余行）。
+
+    值以 JSON 字符串字面量落盘：内层双引号转义为 \\"、换行转义为 \\n——天然单行、
+    无损往返、也无换行注入面（凭据层靠"丢字符"防注入，settings 靠转义防注入）。
+    """
     target = Path(path) if path is not None else SETTINGS_PATH
     if not target.exists():
         target.write_text(_HEADER, encoding="utf-8")
-    _save_line(name, " ".join(str(value).split()), path=target)
+    encoded = json.dumps(str(value), ensure_ascii=False)
+    new_line = f"{name}: {encoded}"
+    out: list[str] = []
+    replaced = False
+    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not replaced and stripped and not stripped.startswith("#"):
+            if stripped.partition(":")[0].strip() == name:
+                out.append(new_line)
+                replaced = True
+                continue
+        out.append(line)
+    if not replaced:
+        out.append(new_line)
+    target.write_text("\n".join(out) + "\n", encoding="utf-8")

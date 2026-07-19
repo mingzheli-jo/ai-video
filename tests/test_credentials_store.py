@@ -128,3 +128,49 @@ def test_sanitize_credential_value_strips_line_breaks_and_quotes():
     assert cs._sanitize_credential_value("a" + chr(0x2028) + "b") == "ab"   # Unicode 行分隔符也剥
     assert cs._sanitize_credential_value("a" + chr(34) + "b" + chr(34) + "c") == "abc"  # 双引号剥除
     assert cs._sanitize_credential_value("sk-live_AB.cd-12") == "sk-live_AB.cd-12"  # 合法 key 不动
+
+
+# ---- settings_store 无损往返（2026-07-19 修"重启后预设蒸发"） ----
+
+
+def test_settings_roundtrip_preserves_json_with_quotes(tmp_path):
+    """根因回归：凭据层净化会丢弃值内全部双引号，含 JSON 的预设值落盘即坏、
+    重启解析失败。settings 层改 JSON 字符串编码后必须无损往返。"""
+    import json
+
+    from video_factory import settings_store
+
+    path = tmp_path / "settings.yaml"
+    presets = [{"name": "美式漫画", "prompt": "含\"引号\"与\n换行的提示词"}]
+    value = json.dumps(presets, ensure_ascii=False)
+    settings_store.save_setting("IMAGE_STYLE_PRESETS", value, path=path)
+
+    loaded = settings_store.load_settings(path=path)
+    assert json.loads(loaded["IMAGE_STYLE_PRESETS"]) == presets
+
+
+def test_settings_newline_injection_cannot_forge_keys(tmp_path):
+    """防注入不靠丢字符靠转义：值里藏 换行+伪键行 不得在重载时变成合法键。"""
+    from video_factory import settings_store
+
+    path = tmp_path / "settings.yaml"
+    settings_store.save_setting(
+        "IMAGE_STYLE_PROMPT", 'x"\nARK_IMAGE_MODEL: "hacked', path=path
+    )
+    loaded = settings_store.load_settings(path=path)
+    assert loaded.get("ARK_IMAGE_MODEL") != "hacked"
+    assert 'x"' in loaded["IMAGE_STYLE_PROMPT"]  # 原值含引号换行也完整还原
+
+
+def test_settings_legacy_plain_lines_still_load(tmp_path):
+    """旧格式（裸包引号、无内层转义）的既有行必须继续可读。"""
+    from video_factory import settings_store
+
+    path = tmp_path / "settings.yaml"
+    path.write_text(
+        'SUBTITLE_FONT_NAME: "KaiTi"\nARK_IMAGE_MODEL: "doubao-seedream-4-0-250828"\n',
+        encoding="utf-8",
+    )
+    loaded = settings_store.load_settings(path=path)
+    assert loaded["SUBTITLE_FONT_NAME"] == "KaiTi"
+    assert loaded["ARK_IMAGE_MODEL"] == "doubao-seedream-4-0-250828"
