@@ -1905,3 +1905,25 @@ def test_sync_layer_fills_from_timeline_when_candidates_short():
     # 70s → 目标 ceil(70/35)=2 次，全部来自补填
     assert len(mids) == 2
     assert {round(m["start"], 1) for m in mids} == {20.0, 45.0}
+
+
+def test_sync_density_reaches_ten_per_minute():
+    """2026-07-18 密度大改：60s 视频中段时刻冲到 ~10 个（旧口径只有 2 个）。"""
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 4.0},
+        {"index": 1, "title": "正文", "duration_seconds": 56.0},
+    ]}
+    rewrite = {"sections": [{"narration": "平铺直叙没有引号没有数字"}]}
+    # 15 句、每句 4s、8~10 字：全部是合格的补填候选
+    timeline = [
+        {"text": f"第{i:02d}句适配补填内容", "start": i * 4.0, "end": i * 4.0 + 3.5}
+        for i in range(15)
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    mids = [e for e in manifest["effects"]
+            if e["type"] in ("golden_lines", "highlight_sweep")]
+    # 目标 ceil(60/6)=10；开屏避让窗吃掉片头 1~2 个候选，8~10 都算达标
+    assert 8 <= len(mids) <= 10
+    # 相邻间隔守住 4s 下限
+    starts = sorted(e["start"] for e in mids)
+    assert all(b - a >= 4.0 - 1 / 30 for a, b in zip(starts, starts[1:]))

@@ -1230,3 +1230,20 @@ def test_karaoke_two_line_portrait_newline_has_no_time_share():
     assert _re.search(r"\{\\kf\d+\}\\N", dialogue) is None  # \N 前无归属它的标签体
     spans = [int(m) for m in _re.findall(r"\\kf(\d+)", dialogue)]
     assert sum(spans) == 300  # 3s = 300cs 全部摊给 15 个实字，\N 不占
+
+
+def test_burn_command_micro_fingerprint_per_seed():
+    """2026-07-18 同画质对抗：烧录命令按种子追加确定性微调色，跨视频指纹不同。"""
+    from video_factory.subtitles import _build_burn_command
+
+    plain = _build_burn_command()
+    vf_plain = plain[plain.index("-vf") + 1]
+    assert vf_plain == "subtitles=subtitles.ass"  # 无种子维持旧行为
+
+    a1 = _build_burn_command("studio_a")
+    a2 = _build_burn_command("studio_a")
+    b = _build_burn_command("studio_b")
+    vf_a1, vf_a2, vf_b = (c[c.index("-vf") + 1] for c in (a1, a2, b))
+    assert vf_a1.startswith("subtitles=subtitles.ass,eq=brightness=")
+    assert vf_a1 == vf_a2      # 同任务重跑稳定
+    assert vf_a1 != vf_b       # 跨任务不同

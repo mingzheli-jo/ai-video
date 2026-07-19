@@ -105,10 +105,12 @@ AMBIENT_LOOP_SECONDS = 8.0
 
 # 首屏式同步时刻（2026-07-16 用户定案：中段特效文字必须与字幕语音对接上）：
 # 行文本、逐行弹入时刻、时长全部取自 timeline 真句——和首屏同一套对接方式。
-# 次数随片长动态：每 ~35s 一次，3 分钟约 5~6 次，封顶 6 次。
-SYNC_MOMENT_EVERY_S = 35.0
-SYNC_MOMENT_MAX_COUNT = 6
-SYNC_MOMENT_MIN_GAP = 8.0        # 相邻时刻最小间隔（秒）
+# 次数随片长动态（2026-07-18 用户定案密度大改：60s ≈10 个、可更多）：每 ~6s 一个
+# 理想槽位，封顶 30；实际次数仍由 AI 导演式的候选质量决定——补填只收 6~16 字的
+# 适配短句、避让窗（开屏/金句卡）照旧、最小间隔兜底，凑不齐就自然少出。
+SYNC_MOMENT_EVERY_S = 6.0
+SYNC_MOMENT_MAX_COUNT = 30
+SYNC_MOMENT_MIN_GAP = 4.0        # 相邻时刻最小间隔（秒）
 SYNC_RUN_MAX_LINES = 3           # 一个时刻最多叠 3 行（首屏同款）
 SYNC_RUN_LINE_MAX_CHARS = 14     # 并入后续句的单行字数上限（长句自己成段更清晰）
 SYNC_RUN_MAX_GAP = 0.8           # 相邻句并入的最大静默间隙（秒）

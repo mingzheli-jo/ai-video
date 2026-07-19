@@ -25,6 +25,7 @@ import argparse
 import difflib
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -754,12 +755,29 @@ def ensure_libass(runner: Runner = subprocess.run) -> None:
 # --- 烧录 ----------------------------------------------------------------
 
 
-def _build_burn_command() -> list[str]:
-    """libass 烧录命令：滤镜参数写裸文件名（配合 cwd=输出目录规避 Windows 路径坑）。"""
+def _micro_fingerprint_filter(seed: str) -> str:
+    """按任务名确定性生成 ±2% 内的微调色滤镜（2026-07-18 抖音同画质限流对抗）。
+
+    最终编码时给每支视频叠一层肉眼无感的独有色彩偏移：亮度 ±0.012、对比度 ±2%、
+    饱和度 ±3%——同一支视频内稳定，跨视频帧指纹全体不同。"""
+    rnd = random.Random(seed)
+    brightness = rnd.uniform(-0.012, 0.012)
+    contrast = 1 + rnd.uniform(-0.02, 0.02)
+    saturation = 1 + rnd.uniform(-0.03, 0.03)
+    return f"eq=brightness={brightness:.4f}:contrast={contrast:.4f}:saturation={saturation:.4f}"
+
+
+def _build_burn_command(fingerprint_seed: str = "") -> list[str]:
+    """libass 烧录命令：滤镜参数写裸文件名（配合 cwd=输出目录规避 Windows 路径坑）。
+
+    fingerprint_seed 非空时在字幕滤镜后追加逐视频微调色（见 _micro_fingerprint_filter）。"""
+    vf = f"subtitles={ASS_FILENAME}"
+    if fingerprint_seed:
+        vf = f"{vf},{_micro_fingerprint_filter(fingerprint_seed)}"
     return [
         "ffmpeg", "-y",
         "-i", RELEASE_FILENAME,
-        "-vf", f"subtitles={ASS_FILENAME}",
+        "-vf", vf,
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
         "-c:a", "copy",
         # +faststart：把 moov 索引原子挪到文件头，浏览器才能边下边播（2026-07-15 修复
@@ -774,6 +792,7 @@ def burn_subtitles(
     ass_path: Path | str,
     output: Path | str,
     runner: Runner = subprocess.run,
+    fingerprint_seed: str = "",
 ) -> Path:
     """把 .ass 硬烧进视频。视频重编 libx264 crf 18，音轨 -c:a copy 直通。
 
@@ -795,7 +814,7 @@ def burn_subtitles(
     _stage_copy(video, staged_video)
     _stage_copy(ass_path, staged_ass)
 
-    command = _build_burn_command()
+    command = _build_burn_command(fingerprint_seed)
     tmp_output = work_dir / (RELEASE_FILENAME + ".sub.tmp.mp4")
     try:
         completed = runner(
@@ -1092,7 +1111,9 @@ def generate_subtitles(
     )
 
     release_path = output_dir / RELEASE_FILENAME
-    burn_subtitles(video, ass_path, release_path, runner)
+    # 逐视频微指纹（2026-07-18 抖音同画质限流对抗）：种子取任务目录名，
+    # 同任务重跑稳定、跨任务全不同。
+    burn_subtitles(video, ass_path, release_path, runner, fingerprint_seed=output_dir.name)
 
     if used_mode == "timeline":
         timeline_source = "主时间轴 timeline.json（P16，逐句真实起止，已跳过 ASR）"

@@ -1350,3 +1350,22 @@ def test_job_image_style_prompt_overrides_global(tmp_path, monkeypatch):
     assert batch._run_image_gen(job, job_dir) == 0
     assert "古风淡彩测试风" in gen_prompts[0]
     assert "全局美漫风" not in gen_prompts[0]
+
+
+def test_resolve_bgm_random_sentinel_picks_from_music_dir(tmp_path, monkeypatch):
+    """2026-07-18 BGM 随机轮换：哨兵值从 music/ 抽一首；普通值透传；空目录回落无 BGM。"""
+    music = tmp_path / "music"
+    music.mkdir()
+    (music / "a.mp3").write_bytes(b"m")
+    (music / "b.mp3").write_bytes(b"m")
+    monkeypatch.setattr(batch, "MUSIC_DIR", music)
+
+    job = resolve_job({"source": "s", "assets": "a", "bgm": "__random__"}, 0)
+    picked = batch._resolve_bgm(job)
+    assert picked.endswith(".mp3") and "music" in picked
+
+    plain = resolve_job({"source": "s", "assets": "a", "bgm": "C:/x.mp3"}, 0)
+    assert batch._resolve_bgm(plain) == "C:/x.mp3"
+
+    monkeypatch.setattr(batch, "MUSIC_DIR", tmp_path / "empty")
+    assert batch._resolve_bgm(job) == ""

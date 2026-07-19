@@ -304,6 +304,13 @@ function updateBgmPreview() {
   const value = h('#f_bgm').value;
   const warn = h('#bgmWarn');
   const audio = h('#bgmPreview');
+  if (value === '__random__') {
+    // 随机模式：算已选择（不警示），但没有固定文件可试听。
+    warn.style.display = 'none';
+    audio.pause();
+    audio.style.display = 'none';
+    return;
+  }
   if (value) {
     warn.style.display = 'none';
     const url = '/media?path=' + encodeURIComponent(value);
@@ -330,6 +337,7 @@ function renderAdvanced(meta) {
   const bgmSel = h('#f_bgm');
   const musicFiles = meta.music_files || [];
   bgmSel.innerHTML = '<option value="">无背景音乐</option>' +
+    '<option value="__random__">随机（每支视频从 music/ 轮换，防音频指纹重复）</option>' +
     musicFiles.map(f => `<option value="${esc(f.path)}">${esc(f.name)}</option>`).join('');
   if (!musicFiles.length) {
     bgmSel.innerHTML += '<option value="" disabled>（music/ 目录为空，放入 mp3/wav 后刷新）</option>';
@@ -701,6 +709,7 @@ function renderBatchJobs() {
   const tts = meta.tts_providers || [];
   const musicFiles = meta.music_files || [];
   const bgmOptions = (sel) => '<option value="">无背景音乐</option>' +
+    `<option value="__random__"${sel === '__random__' ? ' selected' : ''}>随机（每支轮换）</option>` +
     musicFiles.map(f => `<option value="${esc(f.path)}"${f.path === sel ? ' selected' : ''}>${esc(f.name)}</option>`).join('');
   h('#batchJobs').innerHTML = S.batchJobs.map((j, i) => `
     <div class="batch-job" data-idx="${i}">

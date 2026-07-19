@@ -128,6 +128,29 @@ _GEN_SIZE_BY_ASPECT = {
 # 拍级配图模式：单次批量最多生成图片数（生成超出部分截断并告警，复用库图不计入此限）。
 MAX_GENERATED_PER_JOB = 60
 
+# BGM 随机轮换（2026-07-18 抖音同质化对抗：音频指纹也别每支都一样）。
+# 表单选"随机"下发本哨兵值，任务执行时从 music/ 目录实时抽一首。
+RANDOM_BGM_SENTINEL = "__random__"
+MUSIC_DIR = Path(__file__).resolve().parent.parent / "music"
+_MUSIC_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
+
+
+def _resolve_bgm(job: "ResolvedJob") -> str:
+    """解析 BGM：哨兵值 → 从 music/ 随机抽一首（空目录回落无 BGM），其余原样。"""
+    if job.bgm != RANDOM_BGM_SENTINEL:
+        return job.bgm
+    if not MUSIC_DIR.is_dir():
+        return ""
+    files = sorted(
+        p for p in MUSIC_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in _MUSIC_EXTS
+    )
+    if not files:
+        return ""
+    import random as _random
+
+    return str(_random.choice(files))
+
 
 def _normalize_visual_source(value) -> str:
     v = str(value or "").strip().lower()
@@ -318,8 +341,9 @@ def build_assemble_argv(job: ResolvedJob, job_dir: Path) -> list[str]:
             if job.voice_speed is not None:
                 # 语速只对现场 TTS 有意义（复用现成配音 --audio 时变速会毁成品，不传）。
                 argv += ["--voice-speed", str(job.voice_speed)]
-    if job.bgm:
-        argv += ["--bgm", job.bgm]
+    bgm = _resolve_bgm(job)
+    if bgm:
+        argv += ["--bgm", bgm]
         if job.bgm_volume is not None:
             argv += ["--bgm-volume", str(job.bgm_volume)]
     # 拍级配图模式：让 assemble 按拍序分配图片（而非扫描池随机对应）。
@@ -552,7 +576,9 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
                     action = "generate"
                 else:
                     dst = dst_prefix.with_suffix(src.suffix.lower() or ".png")
-                    dst.write_bytes(src.read_bytes())
+                    # 复用不裸拷：轻度扰动让同一库图在不同视频里指纹不同
+                    # （2026-07-18 抖音同画质限流对抗；失败自动回落原样拷贝）。
+                    image_gen.perturb_image_for_reuse(src, dst, seed=f"{job.name}:{beat_idx}")
                     copied += 1
                     reused += 1
                     continue

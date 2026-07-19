@@ -773,3 +773,32 @@ def test_get_style_presets_parses_and_tolerates_garbage(monkeypatch):
         lambda: {"IMAGE_STYLE_PRESETS": "not-json"},
     )
     assert get_style_presets() == []
+
+
+def test_perturb_image_for_reuse_changes_bytes_deterministically(tmp_path):
+    """2026-07-18 同画质对抗：复用图扰动后字节不同、尺寸不变、同种子结果稳定。"""
+    from PIL import Image
+
+    from video_factory.image_gen import perturb_image_for_reuse
+
+    src = tmp_path / "src.png"
+    Image.new("RGB", (160, 90), (120, 80, 200)).save(src)
+    dst1, dst2 = tmp_path / "a.png", tmp_path / "b.png"
+
+    assert perturb_image_for_reuse(src, dst1, seed="job:0") is True
+    assert perturb_image_for_reuse(src, dst2, seed="job:0") is True
+    assert dst1.read_bytes() != src.read_bytes()          # 指纹已变
+    assert dst1.read_bytes() == dst2.read_bytes()         # 同种子确定性
+    with Image.open(dst1) as img:
+        assert img.size == (160, 90)                      # 尺寸不变（画幅闸不受影响）
+    # 不同种子 → 不同结果
+    dst3 = tmp_path / "c.png"
+    perturb_image_for_reuse(src, dst3, seed="job:1")
+    assert dst3.read_bytes() != dst1.read_bytes()
+
+    # 坏文件回落原样拷贝且不抛
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not-an-image")
+    dst4 = tmp_path / "d.png"
+    assert perturb_image_for_reuse(broken, dst4, seed="s") is False
+    assert dst4.read_bytes() == broken.read_bytes()
