@@ -804,3 +804,92 @@ def test_perturb_image_for_reuse_changes_bytes_deterministically(tmp_path):
     dst4 = tmp_path / "d.png"
     assert perturb_image_for_reuse(broken, dst4, seed="s") is False
     assert dst4.read_bytes() == broken.read_bytes()
+
+
+# ---------- 风格隔离（2026-07-19 实锤：古风任务复用进美式库图） ----------
+
+
+def test_style_key_stable_and_default_key():
+    from video_factory.image_gen import DEFAULT_STYLE_KEY, DEFAULT_STYLE_PROMPT, style_key_for
+
+    assert style_key_for("古风淡彩") == style_key_for("  古风淡彩  ")  # strip 后同指纹
+    assert style_key_for("古风淡彩") != style_key_for("美式漫画")
+    assert style_key_for(DEFAULT_STYLE_PROMPT) == DEFAULT_STYLE_KEY
+    assert len(DEFAULT_STYLE_KEY) == 12
+
+
+def test_find_reusable_isolates_styles(tmp_path):
+    from video_factory.image_gen import DEFAULT_STYLE_KEY, style_key_for
+
+    root = tmp_path / "图片"
+    (root / "物品").mkdir(parents=True)
+    (root / "物品" / "img_us.png").write_bytes(b"x")
+    (root / "物品" / "img_gf.png").write_bytes(b"x")
+    guofeng = style_key_for("古风淡彩水墨")
+    entries = [
+        # 旧条目无 style 字段 → 视为内置美式默认风格
+        {"file": "物品/img_us.png", "category": "物品", "size": "1080x1920",
+         "tags": ["手机", "特写"], "created": 1.0},
+        {"file": "物品/img_gf.png", "category": "物品", "size": "1080x1920",
+         "tags": ["手机", "特写"], "style": guofeng, "created": 2.0},
+    ]
+    item = ImagePlanItem(0, "提示词", "物品", ("手机", "特写"))
+    hit = find_reusable(item, "1080x1920", entries, root, style_key=guofeng)
+    assert hit is not None and hit.name == "img_gf.png"  # 古风只认古风
+    hit = find_reusable(item, "1080x1920", entries, root, style_key=DEFAULT_STYLE_KEY)
+    assert hit is not None and hit.name == "img_us.png"  # 默认风格可复用旧无 style 条目
+    # 第三种风格谁也不认；不传 style_key = 兼容旧行为不过滤
+    from video_factory.image_gen import style_key_for as skf
+    assert find_reusable(item, "1080x1920", entries, root, style_key=skf("赛博朋克")) is None
+    assert find_reusable(item, "1080x1920", entries, root) is not None
+
+
+def test_prefilter_library_filters_by_style_key():
+    from video_factory.image_gen import DEFAULT_STYLE_KEY, _prefilter_library, style_key_for
+
+    guofeng = style_key_for("古风淡彩水墨")
+    entries = [
+        {"file": "a.png", "size": "1080x1920"},  # 旧条目 → 默认美式指纹
+        {"file": "b.png", "size": "1080x1920", "style": guofeng},
+    ]
+    assert [e["file"] for e in _prefilter_library([], entries, style_key=guofeng)] == ["b.png"]
+    assert [e["file"] for e in _prefilter_library([], entries, style_key=DEFAULT_STYLE_KEY)] == ["a.png"]
+    assert len(_prefilter_library([], entries)) == 2  # 不传风格 = 不过滤（兼容）
+
+
+def test_ingest_generated_image_records_style(tmp_path):
+    from video_factory.image_gen import ingest_generated_image, style_key_for
+
+    root = tmp_path / "库"
+    ingest_generated_image(b"png", prompt="p", category="人物", tags=["a"],
+                           size="1080x1920", library_root=root, style="古风淡彩水墨")
+    entry = load_index(root)[0]
+    assert entry["style"] == style_key_for("古风淡彩水墨")
+
+
+def test_ensure_section_images_style_override_isolates_library(tmp_path, monkeypatch):
+    """任务级风格覆盖：生图提示词用覆盖值；不同风格入的库互不复用。"""
+    monkeypatch.setattr("video_factory.llm.chat_completion", lambda s, u, c: _plan_reply())
+    monkeypatch.setenv("IMAGE_STYLE_PROMPT", "全局美漫风")
+    prompts = []
+    monkeypatch.setattr("video_factory.image_gen.generate_image",
+                        lambda prompt, size: prompts.append(prompt) or b"png")
+    root = tmp_path / "图片"
+
+    # 第一轮：美式（全局）入库
+    report1 = ensure_section_images(REWRITE, size="1080x1920", library_root=root)
+    assert report1["generated"] == 2
+
+    # 第二轮：古风覆盖 → 提示词带古风；库里只有美式图，不得复用，全部重新生成
+    prompts.clear()
+    report2 = ensure_section_images(REWRITE, size="1080x1920", library_root=root,
+                                    style="古风淡彩水墨")
+    assert report2["generated"] == 2 and report2["reused"] == 0
+    assert prompts and all(p.endswith("古风淡彩水墨") for p in prompts)
+
+    # 第三轮：再跑古风 → 命中第二轮入库的古风图，零生成
+    prompts.clear()
+    report3 = ensure_section_images(REWRITE, size="1080x1920", library_root=root,
+                                    style="古风淡彩水墨")
+    assert report3["generated"] == 0 and report3["reused"] == 2
+    assert prompts == []

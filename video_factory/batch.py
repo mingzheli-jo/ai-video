@@ -434,16 +434,17 @@ def _run_voice(job: ResolvedJob, job_dir: Path) -> int:
 
 
 def _run_image_gen_section_fallback(
-    rewrite: dict, size: str, gen_dir: Path, job_dir: Path
+    rewrite: dict, size: str, gen_dir: Path, job_dir: Path, style: str = ""
 ) -> int:
     """节级配图回落路径：每节 1 张，按 ensure_section_images 选库/生图后按序拷贝。
 
-    当拍级路径（match_beats_to_library）无凭据或解析失败时调用，行为与原实现完全一致。
+    当拍级路径（match_beats_to_library）无凭据或解析失败时调用。style 透传任务级
+    风格覆盖（2026-07-19：此前回退路径只认全局风格，批量按行选的风格在这里失效）。
     """
     from video_factory import image_gen
 
     try:
-        report = image_gen.ensure_section_images(rewrite, size=size)
+        report = image_gen.ensure_section_images(rewrite, size=size, style=style)
     except RuntimeError as exc:
         print(f"生图失败：{exc}")
         stage_report.write_stage_error(job_dir, "image_gen", f"生图失败：{exc}")
@@ -499,6 +500,15 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     size = _GEN_SIZE_BY_ASPECT.get(job.aspect, image_gen.DEFAULT_SIZE)
     gen_dir = job_dir / "gen_assets"
 
+    # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
+    # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
+    # 2026-07-18：批量行可按任务选预设——job 专属风格非空时覆盖全局启用值。
+    # 2026-07-19：风格提前到检索之前算——库检索/复用也要按风格指纹隔离
+    # （实锤"王阳明心学测试1"：选了古风，复用层却把美式库图塞进片子）。
+    style = job.image_style_prompt.strip() or image_gen.get_style_prompt()
+    style_key = image_gen.style_key_for(style)
+    print(f"生图风格：{style[:24]}…（指纹 {style_key}，库复用仅限同风格）")
+
     # 尝试拍级路径（需要 LLM 凭据 + image_gen 新接口）。
     try:
         from video_factory.image_gen import (
@@ -521,8 +531,9 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
         library_root = image_gen.LIBRARY_ROOT
         library_index = image_gen.load_index(library_root)
         # 画幅硬过滤（2026-07-17 用户定案严格执行）：16:9 任务的库候选只留 16:9 图。
+        # 风格硬过滤（2026-07-19）：库候选只留与本任务风格指纹一致的条目。
         beat_matches = match_beats_to_library(
-            beats, library_index, library_root, target_size=size
+            beats, library_index, library_root, target_size=size, style_key=style_key
         )
     except Exception:
         beat_matches = None  # 任何异常均回落节级
@@ -530,7 +541,7 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     if beat_matches is None:
         # 无凭据 / 解析失败：回落节级配图（每节 1 张）。
         print("生图：拍级匹配不可用（无凭据或解析失败），回落到节级配图模式。")
-        return _run_image_gen_section_fallback(rewrite_data, size, gen_dir, job_dir)
+        return _run_image_gen_section_fallback(rewrite_data, size, gen_dir, job_dir, style=style)
 
     # 拍级路径：生成 / 复用图片并拷到 gen_assets/img_NN。
     gen_dir.mkdir(parents=True, exist_ok=True)
@@ -548,10 +559,6 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
     # 静默失败、兜底用 1 张图糊满全片，用户肉眼才发现）。全部落盘进
     # image_gen_warnings.json，任务卡黄条可见；不再只打服务器控制台。
     failures: list[str] = []
-    # 统一画风：主体提示词 + 风格提示词（与节级路径同款拼法）。2026-07-15 修复：
-    # 拍级路径上线时漏拼了风格，导致成片画风与用户设置的美式漫画风不符。
-    # 2026-07-18：批量行可按任务选预设——job 专属风格非空时覆盖全局启用值。
-    style = job.image_style_prompt.strip() or image_gen.get_style_prompt()
     # 第二道禁文字保险：除了上游 LLM 写提示词时的约束，最终喂给 Seedream 的提示词里
     # 也钉死（实测拍级图冒出"苦涩/回甘"贴字和乱码气泡——生图模型对提示词内的
     # 负向约束服从度远高于指望上游转述）。
@@ -619,6 +626,7 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
                     tags=match.get("tags") or (),
                     size=size,
                     library_root=library_root,
+                    style=style,
                 )
             except OSError as exc:
                 print(f"生图告警：拍 {beat_idx} 入库失败（{exc}），本单不受影响但该图未积累进图库。")

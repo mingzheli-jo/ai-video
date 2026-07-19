@@ -1369,3 +1369,42 @@ def test_resolve_bgm_random_sentinel_picks_from_music_dir(tmp_path, monkeypatch)
 
     monkeypatch.setattr(batch, "MUSIC_DIR", tmp_path / "empty")
     assert batch._resolve_bgm(job) == ""
+
+def test_run_image_gen_passes_style_key_to_library_match(tmp_path, monkeypatch):
+    """2026-07-19 风格隔离：拍级检索必须携带本任务风格指纹，且入库记录本任务风格。
+
+    实锤"王阳明心学测试1"：批量行选了古风，检索/复用层不看风格，把美式库图
+    塞进古风任务——风格选择在生成拍生效、在复用拍失效。
+    """
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "output": str(job_dir),
+                       "image_style_prompt": "古风淡彩测试风"}, 0)
+
+    captured = {}
+
+    def fake_match(beats, index, root, **kwargs):
+        captured["style_key"] = kwargs.get("style_key")
+        return [{"beat_index": 0, "action": "generate", "file": None, "prompt": "月下静坐",
+                 "category": "场景", "tags": []}]
+
+    ingested = {}
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()])
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", fake_match)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "全局美漫风")
+    monkeypatch.setattr(image_gen, "generate_image", lambda prompt, size: b"png")
+    monkeypatch.setattr(image_gen, "ingest_generated_image",
+                        lambda img, **kw: ingested.update(kw) or (tmp_path / "l.png"))
+
+    assert batch._run_image_gen(job, job_dir) == 0
+    assert captured["style_key"] == image_gen.style_key_for("古风淡彩测试风")
+    assert ingested.get("style") == "古风淡彩测试风"  # 新图按本任务风格入库

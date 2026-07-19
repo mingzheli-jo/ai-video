@@ -65,6 +65,17 @@ DEFAULT_STYLE_PROMPT = (
 )
 
 
+def style_key_for(style: str) -> str:
+    """风格身份指纹：提示词全文 sha1 前 12 位（全等才互认）。
+
+    2026-07-19 实锤：古风任务复用进美式库图——图库检索完全不看风格。此后每个
+    库条目落库时记 style 指纹，检索/复用只认同指纹（风格一致性至上，宁生成勿串味）。
+    """
+    import hashlib as _hashlib
+
+    return _hashlib.sha1((style or "").strip().encode("utf-8")).hexdigest()[:12]
+
+
 def get_style_prompt() -> str:
     """当前生效的风格提示词：环境变量 > settings.yaml > 内置默认。惰性导入避免环依赖。"""
     env_value = (os.getenv(IMAGE_STYLE_PROMPT_ENV) or "").strip()
@@ -74,6 +85,11 @@ def get_style_prompt() -> str:
 
     saved = (load_settings().get(IMAGE_STYLE_PROMPT_ENV) or "").strip()
     return saved or DEFAULT_STYLE_PROMPT
+
+
+# 旧库条目（2026-07-19 之前入库、无 style 字段）全部产自内置美式默认风格，
+# 按默认风格指纹归档——当前风格是默认美式时它们照常可复用，切了风格即隔离。
+DEFAULT_STYLE_KEY = style_key_for(DEFAULT_STYLE_PROMPT)
 
 
 IMAGE_STYLE_PRESETS_ENV = "IMAGE_STYLE_PRESETS"
@@ -282,12 +298,15 @@ def find_reusable(
     size: str,
     entries: list[dict],
     library_root: Path | str = LIBRARY_ROOT,
+    style_key: str = "",
 ) -> Path | None:
-    """按 类目相同 + 画幅相同 + 标签重合>=MIN_TAG_OVERLAP 检索可复用图；
+    """按 类目相同 + 画幅相同 + 风格相同 + 标签重合>=MIN_TAG_OVERLAP 检索可复用图；
     取重合度最高（并列取最新）。文件已被删的条目跳过。
 
     画幅判定用 _same_aspect（2026-07-17 与拍级路径统一口径）：跨模型的同画幅
-    尺寸（1152x2048 与 1440x2560 同为 9:16）互认，横竖画幅绝不互认。"""
+    尺寸（1152x2048 与 1440x2560 同为 9:16）互认，横竖画幅绝不互认。
+    style_key 非空时只认同风格条目（2026-07-19：古风任务复用进美式图的教训），
+    无 style 字段的旧条目按默认美式风格指纹参与判定。"""
     root = Path(library_root)
     best: tuple[int, float, Path] | None = None
     want = set(item.tags)
@@ -295,6 +314,8 @@ def find_reusable(
         if entry.get("category") != item.category:
             continue
         if not _same_aspect(str(entry.get("size") or ""), size):
+            continue
+        if style_key and str(entry.get("style") or DEFAULT_STYLE_KEY) != style_key:
             continue
         overlap = len(want & set(entry.get("tags") or []))
         if overlap < MIN_TAG_OVERLAP:
@@ -383,6 +404,7 @@ def _store_image(
     size: str,
     entries: list[dict],
     library_root: Path,
+    style_key: str = "",
 ) -> Path:
     """图片落库：素材库/图片/<类目>/img_<内容hash>.png + index 登记（同 hash 幂等复用）。"""
     digest = hashlib.sha1(image_bytes).hexdigest()[:16]
@@ -398,6 +420,8 @@ def _store_image(
             "tags": list(item.tags),
             "prompt": item.prompt,
             "size": size,
+            # 风格指纹（2026-07-19）：检索/复用只认同风格条目，防跨风格串味。
+            "style": style_key or DEFAULT_STYLE_KEY,
             "created": round(time.time(), 3),
         }
     )
@@ -411,6 +435,7 @@ def ingest_generated_image(
     tags,
     size: str,
     library_root: Path | str = LIBRARY_ROOT,
+    style: str = "",
 ) -> Path:
     """拍级路径新生成的图写回图片库并登记 index（与节级共用 _store_image 存储逻辑）。
 
@@ -426,7 +451,8 @@ def ingest_generated_image(
         category=_normalize_category(str(category or "")),
         tags=_normalize_tags(list(tags) if tags else []),
     )
-    path = _store_image(image_bytes, item, size, entries, root)
+    style_key = style_key_for(style) if str(style or "").strip() else ""
+    path = _store_image(image_bytes, item, size, entries, root, style_key=style_key)
     save_index(entries, root)
     return path
 
@@ -438,16 +464,20 @@ def ensure_section_images(
     rewrite: dict,
     size: str = DEFAULT_SIZE,
     library_root: Path | str = LIBRARY_ROOT,
+    style: str = "",
 ) -> dict:
     """为每个分节备一张配图：库命中直接复用，未命中生图入库。
 
+    style 非空时覆盖全局启用的风格提示词（批量任务按行选风格时传入，
+    2026-07-19：节级回退路径此前只认全局风格，任务级选择在这里失效）。
     返回 report dict：{"images": [{"section", "path", "reused", "category", "tags"}...],
     "generated": n, "reused": m}。单节生图失败记 warning 继续（不拖垮整批）。
     """
     root = Path(library_root)
     plan = build_image_plan(rewrite)
     entries = load_index(root)
-    style = get_style_prompt()
+    style = str(style or "").strip() or get_style_prompt()
+    skey = style_key_for(style)
     results: list[dict] = []
     warnings: list[str] = []
     generated = reused = 0
@@ -455,7 +485,7 @@ def ensure_section_images(
         if not item.prompt:
             warnings.append(f"第 {item.section_index} 节 LLM 未给出生图提示词，跳过。")
             continue
-        hit = find_reusable(item, size, entries, root)
+        hit = find_reusable(item, size, entries, root, style_key=skey)
         if hit is not None:
             reused += 1
             results.append(_result_row(item, hit, True))
@@ -467,7 +497,7 @@ def ensure_section_images(
         except ImageGenError as exc:
             warnings.append(f"第 {item.section_index} 节生图失败：{exc}")
             continue
-        path = _store_image(image_bytes, item, size, entries, root)
+        path = _store_image(image_bytes, item, size, entries, root, style_key=skey)
         generated += 1
         results.append(_result_row(item, path, False))
     save_index(entries, root)
@@ -788,11 +818,15 @@ def perturb_image_for_reuse(src: Path | str, dst: Path | str, seed: str) -> bool
         return False
 
 
-def _prefilter_library(beats: list, entries: list[dict], target_size: str = "") -> list[dict]:
+def _prefilter_library(
+    beats: list, entries: list[dict], target_size: str = "", style_key: str = ""
+) -> list[dict]:
     """二级检索第一级：本地粗排出与本片各拍相关的库图候选（喂 LLM 精选用）。
 
     target_size 非空时先按画幅硬过滤（2026-07-17 用户定案：16:9 视频绝不给 LLM
     看 9:16 的图——错画幅复用等于整片报废）；登记簿无 size 的条目一并剔除。
+    style_key 非空时再按风格指纹硬过滤（2026-07-19：古风任务把美式库图复用进片，
+    根因就是检索不看风格）；无 style 字段的旧条目按默认美式指纹参与判定。
 
     评分：条目标签在拍文案中出现 +3/个；条目提示词与拍文案的中文二元组重合 +1/个。
     每拍取分数>0 的前 _PREFILTER_PER_BEAT 条，全片并集（同图取最高分）按分排序
@@ -802,6 +836,8 @@ def _prefilter_library(beats: list, entries: list[dict], target_size: str = "") 
     valid = [e for e in entries if e.get("file")]
     if target_size:
         valid = [e for e in valid if _same_aspect(str(e.get("size") or ""), target_size)]
+    if style_key:
+        valid = [e for e in valid if str(e.get("style") or DEFAULT_STYLE_KEY) == style_key]
     if len(valid) <= _PREFILTER_CAP:
         return valid  # 小库全量直喂，无信息损失
     entry_bigrams = [_text_bigrams(str(e.get("prompt") or "")) for e in valid]
@@ -836,6 +872,7 @@ def match_beats_to_library(
     library_index: list[dict],
     library_root: Path | str = LIBRARY_ROOT,
     target_size: str = "",
+    style_key: str = "",
 ) -> list[dict] | None:
     """一次 LLM 调用为每拍选库图或给生成提示词；同拍不重复（同 file 第二次改 generate）。
 
@@ -857,7 +894,7 @@ def match_beats_to_library(
     # 二级检索（2026-07-15，库将涨到千级）：先本地粗排出与本片各拍相关的候选，
     # 再喂 LLM 精选。旧实现直接切 [:50]——取的还是登记簿最老的 50 张，库一大
     # LLM 就对 95% 的库存失明，复用率崩塌。
-    candidates = _prefilter_library(beats, library_index or [], target_size)
+    candidates = _prefilter_library(beats, library_index or [], target_size, style_key)
     lib_entries = [
         {
             "file": str(e.get("file") or ""),
