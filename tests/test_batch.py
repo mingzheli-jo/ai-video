@@ -1491,3 +1491,32 @@ def test_clear_stale_outputs_removes_stage_warning_files(tmp_path):
     for rel in ("effects_warnings.json", "effects_skipped.json",
                 "subtitles_report.json", "publish/publish_kit.json"):
         assert not (job_dir / rel).exists(), f"{rel} 未被清理"
+
+
+# --- jobs.json name 路径穿越（2026-07-21 审查实锤：CLI 侧此前裸拼进输出路径） --------
+
+
+def test_resolve_job_name_traversal_cannot_escape_output(tmp_path):
+    # name 填 ../ 序列不得把默认输出目录穿越到 output/batch 之外。
+    from pathlib import Path
+
+    job = resolve_job({"name": "../../../../evil_dir/j1",
+                       "source": "s.txt", "assets": "a"}, 0)
+    base = Path("video_factory/output/batch").resolve()
+    assert base in job.output.resolve().parents
+    assert ".." not in job.output.parts
+    # 展示名同步净化（与 studio 网页侧口径一致）
+    assert "/" not in job.name and ".." not in job.name
+
+
+def test_resolve_job_name_all_stripped_falls_back_to_indexed(tmp_path):
+    # 纯路径垃圾被剥空 → 回落序号名，不产出空目录名。
+    job = resolve_job({"name": r"../..\..", "source": "s", "assets": "a"}, 4)
+    assert job.name == "job_05"
+
+
+def test_resolve_job_normal_chinese_name_unchanged(tmp_path):
+    # 正常中文/字母数字名不受影响（净化是白名单保留，不是改写）。
+    job = resolve_job({"name": "王阳明心学2026", "source": "s", "assets": "a"}, 0)
+    assert job.name == "王阳明心学2026"
+    assert job.output == batch._default_output("王阳明心学2026")

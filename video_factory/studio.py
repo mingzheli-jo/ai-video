@@ -45,7 +45,7 @@ from video_factory.subtitles import (
     get_subtitle_font_scale,
 )
 from video_factory.assemble import ASPECT_PRESETS, FIT_MODES
-from video_factory.batch import PLATFORM_PRESETS, resolve_job, validate_job
+from video_factory.batch import PLATFORM_PRESETS, resolve_job, safe_filename, validate_job
 from video_factory.pipeline import DOUBAO_DEFAULT_VOICE, EDGE_DEFAULT_VOICE
 from video_factory.rewrite_styles import STYLES
 
@@ -359,16 +359,8 @@ def validate_batch(raw_jobs: list[dict]) -> list[dict]:
 
 
 # ---------- 文件名安全化 ----------
-
-def safe_filename(name: str) -> str:
-    """剥路径分隔符，只留字母数字中文与 ._-；返回安全文件名（可能为空，调用方拒空）。"""
-    base = name.replace("\\", "/").split("/")[-1].strip()
-    kept = []
-    for ch in base:
-        if ch.isalnum() or ch in "._-" or "一" <= ch <= "鿿":
-            kept.append(ch)
-    cleaned = "".join(kept).strip("._")
-    return cleaned
+# safe_filename 已下沉到 batch.py（CLI 侧 jobs.json 的 name 需要同一道闸），
+# 这里从 batch 导入复用——studio import batch 是既有方向，反向会成环。
 
 
 def _upload_dir(kind: str, group: str) -> Path:

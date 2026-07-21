@@ -169,6 +169,22 @@ def _pick(job: dict, key: str, preset_value, default_value):
     return default_value
 
 
+def safe_filename(name: str) -> str:
+    """剥路径分隔符，只留字母数字中文与 ._-；返回安全文件名（可能为空，调用方拒空）。
+
+    原属 studio.py（网页侧上传/任务名净化），2026-07-21 下沉到 batch：CLI 侧
+    jobs.json 的 name 同样直接拼进输出路径，必须过同一道闸——此前裸拼，
+    name 填 ../../ 即可把整套产物写穿越到 output 之外。
+    """
+    base = name.replace("\\", "/").split("/")[-1].strip()
+    kept = []
+    for ch in base:
+        if ch.isalnum() or ch in "._-" or "一" <= ch <= "鿿":
+            kept.append(ch)
+    cleaned = "".join(kept).strip("._")
+    return cleaned
+
+
 def _default_output(name: str) -> Path:
     return Path("video_factory/output/batch") / name
 
@@ -183,7 +199,10 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
     p_subtitles = preset.subtitles if preset else None
     p_effects = preset.effects if preset else None
 
-    name = str(raw.get("name") or f"job_{index + 1:02d}").strip()
+    # name 直接拼进默认输出路径，必须净化（与 studio 网页侧同一道闸）；
+    # 全被剥空（纯路径垃圾）时回落序号名。显式 output 是用户在 JSON 里可见的
+    # 路径声明、不在此收紧——穿越风险只在\"name 看着像名字实际是路径\"这条暗道。
+    name = safe_filename(str(raw.get("name") or "").strip()) or f"job_{index + 1:02d}"
     output = Path(raw["output"]) if raw.get("output") else _default_output(name)
     return ResolvedJob(
         name=name,
