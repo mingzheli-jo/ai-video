@@ -453,12 +453,15 @@ def _run_voice(job: ResolvedJob, job_dir: Path) -> int:
 
 
 def _run_image_gen_section_fallback(
-    rewrite: dict, size: str, gen_dir: Path, job_dir: Path, style: str = ""
+    rewrite: dict, size: str, gen_dir: Path, job_dir: Path, style: str = "",
+    extra_warnings: list[str] | None = None,
 ) -> int:
     """节级配图回落路径：每节 1 张，按 ensure_section_images 选库/生图后按序拷贝。
 
     当拍级路径（match_beats_to_library）无凭据或解析失败时调用。style 透传任务级
     风格覆盖（2026-07-19：此前回退路径只认全局风格，批量按行选的风格在这里失效）。
+    extra_warnings 承载调用方的降级原因（2026-07-21）：让\"为什么没走拍级\"进
+    告警通道，而不是只打服务器控制台。
     """
     from video_factory import image_gen
 
@@ -484,7 +487,8 @@ def _run_image_gen_section_fallback(
         dst = gen_dir / f"img_{i:02d}{src.suffix.lower() or '.png'}"
         dst.write_bytes(src.read_bytes())
         copied += 1
-    section_warnings = [str(w) for w in (report.get("warnings") or [])]
+    section_warnings = list(extra_warnings or [])
+    section_warnings += [str(w) for w in (report.get("warnings") or [])]
     for warning in section_warnings:
         print(f"生图告警：{warning}")
     if section_warnings:
@@ -554,13 +558,30 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
         beat_matches = match_beats_to_library(
             beats, library_index, library_root, target_size=size, style_key=style_key
         )
-    except Exception:
-        beat_matches = None  # 任何异常均回落节级
+    except (ImportError, OSError) as exc:
+        # 仅这两类算\"环境/接口不具备\"的预期降级：老版 image_gen 缺新接口、
+        # 图库目录读不到。其余异常一律是 BUG，走下面的 unexpected 分支留真相。
+        beat_matches = None
+        degrade_reason = f"拍级匹配不可用（{type(exc).__name__}：{exc}）"
+    except Exception as exc:  # noqa: BLE001 —— 故意兜住以免单条 job 崩掉整批
+        # 2026-07-21 审查实锤：此前这里是 except Exception + 丢弃异常对象，然后
+        # 打印\"无凭据或解析失败\"——任何真实回归（AttributeError/KeyError/…）都被
+        # 伪装成\"你没配 key\"，静默降级到低质量节级配图且无人察觉。
+        # 注意：无凭据/网络失败/解析失败 match_beats_to_library 内部已接住并返回
+        # None，根本走不到这里——能到这里的基本就是 BUG，必须带 repr 留痕。
+        beat_matches = None
+        degrade_reason = f"拍级匹配异常（疑似 BUG，请排查）：{exc!r}"
+    else:
+        degrade_reason = "拍级匹配不可用（无 LLM 凭据或 LLM 返回无法解析）"
 
     if beat_matches is None:
-        # 无凭据 / 解析失败：回落节级配图（每节 1 张）。
-        print("生图：拍级匹配不可用（无凭据或解析失败），回落到节级配图模式。")
-        return _run_image_gen_section_fallback(rewrite_data, size, gen_dir, job_dir, style=style)
+        # 回落节级配图（每节 1 张）。降级原因进告警通道 → batch_report + 任务卡黄条，
+        # 不再只打服务器控制台（用户看不到）。
+        print(f"生图：{degrade_reason}，回落到节级配图模式。")
+        return _run_image_gen_section_fallback(
+            rewrite_data, size, gen_dir, job_dir, style=style,
+            extra_warnings=[degrade_reason],
+        )
 
     # 拍级路径：生成 / 复用图片并拷到 gen_assets/img_NN。
     gen_dir.mkdir(parents=True, exist_ok=True)

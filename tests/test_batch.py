@@ -1603,3 +1603,70 @@ def test_reuse_copy_failure_degrades_to_generate(tmp_path, monkeypatch):
     assert len(generated) == 1 and "p0" in generated[0]   # 降级生成兜位
     warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
     assert any("拷贝失败" in w and "磁盘已满" in w for w in warn["warnings"])
+
+
+# --- 拍级降级原因可区分（2026-07-21 审查实锤：BUG 被伪装成"没配 key"） -----------
+
+
+def _image_gen_job(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "aspect": "16:9", "output": str(job_dir)}, 0)
+    return job, job_dir
+
+
+def _stub_section_fallback(monkeypatch, tmp_path):
+    """让节级回落跑通并落一张图，返回 ensure_section_images 的替身记录。"""
+    from video_factory import image_gen
+
+    img = tmp_path / "sec.png"
+    img.write_bytes(b"png")
+    monkeypatch.setattr(image_gen, "ensure_section_images",
+                        lambda *a, **k: {"images": [{"section": 0, "path": str(img)}],
+                                         "generated": 1, "reused": 0, "warnings": []})
+
+
+def test_beat_match_bug_is_reported_as_bug_not_missing_credentials(tmp_path, monkeypatch):
+    """拍级路径抛意外异常（BUG）→ 告警必须带 repr，绝不能说成"无凭据"。"""
+    from video_factory import image_gen
+
+    job, job_dir = _image_gen_job(tmp_path)
+    _stub_section_fallback(monkeypatch, tmp_path)
+
+    def boom(*a, **k):
+        raise AttributeError("'dict' object has no attribute 'sections'")
+    monkeypatch.setattr(image_gen, "plan_beats", boom)
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+
+    assert batch._run_image_gen(job, job_dir) == 0   # 仍降级出片，不断批
+
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    joined = " ".join(warn["warnings"])
+    assert "疑似 BUG" in joined
+    assert "AttributeError" in joined            # 真实异常类型留痕
+    assert "无凭据" not in joined                # 绝不再伪装成配置问题
+
+
+def test_beat_match_no_credentials_says_so(tmp_path, monkeypatch):
+    """match_beats_to_library 返回 None（无凭据/解析失败）→ 说人话，不提 BUG。"""
+    from video_factory import image_gen
+
+    job, job_dir = _image_gen_job(tmp_path)
+    _stub_section_fallback(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()])
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: None)
+
+    assert batch._run_image_gen(job, job_dir) == 0
+
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    joined = " ".join(warn["warnings"])
+    assert "凭据" in joined
+    assert "BUG" not in joined
