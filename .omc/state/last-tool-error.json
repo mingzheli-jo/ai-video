@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"D:/ide/workspace/personal-new/crm-standup-bot\\\" && PYTHONIOENCODING=utf-8 python member_notify.py --rows weekly-rows-2026-07-17.json --start 2026-07-13 --end 2026-07-17 --only \\\"King王...",
-  "error": "Exit code 1\n发送失败：lark-cli im +messages-send returned no JSON (exit 1).\r\nstdout: \r\nstderr: {\r\n  \"ok\": false,\r\n  \"identity\": \"bot\",\r\n  \"error\": {\r\n    \"type\": \"api\",\r\n    \"subtype\": \"unknown\",\r\n    \"code\": 230013,\r\n    \"message\": \"Bot has NO availability to this user.\",\r\n    \"log_id\": \"20260717113245736086EC7743F9CDFC4F\"\r\n  }\r\n}",
-  "timestamp": "2026-07-17T03:32:45.724Z",
-  "retry_count": 1
-}

@@ -49,3 +49,6 @@ remotion/out/
 
 # AI 生图图片库（生成物，1GB+，本地资产不入库）
 素材库/
+
+# OMC 编排工具会话状态（与 .pytest_cache 同性质，纯本机运行时产物）
+.omc/
