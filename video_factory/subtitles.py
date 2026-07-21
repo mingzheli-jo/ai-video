@@ -259,7 +259,17 @@ def _enforce_min_duration(cues: list[Cue], hard_cap: float) -> list[Cue]:
         if i + 1 < len(cues):
             end = min(end, cues[i + 1].start) if cues[i + 1].start > start else end
         else:
-            end = min(end, hard_cap) if hard_cap > start else end
+            # 末条无条件封顶（2026-07-21 审查实锤）：旧写法是
+            # `min(end, hard_cap) if hard_cap > start else end`——浮点累积让
+            # start 恰好落在 hard_cap 上时护栏被整条跳过，末条 end 就越到音频
+            # 之外（字幕烧在没有声音的黑尾上）。
+            end = min(end, hard_cap)
+            # 封顶后可能不足 MIN_CUE_DURATION 甚至倒挂：把起点往回拉来补足显示
+            # 时长，但不得越过上一条终点（保持单调不重叠）。宁可末条早点起，
+            # 也不能烧到音频之外。
+            if end - start < MIN_CUE_DURATION:
+                floor_start = fixed[-1].end if fixed else 0.0
+                start = min(max(floor_start, end - MIN_CUE_DURATION), end)
         fixed.append(Cue(round(start, 3), round(end, 3), cue.text))
     return fixed
 

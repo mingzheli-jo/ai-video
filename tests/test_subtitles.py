@@ -1247,3 +1247,48 @@ def test_burn_command_micro_fingerprint_per_seed():
     assert vf_a1.startswith("subtitles=subtitles.ass,eq=brightness=")
     assert vf_a1 == vf_a2      # 同任务重跑稳定
     assert vf_a1 != vf_b       # 跨任务不同
+
+
+# ---------- 末条 cue 封顶（2026-07-21 审查实锤：浮点边界让护栏整条失效） ----------
+
+def test_last_cue_never_exceeds_audio_when_start_equals_total():
+    """回归：末条 start 恰好等于 total_duration 时，旧护栏被跳过、end 越到音频外。
+
+    旧写法 `min(end, hard_cap) if hard_cap > start else end`——hard_cap == start
+    时条件为假，整条封顶被跳过，末条 end = start + MIN_CUE_DURATION 越界。
+    """
+    from video_factory.subtitles import Cue, MIN_CUE_DURATION, _enforce_min_duration
+
+    total = 30.0
+
+    # 有空间：上一条早早结束 → 起点回拉，末条拿到完整 MIN_CUE_DURATION 且不越界
+    fixed = _enforce_min_duration([Cue(0.0, 10.0, "前一句"), Cue(30.0, 30.0, "末句")], total)
+    assert fixed[-1].end <= total, "末条 end 越过音频末尾"
+    assert fixed[-1].end - fixed[-1].start == pytest.approx(MIN_CUE_DURATION, abs=0.01)
+    assert fixed[-1].start >= fixed[0].end, "回拉越过了上一条终点"
+
+    # 无空间：上一条已占满整条时间轴 → 退化成零长，但绝不越界、绝不倒挂
+    fixed = _enforce_min_duration([Cue(0.0, 30.0, "前一句"), Cue(30.0, 30.0, "末句")], total)
+    assert fixed[-1].end <= total, "末条 end 越过音频末尾"
+    assert fixed[-1].end >= fixed[-1].start, "末条倒挂"
+
+
+def test_last_cue_clamped_when_end_would_overrun():
+    """常规越界：末条 end 超过 total_duration 时封在 total_duration。"""
+    from video_factory.subtitles import Cue, _enforce_min_duration
+
+    fixed = _enforce_min_duration([Cue(0.0, 5.0, "一"), Cue(5.0, 99.0, "二")], 30.0)
+    assert fixed[-1].end == pytest.approx(30.0)
+
+
+def test_enforce_min_duration_keeps_timeline_monotonic():
+    """封顶/回拉之后仍不重叠：每条 start >= 上一条 end。"""
+    from video_factory.subtitles import Cue, _enforce_min_duration
+
+    cues = [Cue(0.0, 0.1, "极短一"), Cue(0.1, 0.2, "极短二"), Cue(0.2, 0.25, "极短三")]
+    fixed = _enforce_min_duration(cues, 1.0)
+
+    for prev, nxt in zip(fixed, fixed[1:]):
+        assert nxt.start >= prev.start
+        assert nxt.end >= nxt.start
+    assert fixed[-1].end <= 1.0
