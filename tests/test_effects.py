@@ -1927,3 +1927,121 @@ def test_sync_density_reaches_ten_per_minute():
     # 相邻间隔守住 4s 下限
     starts = sorted(e["start"] for e in mids)
     assert all(b - a >= 4.0 - 1 / 30 for a, b in zip(starts, starts[1:]))
+
+
+# --- composition 帧数上限契约（2026-07-21 HookOpener 150 帧复用事故的盯守） -----------
+# 病根：durationInFrames 是渲染硬上限，但契约只写在注释里，复用组件时 Python 侧
+# 时长封顶抬了、Remotion 侧上限没跟上 → 渲染必败且被吞成 warning。以下测试让
+# 两侧漂移在 CI 里现形。
+
+
+def _root_tsx_ceilings() -> dict:
+    """从 remotion/src/Root.tsx 解析 {composition id: durationInFrames}。"""
+    import re
+
+    text = (
+        Path(__file__).resolve().parent.parent / "remotion" / "src" / "Root.tsx"
+    ).read_text(encoding="utf-8")
+    return {
+        name: int(frames)
+        for name, frames in re.findall(
+            r'id="(\w+)"[\s\S]*?durationInFrames=\{(\d+)\}', text
+        )
+    }
+
+
+def test_max_frames_table_matches_root_tsx():
+    from video_factory.effects import _MAX_FRAMES_BY_COMPOSITION
+
+    tsx = _root_tsx_ceilings()
+    for composition, ceiling in _MAX_FRAMES_BY_COMPOSITION.items():
+        assert composition in tsx, f"{composition} 在 Root.tsx 里不存在"
+        assert ceiling == tsx[composition], (
+            f"{composition} 上限漂移：effects.py={ceiling} vs Root.tsx={tsx[composition]}，"
+            "两侧必须同步改。"
+        )
+
+
+def test_all_mapped_compositions_have_frame_ceiling():
+    from video_factory.effects import _COMPOSITION_BY_TYPE, _MAX_FRAMES_BY_COMPOSITION
+
+    for effect_type, composition in _COMPOSITION_BY_TYPE.items():
+        assert composition in _MAX_FRAMES_BY_COMPOSITION, (
+            f"特效 {effect_type} 的 composition {composition} 没有帧数上限条目"
+        )
+
+
+def test_python_max_durations_fit_composition_ceilings():
+    # 每类特效的 Python 侧最大可能时长 × fps 必须装进对应 composition 的上限。
+    from video_factory.effects import (
+        AMBIENT_LOOP_SECONDS,
+        GOLDEN_LINES_MAX_DURATION,
+        HOOK_OPENER_MAX_DURATION,
+        QUOTE_DURATION,
+        SYNC_MOMENT_MAX_DURATION,
+        TYPEWRITER_MAX_DURATION,
+        _MAX_FRAMES_BY_COMPOSITION,
+    )
+
+    cases = [
+        # (说明, Python 侧最大时长, 目标 composition)
+        ("golden_lines 多句同步时刻", SYNC_MOMENT_MAX_DURATION, "HookOpener"),
+        ("golden_lines 单句", GOLDEN_LINES_MAX_DURATION, "HookOpener"),
+        ("hook_opener 开屏", HOOK_OPENER_MAX_DURATION, "HookOpener"),
+        ("quote_card 金句卡", QUOTE_DURATION, "QuoteCard"),
+        ("typewriter_quote 打字机", TYPEWRITER_MAX_DURATION, "TypewriterQuote"),
+        ("ambient 氛围粒子", AMBIENT_LOOP_SECONDS, "AmbientParticles"),
+    ]
+    for label, duration, composition in cases:
+        frames = round(duration * DEFAULT_FPS)
+        ceiling = _MAX_FRAMES_BY_COMPOSITION[composition]
+        assert frames <= ceiling, (
+            f"{label}：最大 {duration}s = {frames} 帧 > {composition} 上限 {ceiling}"
+        )
+
+
+def test_clamped_frames_over_ceiling_clamps_and_warns():
+    from video_factory.effects import _clamped_frames
+
+    frames, warning = _clamped_frames("HookOpener", 9.0, 30)
+    assert frames == 210  # 钳到上限而不是 270
+    assert warning is not None and "Root.tsx" in warning
+    # 未越界 → 原样返回、无告警
+    frames, warning = _clamped_frames("HookOpener", 6.4, 30)
+    assert frames == 192 and warning is None
+    # 表里没有的 composition → 不钳制（宁可渲染报错也不静默改行为）
+    frames, warning = _clamped_frames("UnknownComp", 99.0, 30)
+    assert frames == round(99.0 * 30) and warning is None
+
+
+def test_render_effects_clamps_over_ceiling_and_writes_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr("video_factory.effects.shutil.which", lambda _: "/usr/bin/npx")
+    manifest = {
+        "version": "effects_manifest_v1",
+        "fps": 30,
+        "width": 1920,
+        "height": 1080,
+        "accent": "#e8b84b",
+        "effects": [
+            {
+                "type": "golden_lines",
+                "start": 10.0,
+                "duration": 9.0,  # 越过 HookOpener 210 帧上限（未来漂移的模拟）
+                "lines": ["心即理是什么"],
+                "offsets": [0.0],
+                "accent": "#e8b84b",
+            }
+        ],
+    }
+    runner = _Recorder()
+
+    result = render_effects(manifest, tmp_path, runner=runner)
+
+    # 渲染没有被放弃：帧数钳到上限继续渲
+    assert len(result) == 1
+    assert "--frames=0-209" in runner.commands[0]
+    # 告警落盘可见，而不是只打控制台
+    warnings = json.loads(
+        (tmp_path / "effects_warnings.json").read_text(encoding="utf-8")
+    )["warnings"]
+    assert any("钳制" in w and "HookOpener" in w for w in warnings)

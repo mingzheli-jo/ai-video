@@ -65,6 +65,40 @@ _COMPOSITION_BY_TYPE = {
     "typewriter_quote": "TypewriterQuote",
 }
 
+# 各 composition 的 durationInFrames 上限，与 remotion/src/Root.tsx 逐条同源。
+# 契约：CLI --frames 越过上限时 Remotion 渲染直接失败、且失败会被吞成 warning
+# （2026-07-16 金句卡 84 帧事故、2026-07-21 HookOpener 150 帧复用事故，同一病根）。
+# 渲染前用本表钳制并响亮告警，让两侧漂移在日志里现形而不是产出静默缺特效的成片。
+# 改 Root.tsx 的 durationInFrames 时必须同步改这里（有测试盯守两侧一致性）。
+_MAX_FRAMES_BY_COMPOSITION = {
+    "Intro": 75,
+    "ChapterCard": 45,
+    "LowerThird": 120,
+    "KeyPoints": 100,
+    "QuoteCard": 150,
+    "NumberPop": 42,
+    "KeywordPop": 48,
+    "OpeningCard": 36,
+    "GoldenCard": 72,
+    "AmbientParticles": 240,
+    "HighlightSweep": 60,
+    "TypewriterQuote": 150,
+    "HookOpener": 210,
+}
+
+
+def _clamped_frames(composition: str, duration: float, fps: int) -> tuple[int, str | None]:
+    """按 composition 上限钳制渲染帧数；越界时返回告警文本（None = 未越界）。"""
+    frames = max(1, round(float(duration or 0.0) * fps))
+    ceiling = _MAX_FRAMES_BY_COMPOSITION.get(composition)
+    if ceiling is None or frames <= ceiling:
+        return frames, None
+    return ceiling, (
+        f"特效时长 {duration:.2f}s（{frames} 帧）超过 {composition} 的 durationInFrames "
+        f"上限 {ceiling}，已钳制渲染——请同步抬高 remotion/src/Root.tsx 与 "
+        f"_MAX_FRAMES_BY_COMPOSITION 的上限。"
+    )
+
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
 # 时长 2.8→4.5（2026-07-16 用户反馈"金句停留时间太短"：一句 15+ 字的观点要读完）。
 QUOTE_POSITION_RATIO = 0.55
@@ -1218,8 +1252,13 @@ def render_effects(
         props = {k: v for k, v in effect.items() if k not in ("type", "start", "duration")}
         props_path = output_dir / f"effect_{i:02d}.props.json"
         props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+        frames, over_warning = _clamped_frames(
+            composition, float(effect.get("duration") or 0.0), fps
+        )
+        if over_warning:
+            warnings.append(f"第 {i} 条特效（{effect.get('type')}）：{over_warning}")
         command = _build_render_command(
-            npx, entry, composition, props_path, out_path, effect, fps, width, height
+            npx, entry, composition, props_path, out_path, frames, fps, width, height
         )
         try:
             completed = runner(
@@ -1254,12 +1293,12 @@ def _build_render_command(
     composition: str,
     props_path: Path,
     out_path: Path,
-    effect: dict,
+    frames: int,
     fps: int,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
 ) -> list[str]:
-    frames = max(1, round(float(effect.get("duration") or 0.0) * fps))
+    # frames 由调用方经 _clamped_frames 算好（含 composition 上限钳制），这里只拼命令。
     # --width/--height 让 Remotion 4 CLI 按底片实际分辨率覆盖 composition 尺寸，
     # 竖屏（1080x1920）才不会被 Studio 默认 16:9 静默裁剪。
     return [
@@ -1303,9 +1342,12 @@ def render_ambient_particles(
     out_path = output_dir / "ambient_particles.mov"
     props_path = output_dir / "ambient_particles.props.json"
     props_path.write_text(json.dumps({"accent": accent}, ensure_ascii=False), encoding="utf-8")
+    frames, over_warning = _clamped_frames("AmbientParticles", AMBIENT_LOOP_SECONDS, fps)
+    if over_warning:
+        _append_warnings(output_dir, [f"氛围粒子：{over_warning}"])
     command = _build_render_command(
         npx, entry, "AmbientParticles", props_path, out_path,
-        {"duration": AMBIENT_LOOP_SECONDS}, fps, width, height,
+        frames, fps, width, height,
     )
     try:
         completed = runner(

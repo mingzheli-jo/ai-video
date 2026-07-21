@@ -31,10 +31,13 @@ import {
   typewriterQuoteSchema,
 } from "./schema";
 
-// 以下 FPS/WIDTH/HEIGHT/durationInFrames 仅为 Remotion Studio 预览的默认值。
-// 实际渲染时：尺寸由 CLI --width/--height 覆盖（Python 侧从底片探测，支持 1080x1920
-// 竖屏等任意画幅），时长由 CLI --frames / manifest 的 duration 派生。组件内部一律用
-// useVideoConfig() 读取覆盖后的真实尺寸做等比缩放，不依赖这里的默认值。
+// FPS/WIDTH/HEIGHT 仅为 Remotion Studio 预览的默认值：实际渲染时尺寸由 CLI
+// --width/--height 覆盖（Python 侧从底片探测，支持 1080x1920 竖屏等任意画幅），
+// 组件内部一律用 useVideoConfig() 读取覆盖后的真实尺寸做等比缩放。
+// 但 durationInFrames 不是预览默认值——它是渲染帧数硬上限（CLI --frames 越过即失败），
+// 必须 ≥ Python 侧该 composition 的最大可能时长，并与 effects.py 的
+// _MAX_FRAMES_BY_COMPOSITION 逐条同源（有测试盯守）。2026-07-16 金句卡 84 帧、
+// 2026-07-21 HookOpener 150 帧两次事故都栽在把它当预览默认值改小/没跟上。
 const FPS = 30;
 const WIDTH = 1920;
 const HEIGHT = 1080;
@@ -241,7 +244,11 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="HookOpener"
         component={HookOpener}
-        durationInFrames={150}
+        // 契约：上限必须 ≥ Python 侧最大可能时长。HookOpener 被两类特效复用：
+        // hook_opener（HOOK_OPENER_MAX_DURATION 5s）和 golden_lines 多句同步时刻
+        // （SYNC_MOMENT_MAX_DURATION 7s×30=210）。2026-07-21 审查实锤：旧上限 150
+        // 让跨度 >3.8s 的多句时刻渲染必败且被吞成 warning——复用组件时上限没跟上。
+        durationInFrames={210}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}
