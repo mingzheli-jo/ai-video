@@ -788,6 +788,7 @@ def _collect_outputs(job: ResolvedJob, job_dir: Path) -> dict[str, str]:
         "subtitled": job_dir / "release_subtitled.mp4",
         "cover_16x9": job_dir / "publish" / "cover_16x9.jpg",
         "cover_9x16": job_dir / "publish" / "cover_9x16.jpg",
+        "cover_4x3": job_dir / "publish" / "cover_4x3.jpg",
         "cover_3x4": job_dir / "publish" / "cover_3x4.jpg",
         "publish_kit": job_dir / "publish" / "publish_kit.json",
     }

@@ -3,8 +3,10 @@
 流程定位：批量链路末位（subtitles 之后），消费 rewrite.json 与成片，产出
 publish/ 目录：
 
-- cover_16x9.jpg / cover_9x16.jpg —— Remotion still 渲染的统一模板封面
-  （视频首图做底 + 双线金框 + 大标题；全渠道同模板，主页封面"板正"一致）；
+- cover_16x9 / cover_9x16 / cover_4x3 / cover_3x4.jpg —— Remotion still 渲染的
+  统一模板封面（视频首图做底 + 双线金框 + 大标题；全渠道同模板，主页封面"板正"
+  一致）。四画幅各有其位，见 COVER_SPECS 注释——尤其 4x3（横，抖音投稿框免裁）
+  与 3x4（竖，抖音主页展示位）方向相反，别搞混；
 - publish_kit.json —— 标题候选 / 简介 / 标签 / 封面路径的机器可读留档；
 - 发布物料.txt —— 直接复制粘贴用的人类可读版。
 
@@ -32,12 +34,17 @@ Runner = Callable[..., subprocess.CompletedProcess]
 PUBLISH_DIRNAME = "publish"
 KIT_FILENAME = "publish_kit.json"
 TXT_FILENAME = "发布物料.txt"
-# (composition id, 输出文件名, kit 键)；各画幅共用 CoverCard 组件。
-# 3x4（1080×1464）是抖音横版视频专用封面（2026-07-16 实测+官方展示区）：抖音个人主页
-# 作品位是竖向 ~1080×1464，16:9 封面会被中心裁掉左右——横版视频上传时选 3x4 这张。
+# (composition id, 输出文件名, kit 键)；各画幅共用 CoverCard 组件（useVideoConfig 自适应）。
+# 抖音横版投稿要两张、方向相反，别搞混：
+#   4x3（1440×1080，横）= 投稿时的封面选择框按 4:3 收，传 16:9 会被要求手动裁左右
+#                          （2026-07-21 用户实测）；与成片同高、免裁。
+#   3x4（1080×1464，竖）= 抖音个人主页作品位是竖向展示，16:9/4:3 都会被中心裁掉左右
+#                          （2026-07-16 实测），主页要完整就选这张。
+# 16x9 保留：B站/视频号/YouTube 封面仍是 16:9。
 COVER_SPECS = (
     ("Cover16x9", "cover_16x9.jpg", "16x9"),
     ("Cover9x16", "cover_9x16.jpg", "9x16"),
+    ("Cover4x3", "cover_4x3.jpg", "4x3"),
     ("Cover3x4", "cover_3x4.jpg", "3x4"),
 )
 COVER_TITLE_MAX_CHARS = 20   # 封面标题超长截断（组件内还会拆 ≤2 行）
@@ -213,6 +220,7 @@ def pick_cover_backgrounds(
     bgs = {
         "16x9": landscape or fallback,
         "9x16": portrait or fallback,
+        "4x3": landscape or fallback,   # 横版封面，配横图
         "3x4": portrait or fallback,
     }
     return bgs, warnings
@@ -380,8 +388,9 @@ def _write_txt(path: Path, kit: dict) -> None:
         lines += ["", "【封面】"]
         for key, p in covers.items():
             lines.append(f"{key}: {p}")
-        if "3x4" in covers:
-            lines.append("（抖音传横版视频请选 3x4 这张：主页作品位是竖向 ~1080×1464，16x9 会被裁掉左右）")
+        if "4x3" in covers or "3x4" in covers:
+            lines.append("（抖音传横版视频：投稿封面框按 4:3 收，选 4x3 这张免裁；")
+            lines.append("  想让主页作品位竖向展示完整，则选 3x4 那张——两张方向相反别搞混）")
     videos = kit.get("videos") or {}
     if videos:
         lines += ["", "【成片】"]

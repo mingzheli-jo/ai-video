@@ -65,11 +65,12 @@ def test_generate_publish_kit_end_to_end_offline(tmp_path, monkeypatch):
 
     kit = generate_publish_kit(rewrite_path, None, job_dir, tag="心学频道", runner=runner)
 
-    # 三封面：16x9（B站/西瓜）、9x16（竖屏）、3x4（抖音横版专用——主页作品位
-    # 是竖向 ~1080×1464，16:9 会被裁掉左右，2026-07-16 用户实测+查证）
-    assert set(kit["covers"]) == {"16x9", "9x16", "3x4"}
+    # 四封面：16x9（B站/视频号/YouTube）、9x16（竖屏）、4x3（抖音横版投稿框按 4:3
+    # 收，传 16:9 要手动裁左右，2026-07-21 用户实测）、3x4（抖音主页作品位竖向
+    # ~1080×1464，横版封面会被裁左右，2026-07-16 用户实测）。4x3 与 3x4 方向相反。
+    assert set(kit["covers"]) == {"16x9", "9x16", "4x3", "3x4"}
     comps = [c[c.index("still") + 2] for c in runner.commands if "still" in c]
-    assert comps == ["Cover16x9", "Cover9x16", "Cover3x4"]
+    assert comps == ["Cover16x9", "Cover9x16", "Cover4x3", "Cover3x4"]
     # props：标题取 publish_titles[0]、底图 data URI 来自 gen_assets 首图
     # 2026-07-18 起 props 逐封面独立（画幅匹配底图防裁人），抽 16x9 那份验证
     props = json.loads((job_dir / "publish" / "cover.props.16x9.json").read_text(encoding="utf-8"))
@@ -186,7 +187,8 @@ def test_publish_archives_dual_videos_into_publish_dir(tmp_path, monkeypatch):
     assert (job_dir / "publish" / "视频_横版_16x9.mp4").exists()
     txt = (job_dir / "publish" / TXT_FILENAME).read_text(encoding="utf-8")
     assert "【成片】" in txt
-    assert "3x4 这张" in txt  # 抖音横版封面提示写进物料
+    assert "4x3 这张免裁" in txt   # 抖音横版投稿封面提示写进物料
+    assert "3x4 那张" in txt       # 主页展示位那张的区分提示也在
 
 
 def test_publish_archives_single_root_video_without_npx(tmp_path, monkeypatch):
@@ -204,7 +206,7 @@ def test_publish_archives_single_root_video_without_npx(tmp_path, monkeypatch):
 
 
 def test_pick_cover_backgrounds_matches_aspect_per_cover(tmp_path):
-    # 2026-07-18 防裁人：16x9 封面配横图、9x16/3x4 封面配竖图；无对应向回落任意首图。
+    # 2026-07-18 防裁人：16x9/4x3 封面配横图、9x16/3x4 封面配竖图；无对应向回落任意首图。
     from PIL import Image
 
     from video_factory.publish import pick_cover_backgrounds
@@ -218,6 +220,7 @@ def test_pick_cover_backgrounds_matches_aspect_per_cover(tmp_path):
     bgs, warnings = pick_cover_backgrounds(job_dir, None)
     assert bgs["16x9"].name == "b_landscape.png"
     assert bgs["9x16"].name == "a_portrait.png"
+    assert bgs["4x3"].name == "b_landscape.png"   # 横版封面配横图
     assert bgs["3x4"].name == "a_portrait.png"
     assert warnings == []
 
@@ -228,3 +231,43 @@ def test_pick_cover_backgrounds_matches_aspect_per_cover(tmp_path):
     Image.new("RGB", (90, 160)).save(gen2 / "only_portrait.png")
     bgs2, _ = pick_cover_backgrounds(job2, None)
     assert bgs2["16x9"].name == "only_portrait.png"
+
+
+def test_cover_composition_dimensions_match_declared_ratios():
+    """封面 composition 的实际像素必须与其名字声明的比例一致（4:3 横 / 3:4 竖）。
+
+    2026-07-21：4x3 与 3x4 名字只差顺序、方向却相反，是最容易写反的一对——
+    写反了产出的封面照样能渲染、只有上传时才发现，代价高。这里从 Root.tsx
+    解析真实宽高钉死方向。
+    """
+    import re
+
+    from video_factory.publish import COVER_SPECS
+
+    text = (
+        Path(__file__).resolve().parent.parent / "remotion" / "src" / "Root.tsx"
+    ).read_text(encoding="utf-8")
+    sizes = {
+        name: (int(w), int(h))
+        for name, w, h in re.findall(
+            r'id="(Cover\w+)"[\s\S]*?width=\{(\d+)\}\s*\n\s*height=\{(\d+)\}', text
+        )
+    }
+    expected = {          # composition id -> (宽:高 比值, 是否横版)
+        "Cover16x9": (16 / 9, True),
+        "Cover9x16": (9 / 16, False),
+        "Cover4x3": (4 / 3, True),
+        "Cover3x4": None,  # 1080x1464 是抖音主页位实测尺寸，非严格 3:4，只校方向
+    }
+    for composition, _filename, _key in COVER_SPECS:
+        assert composition in sizes, f"{composition} 在 Root.tsx 里不存在"
+        width, height = sizes[composition]
+        spec = expected[composition]
+        if spec is None:
+            assert height > width, f"{composition} 必须是竖版"
+            continue
+        ratio, is_landscape = spec
+        assert abs(width / height - ratio) < 0.01, (
+            f"{composition} 实际 {width}x{height} 与声明比例 {ratio:.3f} 不符"
+        )
+        assert (width > height) is is_landscape, f"{composition} 方向反了"

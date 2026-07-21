@@ -16,6 +16,6 @@ SUBTITLE_FONT_SIZE: "1.45"
 # 留空或非白名单 = 默认 Microsoft YaHei。
 SUBTITLE_FONT_NAME: "KaiTi"
 SUBTITLE_FONT_SIZE_PORTRAIT: "1"
-SUBTITLE_FONT_SIZE_LANDSCAPE: "1.7"
+SUBTITLE_FONT_SIZE_LANDSCAPE: "1.75"
 ARK_IMAGE_MODEL: "doubao-seedream-4-0-250828"
 IMAGE_STYLE_PRESETS: "[{\"name\": \"美式漫画\", \"prompt\": \"美式漫画图像小说插画风格：硬朗清晰的黑色勾线，厚涂与平涂结合的上色，电影级戏剧光影（强逆光、侧光、窗光），暖橙与冷青撞色氛围，商务叙事场景感，人物穿深色西装或白衬衫、表情坚毅有张力，构图突出主体、景深分明，高细节，杂志封面质感\"}, {\"name\": \"古风淡彩\", \"prompt\": \"中国风淡彩插画，日式浮世绘与水彩平涂结合：柔和莫兰迪色调（灰绿、米白、黛蓝点缀），干净平涂上色、细腻柔和的线条，极简留白构图，人物清瘦儒雅、神情沉静内敛，衣袍宽大飘逸有垂坠感，画面空灵有书卷气，淡雅高级不艳俗\"}]"

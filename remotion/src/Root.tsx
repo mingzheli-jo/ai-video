@@ -190,8 +190,21 @@ export const RemotionRoot: React.FC = () => {
         schema={coverCardSchema}
         defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
       />
-      {/* 抖音横版视频专用封面（2026-07-16 实测：抖音主页作品位是竖向 ~1080x1464，
-          16:9 封面会被中心裁掉左右——上传横版视频时选这张 3:4，主页展示才完整） */}
+      {/* 抖音横版封面（2026-07-21 用户实测）：抖音横版投稿的封面选择框按 4:3 收，
+          直接传 16:9 会被要求手动裁掉左右。1440x1080 = 4:3，与成片同高、免裁。
+          注意与下面的 Cover3x4 方向相反：4:3 是横版封面本身，3:4 是竖版主页展示位。 */}
+      <Composition
+        id="Cover4x3"
+        component={CoverCard}
+        durationInFrames={1}
+        fps={FPS}
+        width={1440}
+        height={1080}
+        schema={coverCardSchema}
+        defaultProps={{ title: "示例封面标题，统一模板", tag: "", accent: "#e8b84b", bg: "" }}
+      />
+      {/* 抖音横版视频的主页展示位封面（2026-07-16 实测：抖音主页作品位是竖向
+          ~1080x1464，16:9 封面会被中心裁掉左右——传横版视频时选这张 3:4，主页展示才完整） */}
       <Composition
         id="Cover3x4"
         component={CoverCard}
