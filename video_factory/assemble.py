@@ -18,7 +18,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Callable, Sequence
 
-from video_factory import credentials_store, stage_report, timeline
+from video_factory import beat_math, credentials_store, stage_report, timeline
 from video_factory.asset_pool import (
     IMAGE_SUFFIXES,
     IMAGE_VIRTUAL_DURATION,
@@ -142,7 +142,8 @@ def _resolve_target_duration(rewrite: dict, target_duration: float | None) -> fl
 
 
 def _char_count(text: str) -> int:
-    return len("".join(str(text or "").split()))
+    """节时长按字数占比分配，口径必须与 image_gen/asset_pool 一致 → 统一走 beat_math。"""
+    return beat_math.char_count(text)
 
 
 def _list_ordered_assets(directory: Path) -> list[Path]:

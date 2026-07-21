@@ -29,7 +29,7 @@ from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from video_factory import credentials_store
+from video_factory import beat_math, credentials_store
 
 ARK_API_KEY_ENV = "ARK_API_KEY"
 ARK_IMAGE_MODEL_ENV = "ARK_IMAGE_MODEL"
@@ -524,8 +524,9 @@ def _result_row(item: ImagePlanItem, path: Path, reused: bool) -> dict:
 
 # --- 配图管家：拍规划 + 拍级匹配（Task B）------------------------------------
 
-# 与 asset_pool.MIN_SECTION_SECONDS 保持一致，确保节时长计算口径统一。
-_MIN_SECTION_SECONDS = 2.0
+# 节时长口径统一到 beat_math（2026-07-21 去重；此前本模块自持一份 2.0 常量 +
+# 一份切分实现，与 asset_pool 那份已经分岔）。
+_MIN_SECTION_SECONDS = beat_math.MIN_SECTION_SECONDS
 
 
 @dataclass(frozen=True)
@@ -561,31 +562,21 @@ def _all_sections_from_rewrite(rewrite: dict) -> list[tuple[str, str]]:
     return sections
 
 
-def _beat_char_count(text: str) -> int:
-    """去掉空白后的字符数（与 assemble._char_count 同口径）。"""
-    return len("".join(str(text or "").split()))
-
-
 def compute_section_durations(rewrite: dict, target_duration: float) -> list[float]:
     """按各节字数占比把目标时长分配到每节（hook + content）。
 
-    与 asset_pool._split_durations + assemble._char_count 同口径，保证
-    batch._run_image_gen 计算的拍数与 assemble --ordered-assets 重新计算的拍数一致。
+    算法见 beat_math.split_durations——与 asset_pool._split_durations 严格同源
+    （2026-07-21 去重前是两份实现且已分岔），保证 batch._run_image_gen 算出的
+    拍数与 assemble --ordered-assets 重算的拍数一致；不一致时 assemble 会静默
+    回落均匀 5s/拍，画面与预期错位且难查。
+
+    生图侧时长不足不抛错、返回 []：生图是可降级环节，上游据此回落节级配图。
     """
     sections = _all_sections_from_rewrite(rewrite)
     if not sections:
         return []
-    n = len(sections)
-    char_counts = [_beat_char_count(narration) for _, narration in sections]
-    total_chars = sum(char_counts)
-    floor = _MIN_SECTION_SECONDS * n
-    flexible = max(0.0, target_duration - floor)
-    if total_chars <= 0:
-        return [target_duration / n] * n
-    durations = [_MIN_SECTION_SECONDS + flexible * c / total_chars for c in char_counts]
-    # 浮点残差归到最后一节（与 asset_pool._split_durations 一致）
-    durations[-1] += target_duration - sum(durations)
-    return durations
+    char_counts = [beat_math.char_count(narration) for _, narration in sections]
+    return beat_math.split_durations(char_counts, target_duration) or []
 
 
 def plan_beats(

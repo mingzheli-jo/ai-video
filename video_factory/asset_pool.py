@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from video_factory import beat_math
+
 Runner = Callable[..., subprocess.CompletedProcess]
 
 # 支持的素材扩展名（与 source_download._find_downloaded_video 口径一致）。
@@ -24,7 +26,8 @@ IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 # （切片会配不同运镜，同图多次出现观感不同，不至于一张图霸屏全节）。
 IMAGE_VIRTUAL_DURATION = 6.0
 # 每小节最短时长保护：太短的镜头切出来观感碎，硬性抬到这个下限。
-MIN_SECTION_SECONDS = 2.0
+# 保底节时长的唯一定义在 beat_math；此处重导出兼容既有引用（含测试）。
+MIN_SECTION_SECONDS = beat_math.MIN_SECTION_SECONDS
 
 
 class AssetPoolError(RuntimeError):
@@ -203,26 +206,13 @@ def allocate_sections_to_clips(
 
 
 def _split_durations(sections_char_counts: Sequence[int], total_duration: float) -> list[float]:
-    counts = [max(0, int(count)) for count in sections_char_counts]
-    if not counts:
-        raise AssetPoolError("没有可分配的小节。")
-    section_count = len(counts)
-    if total_duration < MIN_SECTION_SECONDS * section_count:
-        raise AssetPoolError(
-            f"目标时长 {total_duration:.1f}s 太短：{section_count} 节每节至少 {MIN_SECTION_SECONDS}s。"
-        )
+    """算法见 beat_math.split_durations（与 image_gen 侧同源，2026-07-21 去重）。
 
-    total_chars = sum(counts)
-    floor = MIN_SECTION_SECONDS * section_count
-    flexible = total_duration - floor
-    if total_chars <= 0:
-        shares = [flexible / section_count] * section_count
-    else:
-        shares = [flexible * count / total_chars for count in counts]
-    durations = [MIN_SECTION_SECONDS + share for share in shares]
-    # 浮点残差归到最后一节，保证 sum(durations) == total_duration。
-    durations[-1] += total_duration - sum(durations)
-    return durations
+    拼装侧时长不足必须响亮失败：素材铺不满时间轴是硬错误，不能静默降级。
+    """
+    return beat_math.split_durations_or_raise(
+        sections_char_counts, total_duration, AssetPoolError
+    )
 
 
 def _fill_section(
