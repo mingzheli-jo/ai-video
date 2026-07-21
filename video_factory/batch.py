@@ -602,12 +602,20 @@ def _run_image_gen(job: ResolvedJob, job_dir: Path) -> int:
                     action = "generate"
                 else:
                     dst = dst_prefix.with_suffix(src.suffix.lower() or ".png")
-                    # 复用不裸拷：轻度扰动让同一库图在不同视频里指纹不同
-                    # （2026-07-18 抖音同画质限流对抗；失败自动回落原样拷贝）。
-                    image_gen.perturb_image_for_reuse(src, dst, seed=f"{job.name}:{beat_idx}")
-                    copied += 1
-                    reused += 1
-                    continue
+                    # 原样拷贝。2026-07-21 用户定案退役复用图扰动（翻转/裁切/调色）：
+                    # 画面效果不划算——翻转让构图和人物朝向失准，收益不抵损失。
+                    # 复用优先的成本策略不变，复用不了就直接生成新图。
+                    try:
+                        shutil.copy2(src, dst)
+                    except OSError as exc:
+                        message = f"拍 {beat_idx} 复用图拷贝失败（{src.name}）：{exc}，已改为现场生成"
+                        print(f"生图告警：{message}。")
+                        failures.append(message)
+                        action = "generate"
+                    else:
+                        copied += 1
+                        reused += 1
+                        continue
             else:
                 # 文件缺失：降级为 generate（下面接着处理）。
                 action = "generate"

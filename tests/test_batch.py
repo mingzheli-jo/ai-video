@@ -1520,3 +1520,86 @@ def test_resolve_job_normal_chinese_name_unchanged(tmp_path):
     job = resolve_job({"name": "王阳明心学2026", "source": "s", "assets": "a"}, 0)
     assert job.name == "王阳明心学2026"
     assert job.output == batch._default_output("王阳明心学2026")
+
+
+def test_reuse_copies_library_image_verbatim(tmp_path, monkeypatch):
+    """2026-07-21 用户定案：复用图退役扰动（翻转/裁切/调色），改逐字节原样拷贝。
+
+    翻转让构图与人物朝向失准，收益不抵损失。复用优先的成本策略不变。
+    """
+    from PIL import Image
+
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "aspect": "16:9", "output": str(job_dir)}, 0)
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    src = lib / "landscape.png"
+    Image.new("RGB", (160, 90), (33, 66, 99)).save(src)
+    monkeypatch.setattr(image_gen, "LIBRARY_ROOT", lib)
+
+    matches = [{"beat_index": 0, "action": "reuse", "file": "landscape.png",
+                "prompt": "p0", "category": "场景", "tags": []}]
+    generated = []
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()])
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "风")
+    monkeypatch.setattr(image_gen, "generate_image",
+                        lambda prompt, size: generated.append(prompt) or b"png")
+
+    assert batch._run_image_gen(job, job_dir) == 0
+
+    dst = job_dir / "gen_assets" / "img_00.png"
+    assert dst.read_bytes() == src.read_bytes()   # 逐字节相同 = 没做任何扰动
+    assert generated == []                        # 复用命中，不该触发生成
+
+
+def test_reuse_copy_failure_degrades_to_generate(tmp_path, monkeypatch):
+    """复用拷贝失败（磁盘满/权限）必须降级现场生成并落告警，不能静默少一张图。"""
+    from PIL import Image
+
+    from video_factory import image_gen
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "rewrite.json").write_text(json.dumps({
+        "hook": "钩子", "sections": [{"title": "一", "narration": "内容" * 20, "visual_hint": ""}],
+        "target_duration_seconds": 10,
+    }, ensure_ascii=False), encoding="utf-8")
+    job = resolve_job({"name": "g", "source": "s", "visual_source": "ai_image",
+                       "duration": 10, "aspect": "16:9", "output": str(job_dir)}, 0)
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    Image.new("RGB", (160, 90)).save(lib / "landscape.png")
+    monkeypatch.setattr(image_gen, "LIBRARY_ROOT", lib)
+
+    matches = [{"beat_index": 0, "action": "reuse", "file": "landscape.png",
+                "prompt": "p0", "category": "场景", "tags": []}]
+    generated = []
+    monkeypatch.setattr(image_gen, "plan_beats", lambda *a, **k: [object()])
+    monkeypatch.setattr(image_gen, "compute_section_durations", lambda *a, **k: [10.0])
+    monkeypatch.setattr(image_gen, "load_index", lambda root: [])
+    monkeypatch.setattr(image_gen, "match_beats_to_library", lambda *a, **k: matches)
+    monkeypatch.setattr(image_gen, "get_style_prompt", lambda: "风")
+    monkeypatch.setattr(image_gen, "generate_image",
+                        lambda prompt, size: generated.append(prompt) or b"png")
+    monkeypatch.setattr(image_gen, "ingest_generated_image", lambda img, **kw: tmp_path / "l.png")
+
+    def boom(src, dst, **kwargs):
+        raise OSError("磁盘已满")
+    monkeypatch.setattr(batch.shutil, "copy2", boom)
+
+    assert batch._run_image_gen(job, job_dir) == 0
+
+    assert len(generated) == 1 and "p0" in generated[0]   # 降级生成兜位
+    warn = json.loads((job_dir / "image_gen_warnings.json").read_text(encoding="utf-8"))
+    assert any("拷贝失败" in w and "磁盘已满" in w for w in warn["warnings"])

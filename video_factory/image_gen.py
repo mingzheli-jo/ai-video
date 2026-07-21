@@ -778,44 +778,10 @@ def image_file_matches_aspect(path: Path | str, size: str) -> bool:
     return _same_aspect(f"{width}x{height}", size)
 
 
-def perturb_image_for_reuse(src: Path | str, dst: Path | str, seed: str) -> bool:
-    """复用图落盘前做轻度视觉扰动（2026-07-18 抖音"同画质"判定对抗）。
-
-    同一张库图出现在不同视频里时，帧指纹必须不同——否则复用率越高、被判
-    同质化限流越狠（与"复用优先"成本策略正面冲突，靠本函数解耦）。
-    确定性随机（seed=任务名:拍号，同视频内稳定、跨视频不同）三连：
-    ① 50% 水平翻转；② 每边 1%~3.5% 随机裁切再放回原尺寸；③ 亮度/对比度/
-    饱和度各 ±3% 微调。肉眼几乎无感，哈希层面已是另一张图。
-    任何失败回落原样拷贝并返回 False（扰动是锦上添花，绝不阻断成片）。
-    """
-    import random as _random
-    import shutil as _shutil
-
-    src, dst = Path(src), Path(dst)
-    try:
-        from PIL import Image, ImageEnhance
-
-        rnd = _random.Random(seed)
-        with Image.open(src) as img:
-            image = img.convert("RGB")
-            width, height = image.size
-            if rnd.random() < 0.5:
-                image = image.transpose(Image.FLIP_LEFT_RIGHT)
-            left = int(width * rnd.uniform(0.01, 0.035))
-            top = int(height * rnd.uniform(0.01, 0.035))
-            right = width - int(width * rnd.uniform(0.01, 0.035))
-            bottom = height - int(height * rnd.uniform(0.01, 0.035))
-            image = image.crop((left, top, right, bottom)).resize((width, height), Image.LANCZOS)
-            for enhancer in (ImageEnhance.Brightness, ImageEnhance.Contrast, ImageEnhance.Color):
-                image = enhancer(image).enhance(rnd.uniform(0.97, 1.03))
-            image.save(dst)
-        return True
-    except Exception:
-        try:
-            _shutil.copy2(src, dst)
-        except OSError:
-            return False
-        return False
+# perturb_image_for_reuse（复用图翻转/裁切/调色扰动）于 2026-07-21 用户定案退役：
+# 画面效果不划算——水平翻转让构图和人物朝向失准，收益不抵损失。复用改原样拷贝，
+# 见 batch._run_image_gen 的 reuse 分支。同画质对抗的另两路（字幕微调色
+# subtitles._tint_filter_for、BGM 随机轮换 batch.py）保留不动。
 
 
 def _prefilter_library(
