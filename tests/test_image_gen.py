@@ -875,3 +875,82 @@ def test_ensure_section_images_style_override_isolates_library(tmp_path, monkeyp
                                     style="古风淡彩水墨")
     assert report3["generated"] == 0 and report3["reused"] == 2
     assert prompts == []
+
+
+def test_generate_image_retries_transient_network_failures(monkeypatch):
+    """2026-07-21 实测：拍 19 撞 "Remote end closed connection" 只重试 1 次就丢图。
+
+    瞬时故障现在重试 2 次（共 3 次尝试）并线性退避；第 3 次成功则整拍不丢。
+    """
+    from http.client import HTTPException
+
+    from video_factory import image_gen
+
+    monkeypatch.setenv("ARK_API_KEY", "k")
+    monkeypatch.setattr(image_gen.time, "sleep", lambda _s: None)   # 测试不真睡
+
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            import base64 as _b64, json as _json
+            return _json.dumps(
+                {"data": [{"b64_json": _b64.b64encode(b"PNGDATA").decode()}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise HTTPException("Remote end closed connection without response")
+        return _Resp()
+
+    monkeypatch.setattr(image_gen, "urlopen", fake_urlopen)
+
+    assert image_gen.generate_image("提示词", size="1920x1080") == b"PNGDATA"
+    assert len(calls) == 3, "应重试到第 3 次"
+
+
+def test_generate_image_gives_up_after_max_attempts(monkeypatch):
+    """超出重试预算后报错，且错误文案里的次数与常量同源（不写死）。"""
+    from http.client import HTTPException
+
+    from video_factory import image_gen
+
+    monkeypatch.setenv("ARK_API_KEY", "k")
+    monkeypatch.setattr(image_gen.time, "sleep", lambda _s: None)
+    calls = []
+
+    def always_fail(request, timeout=None):
+        calls.append(1)
+        raise HTTPException("boom")
+
+    monkeypatch.setattr(image_gen, "urlopen", always_fail)
+
+    with pytest.raises(image_gen.ImageGenError, match="网络失败"):
+        image_gen.generate_image("提示词", size="1920x1080")
+    assert len(calls) == image_gen.ARK_MAX_ATTEMPTS
+
+
+def test_generate_image_does_not_retry_http_errors(monkeypatch):
+    """内容安全拦截等明确 HTTP 错误码不重试——重试没意义还多花钱。"""
+    from urllib.error import HTTPError
+
+    from video_factory import image_gen
+
+    monkeypatch.setenv("ARK_API_KEY", "k")
+    calls = []
+
+    def sensitive(request, timeout=None):
+        calls.append(1)
+        raise HTTPError("u", 400, "Bad Request", {},
+                        __import__("io").BytesIO(b'{"error":{"code":"OutputImageSensitiveContentDetected"}}'))
+
+    monkeypatch.setattr(image_gen, "urlopen", sensitive)
+
+    with pytest.raises(image_gen.ImageGenError, match="HTTP 400"):
+        image_gen.generate_image("提示词", size="1920x1080")
+    assert len(calls) == 1, "HTTP 错误码不该重试"

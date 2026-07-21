@@ -75,14 +75,14 @@ _MAX_FRAMES_BY_COMPOSITION = {
     "ChapterCard": 45,
     "LowerThird": 120,
     "KeyPoints": 100,
-    "QuoteCard": 150,
+    "QuoteCard": 180,
     "NumberPop": 42,
     "KeywordPop": 48,
     "OpeningCard": 36,
     "GoldenCard": 72,
     "AmbientParticles": 240,
-    "HighlightSweep": 60,
-    "TypewriterQuote": 150,
+    "HighlightSweep": 96,
+    "TypewriterQuote": 180,
     "HookOpener": 210,
 }
 
@@ -104,9 +104,9 @@ def _clamped_frames(composition: str, duration: float, fps: int) -> tuple[int, s
 QUOTE_POSITION_RATIO = 0.55
 QUOTE_DURATION = 4.5
 # 数字强调：每节口播里第一个关键数字，节起点后 0.8s 弹出，全片最多 2 个。
-NUMBER_POP_OFFSET = 1.0
-NUMBER_POP_DURATION = 1.4
-NUMBER_POP_MAX = 2
+# NUMBER_POP_* 于 2026-07-21 用户定案随 number_pop 退役而删除。_NUMBER_RE 保留：
+# 现在的用途反了过来——不再用于**派生**数字特效，而是用于**排除**数字文本
+# 混进 keyword_pop（见 _derive_keyword_events）。
 _NUMBER_RE = re.compile(
     r"\d+(?:\.\d+)?%|\d+(?:\.\d+)?(?:步|倍|年|个|条|招|天|分钟|小时|万|亿)"
 )
@@ -544,13 +544,14 @@ def _section_narration(section: dict, rewrite_sections: list, index: int) -> str
 
 
 def _extract_keyword(narration: str, title: str) -> str:
-    """规则抽取本节关键词：「」引号内词 > 数字短语 > 节标题头 4-6 字兜底。"""
+    """规则抽取本节关键词：「」引号内词 > 节标题头 4-6 字兜底。
+
+    2026-07-21 摘除数字短语分支：number_pop 退役后，数字若还留在这里当兜底，
+    就会改从 keyword_pop 冒出来，用户要取消的「50%」「3步」大字照样在画面上。
+    """
     match = _KEYWORD_QUOTE_RE.search(narration or "")
     if match and match.group(1).strip():
         return match.group(1).strip()[:KEYWORD_MAX_CHARS]
-    match = _NUMBER_RE.search(narration or "")
-    if match:
-        return match.group(0)
     return (title or "").strip()[:KEYWORD_TITLE_FALLBACK_CHARS]
 
 
@@ -604,16 +605,18 @@ def _derive_keyword_events(
             else None
         )
 
-        # 取 keyword/number 类 emphasis（golden 单独派生为 golden_card，不进 keyword_pop）
+        # 只取 keyword 类 emphasis。golden 由 _derive_golden_events 处理；
+        # number 类 2026-07-21 起一并排除——数字/百分比不再以任何形式成为文字特效
+        # （与 number_pop 退役、_extract_keyword 摘除数字兜底是同一个决定的三处落点）。
         em_texts: list[str] = []
         if rw_section is not None:
             for em in (rw_section.get("emphasis") or []):
                 if isinstance(em, dict):
                     kind = str(em.get("kind") or "keyword")
-                    if kind == "golden":
-                        continue  # golden 由 _derive_golden_events 处理，不进弹词
+                    if kind in ("golden", "number"):
+                        continue
                     text = str(em.get("text") or "").strip()
-                    if text:
+                    if text and not _NUMBER_RE.fullmatch(text.strip()):
                         em_texts.append(text)
         em_texts = em_texts[:3]
 
@@ -956,47 +959,15 @@ def _build_rich_effects(
                 rich.append(_frame_aligned(spec, fps))
                 quote_windows.append((rich[-1].start, rich[-1].start + rich[-1].duration))
 
-    # 数字强调：跳过第 0 节（片头+要点卡已经很满），每节最多 1 个、全片最多 2 个。
-    # 口播文本在 rewrite 里（拼装计划的节只有 title/duration）：计划第 i 节（i>=1）
-    # 对应 rewrite 第 i-1 节（计划把 hook 计为第 0 节）。
-    count = 0
-    number_values: list[str] = []  # 已弹的数字，供 keyword_pop 去重（防同一数字弹两次）
-    for i, section in enumerate(sections):
-        if count >= NUMBER_POP_MAX:
-            break
-        if i == 0:
-            continue
-        narration = _section_narration(section, rewrite_sections, i)
-        match = _NUMBER_RE.search(narration)
-        if not match:
-            continue
-        value = match.group(0)
-        # 落点优先用主时间轴：找到含该数字的句子 → 用真实句起点（2026-07-15 修"5000条"
-        # 落到错误位置的根因）；找不到才回落节起点+固定偏移估算。
-        sentence = _find_timeline_sentence(timeline, value)
-        pop_start = (
-            float(sentence.get("start") or 0.0) if sentence is not None
-            else starts[i] + NUMBER_POP_OFFSET
-        )
-        rich.append(_frame_aligned(
-            EffectSpec(
-                type="number_pop",
-                start=pop_start,
-                duration=NUMBER_POP_DURATION,
-                props={"value": value, "accent": accent},
-            ),
-            fps,
-        ))
-        number_values.append(value)
-        count += 1
+    # 数字强调（number_pop）于 2026-07-21 用户定案退役：画面上额外弹「50%」「3步」
+    # 这类数字/百分比大字，观感是硬贴上去的，与口播已经说出的信息重复。
+    # 注意退役不是简单删派生：数字曾经通过 number_pop 与 keyword_pop 的去重
+    # 相互排斥（"已弹过的数字不再作 keyword_pop"），只删这一段的话，那些数字会
+    # 反过来**流回 keyword_pop** 继续以大字出现——所以 _extract_keyword 的数字
+    # 兜底分支同步摘除，两处一起断，数字才真正不再成为文字特效。
 
     # 关键词弹出：emphasis 优先用真实句起点，无 emphasis 回落规则抽取，密度控制，三色轮换。
     keyword_events = _derive_keyword_events(sections, rewrite_sections, starts, timeline)
-    # 去重：已被 number_pop 弹出的数字不再作 keyword_pop（避免"5000条"弹两次）。
-    keyword_events = [
-        (t, kw) for t, kw in keyword_events
-        if not any(nv in kw or kw in nv for nv in number_values)
-    ]
     keyword_events = _apply_density_control(keyword_events, sections, rewrite_sections, starts)
 
     # 中段时刻（2026-07-16 二次定案：**首屏式同步**）：

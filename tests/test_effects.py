@@ -783,9 +783,12 @@ def test_manifest_number_pop_extracts_key_number_max_two():
         ],
     }
     manifest = build_effects_manifest(plan, rewrite)
-    pops = [e for e in manifest["effects"] if e["type"] == "number_pop"]
-    assert [p["value"] for p in pops] == ["3步", "50%"]  # 最多 2 个、顺序取
-    assert pops[0]["start"] == pytest.approx(6.0 + 1.0, abs=1 / 30)  # 首个正题节起点 + 1s
+    # 2026-07-21 用户定案：数字/百分比大字（number_pop）退役——观感是硬贴上去的，
+    # 且与口播已说出的信息重复。这些口播里的 3步/50%/10个 一个都不该再变成文字特效。
+    assert [e for e in manifest["effects"] if e["type"] == "number_pop"] == []
+    # 也不能改头换面从 keyword_pop 冒出来（两者原有去重，只删一处会让数字流回来）
+    assert not any("3步" in str(e.get("text", "")) or "50%" in str(e.get("text", ""))
+                   for e in manifest["effects"])
 
 
 def test_manifest_number_pop_reads_rewrite_sections_not_plan(monkeypatch):
@@ -901,11 +904,11 @@ def test_manifest_keyword_pop_per_section_skips_first():
     }
     manifest = build_effects_manifest(plan, rewrite)
     # keyword_pop 已退役（2026-07-16）：无 timeline 时「反脆弱」对不上口播句子，
-    # 中段文字时刻一律不出（宁缺勿滥）；数字弹出保留估算兜底。
-    assert all(e["type"] not in ("keyword_pop", "highlight_sweep", "golden_lines")
+    # 中段文字时刻一律不出（宁缺勿滥）。数字弹出也已退役（2026-07-21）——
+    # 此前这里是唯一还留着估算兜底的文字特效，现在中段彻底干净。
+    assert all(e["type"] not in ("keyword_pop", "highlight_sweep", "golden_lines",
+                                 "number_pop")
                for e in manifest["effects"])
-    nums = [e for e in manifest["effects"] if e["type"] == "number_pop"]
-    assert [n["value"] for n in nums] == ["3步"]
 
 
 def test_manifest_title_fallback_no_longer_pops_without_timeline():
@@ -926,7 +929,9 @@ def test_extract_keyword_priority():
     from video_factory.effects import _extract_keyword
 
     assert _extract_keyword("他说「断舍离」是关键", "标题") == "断舍离"          # 引号优先
-    assert _extract_keyword("涨了50%不止", "标题") == "50%"                     # 数字次之
+    # 2026-07-21 数字兜底分支已摘除：number_pop 退役后若还留着，数字会改从
+    # keyword_pop 冒出来，用户要取消的「50%」大字照样在画面上。现在回落节标题。
+    assert _extract_keyword("涨了50%不止", "标题") == "标题"
     assert _extract_keyword("没有引号也没数字", "低杠杆保现金流") == "低杠杆保现金"  # 头 6 字兜底
     assert _extract_keyword("", "") == ""                                       # 全空 → 空串（跳过）
 
@@ -1079,14 +1084,12 @@ def test_derive_keyword_events_uses_emphasis_when_present():
 
     events = _derive_keyword_events(sections, rw_sections, starts)
 
-    # golden 被过滤，只剩 keyword + number 两条
-    assert len(events) == 2
-    texts = [e[1] for e in events]
-    assert texts == ["核心词A", "50%收益"]
-    # 均匀分布（n=2）：1/(2+1)*30=10, 2/(2+1)*30=20，加 section_start=10
-    times = [e[0] for e in events]
-    assert abs(times[0] - (10 + 10.0)) < 0.01
-    assert abs(times[1] - (10 + 20.0)) < 0.01
+    # golden 被过滤；number 类 2026-07-21 起也被过滤（数字不再以任何形式成为
+    # 文字特效）→ 只剩 keyword 一条
+    assert len(events) == 1
+    assert [e[1] for e in events] == ["核心词A"]
+    # 均匀分布（n=1）：1/(1+1)*30=15，加 section_start=10
+    assert abs(events[0][0] - (10 + 15.0)) < 0.01
 
 
 def test_derive_keyword_events_falls_back_to_rule_without_emphasis():
@@ -1971,33 +1974,92 @@ def test_all_mapped_compositions_have_frame_ceiling():
         )
 
 
-def test_python_max_durations_fit_composition_ceilings():
-    # 每类特效的 Python 侧最大可能时长 × fps 必须装进对应 composition 的上限。
-    from video_factory.effects import (
-        AMBIENT_LOOP_SECONDS,
-        GOLDEN_LINES_MAX_DURATION,
-        HOOK_OPENER_MAX_DURATION,
-        QUOTE_DURATION,
-        SYNC_MOMENT_MAX_DURATION,
-        TYPEWRITER_MAX_DURATION,
-        _MAX_FRAMES_BY_COMPOSITION,
-    )
+def test_generated_manifests_never_exceed_composition_ceilings():
+    """经验式盯守：跑大量真实场景派生 manifest，逐条特效验证帧数装得进上限。
 
-    cases = [
-        # (说明, Python 侧最大时长, 目标 composition)
-        ("golden_lines 多句同步时刻", SYNC_MOMENT_MAX_DURATION, "HookOpener"),
-        ("golden_lines 单句", GOLDEN_LINES_MAX_DURATION, "HookOpener"),
-        ("hook_opener 开屏", HOOK_OPENER_MAX_DURATION, "HookOpener"),
-        ("quote_card 金句卡", QUOTE_DURATION, "QuoteCard"),
-        ("typewriter_quote 打字机", TYPEWRITER_MAX_DURATION, "TypewriterQuote"),
-        ("ambient 氛围粒子", AMBIENT_LOOP_SECONDS, "AmbientParticles"),
-    ]
-    for label, duration, composition in cases:
-        frames = round(duration * DEFAULT_FPS)
-        ceiling = _MAX_FRAMES_BY_COMPOSITION[composition]
-        assert frames <= ceiling, (
-            f"{label}：最大 {duration}s = {frames} 帧 > {composition} 上限 {ceiling}"
-        )
+    2026-07-21 教训：上一版测试手挑 QUOTE_DURATION / TYPEWRITER_MAX_DURATION 这类
+    看着权威的常量来算\"最大时长\"——但它们在表达式
+    `min(max(span+1.2, QUOTE_DURATION), TYPEWRITER_MAX_DURATION+1.5)` 里是**下限**，
+    真实上限是 6.0s。测试因此全绿，用户成片里 quote_card / highlight_sweep 却一直
+    渲染失败被吞。改成不假设任何常量、直接从派生结果反查。
+    """
+    from video_factory.effects import _COMPOSITION_BY_TYPE, _MAX_FRAMES_BY_COMPOSITION
+
+    # 场景构造要点：timeline 句子必须**包含** emphasis 原文，金句才能锚到真句、
+    # 走到 quote_card 分支；长短句交替让 span 逼近各表达式上限（长句 6s 时
+    # quote_card = min(max(span+1.2, 4.5), 6.0) 正好打满 6.0s）。
+    # typewriter_form=True 让金句文本呈「出处：正文」形态（_TYPEWRITER_QUOTE_RE），
+    # timeline 路径下会走 typewriter_quote 分支而非 quote_card——两条分支共用同一个
+    # duration 表达式，必须都被覆盖到（否则又是空转）。
+    scenarios = []
+    for total, n_sections, long_len, typewriter_form in [
+        (120.0, 5, 6.0, False), (60.0, 3, 8.0, False),
+        (180.0, 8, 5.0, False), (120.0, 5, 6.0, True),
+    ]:
+        sec_dur = total / n_sections
+        golden = [
+            (f"王阳明{i}：金句此心不动随机而动" if typewriter_form
+             else f"金句{i}此心不动随机而动")
+            for i in range(n_sections)
+        ]
+        plan = {
+            "version": "assembly_v1", "fps": 30, "width": 1920, "height": 1080,
+            "sections": [
+                {"index": i, "title": f"第{i}节标题", "duration_seconds": sec_dur, "slices": []}
+                for i in range(n_sections)
+            ],
+        }
+        rewrite = {
+            "hook": "三秒钩子开场白文字内容",
+            "publish_titles": ["王阳明：此心不动，随机而动"],   # 「出处：正文」→ 打字机分支
+            "sections": [
+                {
+                    "title": f"第{i}节标题",
+                    "narration": f"内容「关键词{i}」讲解。{golden[i]}。后续内容补充说明。",
+                    "emphasis": [{"text": golden[i], "kind": "golden"},
+                                 {"text": f"关键词{i}", "kind": "keyword"}],
+                }
+                for i in range(n_sections)
+            ],
+        }
+        timeline, t, k = [], 0.0, 0
+        while t < total:
+            is_long = k % 3 == 1
+            text = golden[k % n_sections] if is_long else f"第{k:02d}句包含关键词{k % n_sections}的口播内容"
+            span = long_len if is_long else 3.0
+            timeline.append({"text": text, "start": t, "end": min(total, t + span)})
+            t += span
+            k += 1
+        scenarios.append((plan, rewrite, timeline))
+        # 无 timeline 变体：走估算位分支（quote_card / typewriter_quote 的另一条路径）
+        scenarios.append((plan, rewrite, None))
+
+    checked, seen_types = 0, set()
+    for plan, rewrite, timeline in scenarios:
+        manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+        fps = manifest["fps"]
+        for effect in manifest["effects"]:
+            composition = _COMPOSITION_BY_TYPE.get(effect["type"])
+            assert composition, f"特效类型 {effect['type']} 没有 composition 映射"
+            ceiling = _MAX_FRAMES_BY_COMPOSITION[composition]
+            frames = max(1, round(float(effect["duration"]) * fps))
+            assert frames <= ceiling, (
+                f"{effect['type']} 时长 {effect['duration']}s = {frames} 帧 > "
+                f"{composition} 上限 {ceiling}——请同步抬高 Root.tsx 与上限表"
+            )
+            seen_types.add(effect["type"])
+            checked += 1
+
+    # 覆盖率闸：上一版测试就是**空转通过**的——场景压根没派生出 quote_card /
+    # highlight_sweep，断言便形同虚设。这里强制要求变长时长的类型真的出现过。
+    # 只列变长的：固定时长类型（number_pop/intro/lower_third）不会随输入漂移；
+    # chapter_card / key_points / golden_card / opening_card / keyword_pop 已退役，
+    # _COMPOSITION_BY_TYPE 里的映射仅为旧 manifest 重渲兼容，无构造点。
+    must_cover = {"hook_opener", "golden_lines", "quote_card",
+                  "typewriter_quote", "highlight_sweep"}
+    missing = must_cover - seen_types
+    assert not missing, f"场景未触发这些特效，断言等于没跑：{sorted(missing)}"
+    assert checked > 30, f"场景覆盖不足，只验了 {checked} 条特效"
 
 
 def test_clamped_frames_over_ceiling_clamps_and_warns():
@@ -2045,3 +2107,52 @@ def test_render_effects_clamps_over_ceiling_and_writes_warning(tmp_path, monkeyp
         (tmp_path / "effects_warnings.json").read_text(encoding="utf-8")
     )["warnings"]
     assert any("钳制" in w and "HookOpener" in w for w in warnings)
+
+
+def test_number_pop_is_retired_end_to_end():
+    """2026-07-21 用户定案：数字/百分比不再以任何形式成为文字特效。
+
+    退役有三处落点，任何一处漏掉数字都会从别的通道冒出来：
+    ① number_pop 派生删除  ② _extract_keyword 数字兜底摘除
+    ③ _derive_keyword_events 排除 kind=number 与纯数字文本
+    """
+    from video_factory.effects import _COMPOSITION_BY_TYPE, _extract_keyword
+
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 6.0},
+            {"index": 1, "title": "一", "duration_seconds": 30.0},
+            {"index": 2, "title": "二", "duration_seconds": 30.0},
+        ]
+    }
+    rewrite = {
+        "hook": "开场钩子文案",
+        "sections": [
+            {"narration": "只需3步就能救回来，效率提升50%",
+             "emphasis": [{"text": "50%", "kind": "number"},
+                          {"text": "3步", "kind": "keyword"}]},
+            {"narration": "读写速度会掉10倍不止",
+             "emphasis": [{"text": "10倍", "kind": "number"}]},
+        ],
+    }
+    timeline = [{"text": f"第{i}句只需3步提升50%的口播", "start": i * 4.0, "end": i * 4.0 + 3.5}
+                for i in range(15)]
+
+    for tl in (None, timeline):
+        manifest = build_effects_manifest(plan, rewrite, timeline=tl)
+        assert not [e for e in manifest["effects"] if e["type"] == "number_pop"]
+        # 数字也不该作为文本混进任何其它文字特效
+        for effect in manifest["effects"]:
+            for field in ("text", "keyword", "value"):
+                assert not _NUMBER_ONLY_RE.fullmatch(str(effect.get(field, "")).strip()), (
+                    f"{effect['type']} 的 {field} 仍是纯数字短语：{effect.get(field)}"
+                )
+
+    # 规则抽取层也不再回落数字
+    assert _extract_keyword("涨了50%不止", "节标题") == "节标题"
+    # 映射保留（旧 manifest 重渲兼容），但已无构造点
+    assert "number_pop" in _COMPOSITION_BY_TYPE
+
+
+import re as _re
+_NUMBER_ONLY_RE = _re.compile(r"\d+(?:\.\d+)?%|\d+(?:\.\d+)?(?:步|倍|年|个|条|招|天|分钟|小时|万|亿)")

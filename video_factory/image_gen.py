@@ -36,6 +36,10 @@ ARK_IMAGE_MODEL_ENV = "ARK_IMAGE_MODEL"
 ARK_IMAGE_DEFAULT_MODEL = "doubao-seedream-4-0-250828"
 ARK_IMAGES_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
 ARK_TIMEOUT_SECONDS = 120
+# 瞬时网络故障的重试预算（2026-07-21 实测 studio_0721_213852 拍 19 断连丢图后上调）。
+# 只对瞬时故障生效——HTTP 明确错误码（含内容安全拦截）不重试，重试也没意义。
+ARK_MAX_ATTEMPTS = 3
+ARK_RETRY_BACKOFF_SECONDS = 0.5
 
 # 图片库根：与视频素材库并列（素材库/图片/<类目>/），index.json 是唯一登记簿。
 LIBRARY_ROOT = Path("素材库") / "图片"
@@ -360,13 +364,18 @@ def generate_image(prompt: str, size: str = DEFAULT_SIZE) -> bytes:
         },
         method="POST",
     )
-    # 瞬时网络故障（下载图片半途断连 IncompleteRead、超时、连接重置）重试一次再放弃。
+    # 瞬时网络故障（下载图片半途断连 IncompleteRead、超时、连接重置）重试后再放弃。
     # 2026-07-15 真实事故：1.48MB 响应体读到 2/3 断连，IncompleteRead 不在原 except 网里，
     # 裸异常击穿 batch 的"单拍失败跳过"（只接 RuntimeError），整单 385s 白跑。
     # 注意重试=重新生成（断连时服务端可能已计费），一张 ¥0.2 的代价远小于整单报废。
+    # 2026-07-21 实测 studio_0721_213852：拍 19 撞上 "Remote end closed connection"，
+    # 原本只重试 1 次就放弃 → 该拍无图、成片少一个画面。改 3 次并加退避：
+    # 瞬时抖动往往几百毫秒就恢复，立刻重试反而容易撞在同一个坏连接上。
     body = None
     last_error: Exception | None = None
-    for _attempt in range(2):
+    for attempt in range(ARK_MAX_ATTEMPTS):
+        if attempt:
+            time.sleep(ARK_RETRY_BACKOFF_SECONDS * attempt)   # 0.5s、1.0s 线性退避
         try:
             with urlopen(request, timeout=ARK_TIMEOUT_SECONDS) as response:
                 body = json.loads(response.read().decode("utf-8"))
@@ -384,7 +393,9 @@ def generate_image(prompt: str, size: str = DEFAULT_SIZE) -> bytes:
             # 含 IncompleteRead(HTTPException)、超时/连接重置(OSError 族)——瞬时故障，重试。
             last_error = exc
     if body is None:
-        raise ImageGenError(f"方舟生图网络失败（已重试 1 次）：{last_error}") from last_error
+        raise ImageGenError(
+            f"方舟生图网络失败（已重试 {ARK_MAX_ATTEMPTS - 1} 次）：{last_error}"
+        ) from last_error
 
     data = body.get("data") or []
     if not data or not isinstance(data[0], dict):

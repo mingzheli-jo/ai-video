@@ -103,9 +103,10 @@ export const RemotionRoot: React.FC = () => {
         id="QuoteCard"
         component={QuoteCard}
         // 契约：durationInFrames 是渲染帧数上限（CLI --frames 不能越过它）。
-        // 必须 ≥ Python 侧最大可能时长（QUOTE_DURATION 4.5s×30=135），留余量取 150。
-        // 2026-07-16 事故：4.5s 金句卡在旧上限 84 帧下渲染直接失败。
-        durationInFrames={150}
+        // 真实上限不是 QUOTE_DURATION——那是表达式里的**下限**。实际时长是
+        // min(max(span+1.2, QUOTE_DURATION), TYPEWRITER_MAX_DURATION+1.5) = 最大 6.0s
+        // ×30 = 180 帧（2026-07-21 实测 studio_0721_213852 出现 5.60s/168 帧被钳制）。
+        durationInFrames={180}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}
@@ -228,7 +229,9 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="HighlightSweep"
         component={HighlightSweep}
-        durationInFrames={60}
+        // 实际时长 min(max(span+0.4, HIGHLIGHT_SWEEP_DURATION), 3.2) = 最大 3.2s×30
+        // = 96 帧（2026-07-21 实测 studio_0721_213852 两条 3.20s 被钳制到 60）。
+        durationInFrames={96}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}
@@ -242,8 +245,9 @@ export const RemotionRoot: React.FC = () => {
       <Composition
         id="TypewriterQuote"
         component={TypewriterQuote}
-        // 同 QuoteCard 的契约注释：上限必须 ≥ TYPEWRITER_MAX_DURATION 4.5s×30=135。
-        durationInFrames={150}
+        // 与 QuoteCard 由**同一个表达式**派生时长（effects.py 同一处 duration 变量
+        // 按正则决定出 typewriter_quote 还是 quote_card），上限必须一致取 180。
+        durationInFrames={180}
         fps={FPS}
         width={WIDTH}
         height={HEIGHT}
