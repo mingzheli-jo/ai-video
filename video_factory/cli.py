@@ -3,8 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .pipeline import (
-    TTSConfig,
+from .legacy_v1 import (
     VideoConfig,
     VideoPlan,
     build_portugal_dr_congo_prediction_plan,
@@ -12,6 +11,7 @@ from .pipeline import (
     render_video,
     write_artifacts,
 )
+from .pipeline import TTSConfig
 
 EDGE_TTS_DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DOUBAO_TTS_DEFAULT_VOICE = "zh_male_liufei_uranus_bigtts"

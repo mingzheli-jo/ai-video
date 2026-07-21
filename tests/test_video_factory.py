@@ -7,9 +7,9 @@ import pytest
 from video_factory import (
     TTSConfig,
     TTSProviderError,
+)
+from video_factory.legacy_v1 import (
     VideoConfig,
-    build_doubao_speech_payload,
-    build_openai_speech_payload,
     build_ffmpeg_command,
     build_tone_track,
     build_video_plan,
@@ -17,6 +17,10 @@ from video_factory import (
     synthesize_voiceover,
     wrap_video_text,
     write_artifacts,
+)
+from video_factory.pipeline import (
+    build_doubao_speech_payload,
+    build_openai_speech_payload,
 )
 from video_factory.cli import build_tts_config, parse_args
 
@@ -53,7 +57,7 @@ def test_default_creator_monetization_plan_matches_requested_contract():
 
 
 def test_portugal_dr_congo_plan_matches_long_form_contract():
-    from video_factory import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
 
     plan = build_portugal_dr_congo_prediction_plan()
 
@@ -81,7 +85,7 @@ def test_portugal_dr_congo_plan_matches_long_form_contract():
 
 
 def test_portugal_dr_congo_plan_has_long_form_narration_density():
-    from video_factory import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
 
     plan = build_portugal_dr_congo_prediction_plan()
     total_narration_chars = sum(len(segment.narration) for segment in plan.segments)
@@ -123,7 +127,7 @@ def test_write_artifacts_creates_script_storyboard_prompts_and_srt(tmp_path):
 
 
 def test_portugal_dr_congo_artifacts_include_bilingual_subtitles_and_sources(tmp_path):
-    from video_factory import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
 
     plan = build_portugal_dr_congo_prediction_plan()
     artifact_paths = write_artifacts(plan, tmp_path)
@@ -150,7 +154,7 @@ def test_portugal_dr_congo_artifacts_include_bilingual_subtitles_and_sources(tmp
 
 
 def test_portugal_visual_asset_manifest_records_safe_sources():
-    from video_factory.pipeline import load_visual_asset_manifest
+    from video_factory.legacy_v1 import load_visual_asset_manifest
 
     manifest = load_visual_asset_manifest(
         Path("video_factory/assets/portugal_dr_congo/asset_manifest.json")
@@ -175,8 +179,8 @@ def test_portugal_visual_asset_manifest_records_safe_sources():
 
 
 def test_portugal_visual_asset_manifest_schedules_only_real_video_footage():
-    from video_factory import build_portugal_dr_congo_prediction_plan
-    from video_factory.pipeline import load_visual_asset_manifest
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import load_visual_asset_manifest
 
     plan = build_portugal_dr_congo_prediction_plan()
     manifest = load_visual_asset_manifest(
@@ -248,8 +252,8 @@ def test_build_tone_track_creates_audible_fallback_audio(tmp_path):
 
 def test_premium_studio_frame_renderer_creates_horizontal_dark_tech_frame(tmp_path):
     from PIL import Image
-    from video_factory import build_portugal_dr_congo_prediction_plan
-    from video_factory.pipeline import _render_frames
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import _render_frames
 
     plan = build_portugal_dr_congo_prediction_plan()
     frames = _render_frames(plan, tmp_path, frames_per_segment=1)
@@ -263,8 +267,8 @@ def test_premium_studio_frame_renderer_creates_horizontal_dark_tech_frame(tmp_pa
 
 def test_premium_overlay_renderer_outputs_transparent_1080p_panel(tmp_path):
     from PIL import Image
-    from video_factory import build_portugal_dr_congo_prediction_plan
-    from video_factory.pipeline import _draw_premium_overlay_frame
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import _draw_premium_overlay_frame
 
     plan = build_portugal_dr_congo_prediction_plan()
     overlay = tmp_path / "overlay.png"
@@ -280,8 +284,8 @@ def test_premium_overlay_renderer_outputs_transparent_1080p_panel(tmp_path):
 
 def test_cinematic_broll_overlay_renderer_stays_lightweight(tmp_path):
     from PIL import Image
-    from video_factory import build_portugal_dr_congo_prediction_plan
-    from video_factory.pipeline import _draw_cinematic_broll_overlay_frame
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    from video_factory.legacy_v1 import _draw_cinematic_broll_overlay_frame
 
     plan = build_portugal_dr_congo_prediction_plan()
     overlay = tmp_path / "overlay.png"
@@ -299,7 +303,7 @@ def test_cinematic_broll_overlay_renderer_stays_lightweight(tmp_path):
 
 
 def test_build_segment_video_command_uses_video_background(tmp_path):
-    from video_factory.pipeline import build_segment_video_command
+    from video_factory.legacy_v1 import build_segment_video_command
 
     command = build_segment_video_command(
         background_path=tmp_path / "broll.mp4",
@@ -319,7 +323,7 @@ def test_build_segment_video_command_uses_video_background(tmp_path):
 
 
 def test_build_segment_video_command_uses_image_background(tmp_path):
-    from video_factory.pipeline import build_segment_video_command
+    from video_factory.legacy_v1 import build_segment_video_command
 
     command = build_segment_video_command(
         background_path=tmp_path / "keyframe.png",
@@ -339,7 +343,7 @@ def test_build_segment_video_command_uses_image_background(tmp_path):
 
 
 def test_concat_segment_videos_pads_short_audio_to_target_duration(tmp_path, monkeypatch):
-    from video_factory import pipeline
+    from video_factory import legacy_v1
 
     segment = tmp_path / "segment.mp4"
     audio = tmp_path / "voiceover.wav"
@@ -352,9 +356,9 @@ def test_concat_segment_videos_pads_short_audio_to_target_duration(tmp_path, mon
         captured["command"] = command
         captured["check"] = check
 
-    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(legacy_v1.subprocess, "run", fake_run)
 
-    pipeline._concat_segment_videos_with_audio([segment], audio, output, duration=340)
+    legacy_v1._concat_segment_videos_with_audio([segment], audio, output, duration=340)
 
     assert captured["check"] is True
     assert "-shortest" not in captured["command"]
@@ -371,7 +375,7 @@ def test_wrap_video_text_keeps_trailing_punctuation_with_previous_line():
 
 
 def test_premium_title_wrap_keeps_dr_congo_together():
-    from video_factory.pipeline import _wrap_premium_title_text
+    from video_factory.legacy_v1 import _wrap_premium_title_text
 
     lines = _wrap_premium_title_text("AI预测\n葡萄牙 2:1 DR Congo", 13)
 
@@ -379,7 +383,7 @@ def test_premium_title_wrap_keeps_dr_congo_together():
 
 
 def test_pixel_width_wrap_keeps_mixed_subtitle_inside_box():
-    from video_factory.pipeline import _font, _wrap_text_to_pixel_width
+    from video_factory.legacy_v1 import _font, _wrap_text_to_pixel_width
 
     font = _font(36, bold=True)
     text = "这场葡萄牙对刚果民主共和国，表面看是强弱局，但我的AI Skill给出的结论不是大胜，而是葡萄牙二比一小胜。"
@@ -886,8 +890,9 @@ def test_edge_tts_provider_invokes_edge_tts_and_converts_to_wav(tmp_path, monkey
 
 
 def test_render_video_with_premium_plan_wires_horizontal_export(tmp_path, monkeypatch):
-    from video_factory import TTSResult, build_portugal_dr_congo_prediction_plan
-    import video_factory.pipeline as pipeline
+    from video_factory import TTSResult
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    import video_factory.legacy_v1 as legacy_v1
 
     plan = build_portugal_dr_congo_prediction_plan()
     commands = []
@@ -917,9 +922,9 @@ def test_render_video_with_premium_plan_wires_horizontal_export(tmp_path, monkey
         output = Path(command[-1])
         output.write_bytes(b"fake-video")
 
-    monkeypatch.setattr(pipeline, "_render_frames", fake_render_frames)
-    monkeypatch.setattr(pipeline, "synthesize_voiceover", fake_synthesize_voiceover)
-    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
+    monkeypatch.setattr(legacy_v1, "_render_frames", fake_render_frames)
+    monkeypatch.setattr(legacy_v1, "synthesize_voiceover", fake_synthesize_voiceover)
+    monkeypatch.setattr(legacy_v1.subprocess, "run", fake_run)
 
     result = render_video(plan, tmp_path, TTSConfig(provider="edge", voice="zh-CN-YunxiNeural"), release=True)
 
@@ -935,8 +940,9 @@ def test_render_video_with_premium_plan_wires_horizontal_export(tmp_path, monkey
 
 
 def test_render_video_with_visual_asset_manifest_uses_segment_export(tmp_path, monkeypatch):
-    from video_factory import TTSConfig, TTSResult, build_portugal_dr_congo_prediction_plan
-    import video_factory.pipeline as pipeline
+    from video_factory import TTSConfig, TTSResult
+    from video_factory.legacy_v1 import build_portugal_dr_congo_prediction_plan
+    import video_factory.legacy_v1 as legacy_v1
 
     plan = build_portugal_dr_congo_prediction_plan()
     manifest = tmp_path / "manifest.json"
@@ -969,20 +975,20 @@ def test_render_video_with_visual_asset_manifest_uses_segment_export(tmp_path, m
         Path(voiceover_path).write_bytes(_make_test_wav_bytes(duration_seconds=340))
         return TTSResult(Path(voiceover_path), "edge", "test", "edge-tts", False, "test")
 
-    monkeypatch.setattr(pipeline, "synthesize_voiceover", fake_synthesize_voiceover)
+    monkeypatch.setattr(legacy_v1, "synthesize_voiceover", fake_synthesize_voiceover)
     monkeypatch.setattr(
-        pipeline,
+        legacy_v1,
         "_render_premium_asset_segments",
         lambda render_plan, out, data: [out / f"{i}.mp4" for i in range(6)],
     )
     monkeypatch.setattr(
-        pipeline,
+        legacy_v1,
         "_concat_segment_videos_with_audio",
         lambda segments, audio, output, duration: output.write_bytes(b"video"),
     )
-    monkeypatch.setattr(pipeline, "_extract_cover_frame", lambda source, dest: Path(dest).write_bytes(b"cover"))
+    monkeypatch.setattr(legacy_v1, "_extract_cover_frame", lambda source, dest: Path(dest).write_bytes(b"cover"))
 
-    result = pipeline.render_video(
+    result = legacy_v1.render_video(
         plan,
         tmp_path / "out",
         TTSConfig(provider="edge"),
