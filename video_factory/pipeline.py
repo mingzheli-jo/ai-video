@@ -15,12 +15,47 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, replace
+from http.client import HTTPException
 from pathlib import Path
 from typing import Callable, Dict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+# TTS 网络重试预算（2026-07-21 实测 studio_0721_230653 上调）。配音失败是**致命**的
+# ——不像生图能单拍降级，配音一挂整个任务当场判死（那次 267s 白跑），值得多试几次。
+TTS_MAX_ATTEMPTS = 3
+TTS_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _urlopen_read_with_retry(request: Request, timeout: float, label: str) -> bytes:
+    """发请求并读完响应体，瞬时网络故障自动重试。
+
+    2026-07-21 实测：豆包 TTS 撞 RemoteDisconnected（"Remote end closed connection
+    without response"），而这里零重试、异常网也漏——RemoteDisconnected 是 OSError
+    子类，发生在 response.read() 阶段，URLError 兜不住，于是一路漏到 voice.py 的
+    通用 OSError 分支被判死。
+
+    异常网必须含 HTTPException/OSError：RemoteDisconnected 与 IncompleteRead 都在
+    读响应体时抛出（2026-07-15 生图 IncompleteRead 击穿整单是同款教训）。
+    HTTPError（明确状态码）不重试——鉴权/配额/参数问题重试无意义还多花钱。
+    """
+    last_error: Exception | None = None
+    for attempt in range(TTS_MAX_ATTEMPTS):
+        if attempt:
+            time.sleep(TTS_RETRY_BACKOFF_SECONDS * attempt)   # 0.5s、1.0s 线性退避
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except HTTPError as exc:
+            raise TTSProviderError(f"{label} HTTP error: {exc.code}") from exc
+        except (URLError, HTTPException, OSError) as exc:
+            last_error = exc
+    raise TTSProviderError(
+        f"{label} connection error（已重试 {TTS_MAX_ATTEMPTS - 1} 次）：{last_error}"
+    ) from last_error
 
 
 @dataclass(frozen=True)
@@ -244,13 +279,9 @@ def _synthesize_openai_voiceover(
         method="POST",
     )
 
-    try:
-        with urlopen(request, timeout=config.timeout_seconds) as response:
-            output.write_bytes(response.read())
-    except HTTPError as exc:
-        raise TTSProviderError(f"OpenAI TTS HTTP error: {exc.code}") from exc
-    except URLError as exc:
-        raise TTSProviderError(f"OpenAI TTS connection error: {exc.reason}") from exc
+    output.write_bytes(
+        _urlopen_read_with_retry(request, config.timeout_seconds, "OpenAI TTS")
+    )
 
     if _probe_duration_seconds(output) <= 1:
         if config.allow_fallback:
@@ -313,13 +344,9 @@ def _doubao_v1_fetch_audio(narration: str, config: TTSConfig, appid: str, token:
         },
         method="POST",
     )
+    raw_body = _urlopen_read_with_retry(request, config.timeout_seconds, "Doubao TTS")
     try:
-        with urlopen(request, timeout=config.timeout_seconds) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise TTSProviderError(f"Doubao TTS HTTP error: {exc.code}") from exc
-    except URLError as exc:
-        raise TTSProviderError(f"Doubao TTS connection error: {exc.reason}") from exc
+        body = json.loads(raw_body.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise TTSProviderError("Doubao TTS returned a non-JSON response.") from exc
 
@@ -348,13 +375,9 @@ def _doubao_v3_fetch_audio(narration: str, config: TTSConfig, api_key: str) -> b
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=config.timeout_seconds) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        raise TTSProviderError(f"Doubao TTS(v3) HTTP error: {exc.code}") from exc
-    except URLError as exc:
-        raise TTSProviderError(f"Doubao TTS(v3) connection error: {exc.reason}") from exc
+    raw = _urlopen_read_with_retry(
+        request, config.timeout_seconds, "Doubao TTS(v3)"
+    ).decode("utf-8", errors="replace")
 
     chunks: list[bytes] = []
     for line in raw.splitlines():

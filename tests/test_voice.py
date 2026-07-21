@@ -12,6 +12,8 @@ voice.py 把 assemble 的「配音获取 + 主时间轴」整段前移为独立�
 import json
 from pathlib import Path
 
+import pytest
+
 from video_factory import voice
 from video_factory.pipeline import TTSProviderError
 from video_factory.voice import main
@@ -207,3 +209,120 @@ def test_voice_no_source_skips_gracefully(tmp_path, monkeypatch):
     code = main(["--rewrite", str(rewrite_path), "--duration", "90", "--output", str(out)])
     assert code == 0
     assert produce_called["n"] == 0  # 无音轨 → 不产时间轴
+
+
+# ---------- TTS 瞬时网络故障重试（2026-07-21 实测 studio_0721_230653） ----------
+
+def test_tts_retries_remote_disconnected_and_succeeds(monkeypatch, tmp_path):
+    """复现实测故障：豆包 TTS 撞 RemoteDisconnected，重试后成功、任务不该死。
+
+    RemoteDisconnected 是 OSError 子类且在 response.read() 阶段抛出，旧代码的
+    HTTPError/URLError 网兜不住，一路漏到 voice.py 的通用 OSError 分支被判死，
+    整单 267s 白跑。
+    """
+    from http.client import RemoteDisconnected
+
+    from video_factory import pipeline
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None)
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b"AUDIOBYTES"
+
+    def flaky(request, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RemoteDisconnected("Remote end closed connection without response")
+        return _Resp()
+
+    monkeypatch.setattr(pipeline, "urlopen", flaky)
+
+    data = pipeline._urlopen_read_with_retry(
+        pipeline.Request("https://x", data=b"{}"), 30.0, "Doubao TTS"
+    )
+    assert data == b"AUDIOBYTES"
+    assert len(calls) == 3, "应重试到第 3 次"
+
+
+def test_tts_gives_up_after_max_attempts_with_clear_error(monkeypatch):
+    """重试耗尽后抛 TTSProviderError（而非裸 OSError），错误文案带真实原因。"""
+    from http.client import RemoteDisconnected
+
+    from video_factory import pipeline
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None)
+    calls = []
+
+    def always_fail(request, timeout=None):
+        calls.append(1)
+        raise RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(pipeline, "urlopen", always_fail)
+
+    with pytest.raises(pipeline.TTSProviderError) as exc_info:
+        pipeline._urlopen_read_with_retry(
+            pipeline.Request("https://x", data=b"{}"), 30.0, "Doubao TTS"
+        )
+    assert len(calls) == pipeline.TTS_MAX_ATTEMPTS
+    message = str(exc_info.value)
+    assert "已重试" in message
+    assert "Remote end closed connection" in message   # 真实原因不被吞掉
+
+
+def test_tts_does_not_retry_http_errors(monkeypatch):
+    """明确 HTTP 状态码（鉴权/配额）不重试——重试无意义还多花钱。"""
+    import io
+    from urllib.error import HTTPError
+
+    from video_factory import pipeline
+
+    calls = []
+
+    def unauthorized(request, timeout=None):
+        calls.append(1)
+        raise HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(pipeline, "urlopen", unauthorized)
+
+    with pytest.raises(pipeline.TTSProviderError, match="HTTP error: 401"):
+        pipeline._urlopen_read_with_retry(
+            pipeline.Request("https://x", data=b"{}"), 30.0, "Doubao TTS"
+        )
+    assert len(calls) == 1, "HTTP 错误码不该重试"
+
+
+def test_incomplete_read_is_also_retried(monkeypatch):
+    """IncompleteRead（HTTPException 族）同样属于瞬时故障——2026-07-15 生图同款教训。"""
+    from http.client import IncompleteRead
+
+    from video_factory import pipeline
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _s: None)
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return b"OK"
+
+    def flaky(request, timeout=None):
+        calls.append(1)
+        if len(calls) < 2:
+            raise IncompleteRead(b"partial", 100)
+        return _Resp()
+
+    monkeypatch.setattr(pipeline, "urlopen", flaky)
+
+    assert pipeline._urlopen_read_with_retry(
+        pipeline.Request("https://x", data=b"{}"), 30.0, "OpenAI TTS"
+    ) == b"OK"
+    assert len(calls) == 2
