@@ -825,24 +825,44 @@ class JobReport:
         return payload
 
 
+# 各阶段非致命降级告警的来源文件（相对 job 目录）→ 中文标签。
+# 2026-07-21 审查实锤：此前只聚合生图一路，assemble/effects/subtitles/publish 的
+# 降级（特效渲染失败、估算字幕轴、模板简介兜底……）全写在各自文件里但不进
+# batch_report——报告显示 ok + 零告警，成片却已静默降级。这里把管道接通：
+# 各阶段只要把 warnings 列表写进自己的 JSON，就自动进报告和任务卡黄条。
+_WARNING_SOURCES = (
+    (IMAGE_GEN_WARNINGS_FILENAME, "生图"),
+    ("effects_warnings.json", "特效"),
+    ("effects_skipped.json", "特效"),
+    ("subtitles_report.json", "字幕"),
+    ("publish/publish_kit.json", "发布"),
+)
+
+
 def _collect_job_warnings(job_dir: Path) -> list[str]:
-    """汇总本 job 的非致命告警（根目录 + 双画幅子目录的 image_gen_warnings.json）。"""
+    """汇总本 job 的非致命告警（根目录 + 双画幅子目录的全部阶段告警文件）。"""
     collected: list[str] = []
     dirs = [job_dir] + [job_dir / d for d in _ASPECT_DIRNAMES.values()]
     for base in dirs:
-        path = base / IMAGE_GEN_WARNINGS_FILENAME
-        if not path.exists():
-            continue
-        try:
-            body = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
         prefix = f"[{base.name}] " if base != job_dir else ""
-        beats, copied_n = body.get("beats"), body.get("copied")
-        if isinstance(beats, int) and isinstance(copied_n, int) and beats > 0:
-            collected.append(f"{prefix}生图 {beats} 拍成 {copied_n} 张")
-        for w in body.get("warnings") or []:
-            collected.append(f"{prefix}{w}")
+        for rel, label in _WARNING_SOURCES:
+            path = base / rel
+            if not path.exists():
+                continue
+            try:
+                body = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            # 生图带 beats/copied 汇总行（沿用 2026-07-17 任务卡黄条口径）。
+            if rel == IMAGE_GEN_WARNINGS_FILENAME:
+                beats, copied_n = body.get("beats"), body.get("copied")
+                if isinstance(beats, int) and isinstance(copied_n, int) and beats > 0:
+                    collected.append(f"{prefix}生图 {beats} 拍成 {copied_n} 张")
+            # effects_skipped.json 是 {"skipped": true, "reason": ...} 形态。
+            if body.get("skipped") and body.get("reason"):
+                collected.append(f"{prefix}{label}：{body['reason']}")
+            for w in body.get("warnings") or []:
+                collected.append(f"{prefix}{label}：{w}")
     return collected
 
 
@@ -860,6 +880,12 @@ _OUTPUT_ARTIFACTS = (
     "release_subtitled.mp4",
     # 上一轮的生图告警不清会串进本轮任务卡黄条（2026-07-17）。
     "image_gen_warnings.json",
+    # 2026-07-21 起其余阶段告警也进 batch_report（_WARNING_SOURCES），同理必须清：
+    # 本轮早期阶段就失败时，别让上一轮的降级告警冒充本轮的。
+    "effects_warnings.json",
+    "effects_skipped.json",
+    "subtitles_report.json",
+    "publish/publish_kit.json",
 )
 
 

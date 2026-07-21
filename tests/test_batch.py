@@ -1408,3 +1408,86 @@ def test_run_image_gen_passes_style_key_to_library_match(tmp_path, monkeypatch):
     assert batch._run_image_gen(job, job_dir) == 0
     assert captured["style_key"] == image_gen.style_key_for("古风淡彩测试风")
     assert ingested.get("style") == "古风淡彩测试风"  # 新图按本任务风格入库
+
+
+# --- 全阶段告警聚合（2026-07-21 审查实锤：此前只聚合生图一路） -----------------------
+
+
+def _stage_runners_writing(files: dict):
+    """构造 STAGE_RUNNERS：按 {stage: {相对路径: json体}} 在对应阶段落文件。"""
+    def make_runner(stage):
+        def runner(job, job_dir):
+            from pathlib import Path
+
+            for rel, body in (files.get(stage) or {}).items():
+                target = Path(job_dir) / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    json.dumps(body, ensure_ascii=False), encoding="utf-8"
+                )
+            return 0
+        return runner
+    return {
+        s: make_runner(s)
+        for s in ("rewrite", "voice", "image_gen", "assemble",
+                  "effects", "subtitles", "publish")
+    }
+
+
+def test_run_job_surfaces_effects_subtitles_publish_warnings(tmp_path, monkeypatch):
+    # 特效/字幕/发布的降级告警必须进 batch_report（此前静默蒸发，报告 ok+零告警）。
+    source, assets = _make_valid_paths(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(batch, "STAGE_RUNNERS", _stage_runners_writing({
+        "effects": {"effects_warnings.json": {
+            "warnings": ["第 3 条特效渲染失败（退出码 1）：boom"],
+        }},
+        "subtitles": {"subtitles_report.json": {
+            "mode": "ratio", "warnings": ["whisper 对齐失败，回落比例估算时间轴"],
+        }},
+        "publish": {"publish/publish_kit.json": {
+            "warnings": ["LLM 简介生成失败，已用模板兜底"],
+        }},
+    }))
+    job = resolve_job({"name": "w2", "source": source, "assets": assets,
+                       "output": str(out)}, 0)
+    report = run_job(job)
+
+    assert report.status == "ok"
+    warnings = report.to_dict()["warnings"]
+    assert any("特效：" in w and "退出码 1" in w for w in warnings)
+    assert any("字幕：" in w and "比例估算" in w for w in warnings)
+    assert any("发布：" in w and "模板兜底" in w for w in warnings)
+
+
+def test_run_job_surfaces_effects_skipped_reason(tmp_path, monkeypatch):
+    # effects_skipped.json 的 {skipped, reason} 形态也要现形（npx 缺失≠用户没开特效）。
+    source, assets = _make_valid_paths(tmp_path)
+    out = tmp_path / "out"
+    monkeypatch.setattr(batch, "STAGE_RUNNERS", _stage_runners_writing({
+        "effects": {"effects_skipped.json": {
+            "skipped": True, "reason": "未找到 npx，跳过 Remotion 特效渲染（特效层可选）。",
+        }},
+    }))
+    job = resolve_job({"name": "w3", "source": source, "assets": assets,
+                       "output": str(out)}, 0)
+    report = run_job(job)
+
+    warnings = report.to_dict()["warnings"]
+    assert any("特效：" in w and "npx" in w for w in warnings)
+
+
+def test_clear_stale_outputs_removes_stage_warning_files(tmp_path):
+    # 上一轮的降级告警不清，会在本轮早期失败时冒充本轮告警（与 2026-07-17 生图同病）。
+    job_dir = tmp_path / "job"
+    for rel in ("effects_warnings.json", "effects_skipped.json",
+                "subtitles_report.json", "publish/publish_kit.json"):
+        target = job_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}", encoding="utf-8")
+
+    batch._clear_stale_outputs(job_dir)
+
+    for rel in ("effects_warnings.json", "effects_skipped.json",
+                "subtitles_report.json", "publish/publish_kit.json"):
+        assert not (job_dir / rel).exists(), f"{rel} 未被清理"
