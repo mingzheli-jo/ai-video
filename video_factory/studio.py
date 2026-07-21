@@ -458,6 +458,8 @@ def make_handler(store: TaskStore):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
+            if self._reject_foreign_host():
+                return
             try:
                 if path == "/":
                     self._send_html(studio_ui.render_page())
@@ -482,6 +484,10 @@ def make_handler(store: TaskStore):
             # 部分播放器在带 Range 的 GET 前先用 HEAD 探测；缺省会 501，这里给
             # 首页与 /media 一个只发头不发体的实现（守卫与 GET 完全一致）。
             parsed = urlparse(self.path)
+            if not self._host_allowed():
+                self.send_response(HTTPStatus.FORBIDDEN)
+                self.end_headers()
+                return
             if parsed.path == "/":
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -593,6 +599,36 @@ def make_handler(store: TaskStore):
 
         # ----- POST -----
 
+        def _host_allowed(self) -> bool:
+            """DNS rebinding 防护（2026-07-21 审查实锤）：Host 头必须指向本机。
+
+            服务只绑 127.0.0.1，但\"只绑本机\"挡不住 DNS 重绑：攻击者把自己域名的
+            DNS 记录在页面加载后重指到 127.0.0.1，用户浏览器里已打开的恶意页面
+            就能对本服务发\"同源\"请求并读走响应体——/api/jobs（含本机绝对路径）、
+            /media（output/ 下全部文稿、rewrite.json、成片）都在 GET 面上。
+            Origin 校验挡不住这条路：GET 通常不带 Origin，且重绑后浏览器认定同源。
+            唯一可靠判据是 Host 头——重绑攻击必然带攻击者域名，本机访问必然是
+            127.0.0.1/localhost。
+            """
+            host = self.headers.get("Host")
+            if not host:
+                return True   # 无 Host（HTTP/1.0、curl）不是浏览器攻击面
+            try:
+                hostname = urlparse(f"//{host}").hostname
+            except ValueError:
+                return False
+            return hostname in _ALLOWED_ORIGIN_HOSTS
+
+        def _reject_foreign_host(self) -> bool:
+            """Host 非本机则回 403 并返回 True（调用方据此提前 return）。"""
+            if self._host_allowed():
+                return False
+            self._send_json(
+                {"error": "请求被拒绝（Host 校验未通过，本服务仅供本机访问）。"},
+                HTTPStatus.FORBIDDEN,
+            )
+            return True
+
         def _origin_allowed(self) -> bool:
             """CSRF 防护：状态变更(POST)只接受来自本工作台自身的请求。
 
@@ -612,6 +648,8 @@ def make_handler(store: TaskStore):
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
+            if self._reject_foreign_host():
+                return
             if not self._origin_allowed():
                 self._send_json(
                     {"error": "跨站请求被拒绝（Origin 校验未通过）。"}, HTTPStatus.FORBIDDEN

@@ -691,3 +691,51 @@ def test_settings_ark_image_model_roundtrip_and_meta(server):
     status, data = _json(port, "POST", "/api/settings", {"name": "ARK_IMAGE_MODEL", "value": ""})
     assert status == 200
     assert data["value"] == meta["image_model_default"]
+
+
+# ---------- DNS rebinding 防护：Host 校验（2026-07-21 审查实锤） ----------
+
+def test_get_rejects_foreign_host(server):
+    """安全回归：Host 头非本机的 GET 被 403 拒。
+
+    只绑 127.0.0.1 挡不住 DNS 重绑——攻击者域名重指本机后，用户浏览器里已打开
+    的恶意页面能对本服务发「同源」请求，读走 /api/jobs（含本机绝对路径）与
+    /media（output/ 下全部文稿与成片）。Origin 校验挡不住（GET 常不带 Origin）。
+    """
+    for path in ("/", "/api/meta", "/api/jobs"):
+        status, _, _ = _request(
+            server["port"], "GET", path, headers={"Host": "evil.example"},
+        )
+        assert status == 403, f"{path} 未拦截外来 Host"
+
+
+def test_get_allows_localhost_hosts(server):
+    """本机 Host（含带端口、localhost 别名）正常放行。"""
+    port = server["port"]
+    for host in (f"127.0.0.1:{port}", f"localhost:{port}", "127.0.0.1"):
+        status, _, _ = _request(port, "GET", "/api/meta", headers={"Host": host})
+        assert status == 200, f"Host={host} 被误拦"
+
+
+def test_post_rejects_foreign_host(server):
+    """状态变更接口同样受 Host 闸保护（先于 Origin 校验生效）。"""
+    status, _, _ = _request(
+        server["port"], "POST", "/api/credentials",
+        {"name": "OPENAI_API_KEY", "value": "x"},
+        headers={"Host": "evil.example", "Origin": "http://evil.example"},
+    )
+    assert status == 403
+
+
+def test_head_rejects_foreign_host(server):
+    """HEAD 守卫与 GET 一致（播放器探测走 HEAD，不能留后门）。"""
+    status, _, _ = _request(server["port"], "HEAD", "/", headers={"Host": "evil.example"})
+    assert status == 403
+
+
+def test_media_get_rejects_foreign_host(server):
+    """/media 是数据泄漏面的大头，单独回归一次。"""
+    status, _, _ = _request(
+        server["port"], "GET", "/media?path=x", headers={"Host": "evil.example"},
+    )
+    assert status == 403
