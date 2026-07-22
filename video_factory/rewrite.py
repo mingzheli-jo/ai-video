@@ -161,16 +161,19 @@ def build_rewrite_prompts(
         "6. 只输出一个 JSON 对象，不要输出任何其他文字或代码块标记。字段：\n"
         '{"hook": "前3秒钩子口播", '
         '"sections": [{"title": "小节标题", "narration": "该小节口播文案", "visual_hint": "画面/素材建议", '
-        '"emphasis": [{"text": "弹出词/短句≤10字", "kind": "keyword|number|golden"}]}], '
+        '"emphasis": [{"text": "keyword/number≤10字；golden=narration里照抄的完整金句8~24字", "kind": "keyword|number|golden"}]}], '
         '"publish_titles": ["发布标题候选1", "候选2", "候选3"], '
         '"notes": "改写思路与合规提醒"}\n'
         f"7. sections 至少 {MIN_SECTIONS} 个，按叙事顺序排列。\n"
         "8. 每个 section 用 emphasis 数组标注本节最值得屏幕弹字的内容："
         "keyword=动作/概念关键词（≤8字）、number=关键数字（带单位，如'3倍''5步'）、"
-        "golden=金句精华（≤10字）。\n"
-        "   每节应标注 1~2 条最有分量的强调（除非该节确实平淡可留空）；"
-        "全片至少要有 1 条 kind=golden 的金句作为视频的记忆点；"
-        "keyword/number 用于关键概念与数字。每节最多 3 条。\n"
+        "golden=本节最值得单独成卡的一句金句（会做成居中金句卡）。\n"
+        "   【golden 硬性要求】text 必须从该节 narration 里**原样照抄**一个完整短句"
+        "（约 8~24 字、能独立成句的观点或金句），逐字一致、含标点也照抄，"
+        "**禁止压缩或转述**——否则金句卡在口播里定位不到、无法上屏。\n"
+        "   金句要多、要散：全片标 5~8 条 kind=golden，尽量每节 1 条、均匀散布"
+        "从头到尾，让居中金句卡贯穿全片而不是只在中段出现一张；"
+        "keyword/number 用于关键概念与数字。每节 emphasis 最多 3 条（golden 计入）。\n"
         "9. hook 是全片的生死线：必须有强钩子（悬念/反问/冲突/反常识/数字冲击任选其一），"
         "让人不敢划走。hook 会按子句拆成开屏大字逐条弹出（所见即所听）。"
         "【硬性要求】hook 必须恰好由 2~3 个子句构成、以逗号/问号/叹号分隔，"
@@ -234,12 +237,16 @@ def _parse_emphasis_items(raw) -> tuple[dict, ...]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text") or "").strip()[:10]  # 截断到 10 字
         kind = str(item.get("kind") or "keyword").strip()
-        if not text:
-            continue
         if kind not in _EMPHASIS_ALLOWED_KINDS:
             kind = "keyword"
+        # golden 要保留完整短句：它是照抄的口播原句、用来在时间轴上定位金句卡
+        # （2026-07-22：截到 10 字会把原句砍断，定位不准/金句卡凑不齐）。
+        # keyword/number 是屏幕弹字短词，10 字足够。
+        cap = 24 if kind == "golden" else 10
+        text = str(item.get("text") or "").strip()[:cap]
+        if not text:
+            continue
         result.append({"text": text, "kind": kind})
     return tuple(result[:3])  # 每节最多 3 条
 

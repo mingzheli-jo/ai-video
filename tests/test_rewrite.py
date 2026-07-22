@@ -487,12 +487,22 @@ def test_parse_emphasis_items_all_kinds():
     assert result[2] == {"text": "坚持就是胜利", "kind": "golden"}
 
 
-def test_parse_emphasis_items_truncates_text_to_10():
-    """text 超过 10 字时截断到 10 字（Remotion 弹字空间有限）。"""
+def test_parse_emphasis_items_truncates_keyword_to_10():
+    """keyword/number 超过 10 字截断到 10 字（Remotion 弹字空间有限）。"""
     raw = [{"text": "这是一段超长的强调文字超过十个字符", "kind": "keyword"}]
     result = _parse_emphasis_items(raw)
     assert len(result) == 1
     assert len(result[0]["text"]) <= 10
+
+
+def test_parse_emphasis_items_keeps_golden_up_to_24():
+    """golden 是照抄的口播原句、用于定位金句卡，保留到 24 字不截成 10（2026-07-22）。"""
+    raw = [{"text": "资源比努力更值钱，信息差比苦力更赚钱", "kind": "golden"}]  # 17 字
+    result = _parse_emphasis_items(raw)
+    assert result[0]["text"] == "资源比努力更值钱，信息差比苦力更赚钱"  # 完整保留
+    # 超 24 字仍截断（防异常超长）
+    long_golden = [{"text": "金" * 40, "kind": "golden"}]
+    assert len(_parse_emphasis_items(long_golden)[0]["text"]) == 24
 
 
 def test_parse_emphasis_items_caps_at_3():
@@ -590,15 +600,17 @@ def test_build_rewrite_prompts_includes_emphasis_guidance():
     assert "golden" in system_prompt
 
 
-def test_build_rewrite_prompts_emphasis_guidance_requires_atleast_golden():
-    """强化后的 emphasis 引导：含「至少」正向引导语 + 每节 1~2 条 + 至少一条 golden 金句。
+def test_build_rewrite_prompts_emphasis_guidance_requires_many_verbatim_golden():
+    """emphasis 引导（2026-07-22 强化）：全片 5~8 条 golden、照抄口播原句、禁止转述。
 
-    背景：旧「宁缺勿滥」把 DeepSeek 吓得干脆全不标，导致金句卡从未触发。
+    背景：金句卡改为沿片长铺多张（间隔≥35s），弹药来自 LLM 标的 golden；且 golden
+    须与口播逐字一致才能在时间轴上定位（旧版压缩转述导致 4 句金句 3 句定位失败）。
     """
     system_prompt, _ = build_rewrite_prompts("原始文案", target_duration_seconds=90)
-    assert "至少" in system_prompt          # 正向引导语（不再是宁缺勿滥）
-    assert "1~2 条" in system_prompt        # 每节应标注 1~2 条
-    assert "宁缺勿滥" not in system_prompt   # 旧的抑制性措辞已移除
+    assert "5~8 条" in system_prompt        # 全片标 5~8 条 golden（金句卡弹药要足）
+    assert "原样照抄" in system_prompt       # 照抄口播原句（可定位）
+    assert "禁止压缩或转述" in system_prompt  # 禁止转述（转述会定位失败）
+    assert "宁缺勿滥" not in system_prompt   # 旧的抑制性措辞仍不复现
 
 
 def test_build_rewrite_prompts_drops_opening_hooks_and_strengthens_hook():

@@ -101,8 +101,17 @@ def _clamped_frames(composition: str, duration: float, fps: int) -> tuple[int, s
 
 # 金句卡：放在约 55% 进度处；与章节卡时间窗撞车时顺延到该卡结束之后。
 # 时长 2.8→4.5（2026-07-16 用户反馈"金句停留时间太短"：一句 15+ 字的观点要读完）。
+# QUOTE_POSITION_RATIO 仅用于无 timeline 的旧链路（单张估算位金句卡）；有 timeline
+# 时改为在真金句处沿片长铺多张（2026-07-22 用户定案，见 _select_quote_cards）。
 QUOTE_POSITION_RATIO = 0.55
 QUOTE_DURATION = 4.5
+# 金句卡沿片长铺开（2026-07-22 用户定案："后续特效别只像开头三个，多来点居中金句卡"）。
+# 只在 LLM 标记的真金句处出，间隔铺开不扎堆、封顶张数；其余金句仍由 sync 层做成
+# 堆叠式（golden_lines）作节奏变化。过短/过长的口播句跳过（过长交给堆叠式多行呈现）。
+QUOTE_CARD_MIN_GAP_S = 35.0     # 相邻金句卡最小间隔（秒）
+QUOTE_CARD_MAX_COUNT = 5        # 全片金句卡张数上限
+QUOTE_CARD_MIN_CHARS = 8        # 口播原句最短字数（太短没有"金句"分量）
+QUOTE_CARD_MAX_CHARS = 44       # 口播原句最长字数（QuoteCard 两行放得下，再长留给堆叠式）
 # 数字强调：每节口播里第一个关键数字，节起点后 0.8s 弹出，全片最多 2 个。
 # NUMBER_POP_* 于 2026-07-21 用户定案随 number_pop 退役而删除。_NUMBER_RE 保留：
 # 现在的用途反了过来——不再用于**派生**数字特效，而是用于**排除**数字文本
@@ -373,13 +382,40 @@ def _find_timeline_sentence(timeline: list[dict] | None, text: str) -> dict | No
 _TOKEN_NUM_RE = re.compile(r"\d+(?:\.\d+)?%?")
 
 
+# 金句 emphasis 常是口播的**压缩转述**：字都在、顺序也对，但中间被抽词（"躺着收钱"
+# ← "躺着就能收钱"、"资源比努力值钱" ← "资源比努力更值钱"）。连续子串匹配整句失手，
+# 但按字符有序子序列 + 跨度足够紧凑仍能唯一锚定（2026-07-22 实测 studio_0722_095342：
+# 4 句金句 3 句因此被丢，全片金句卡凑不齐）。跨度比 = 命中区间长 / emphasis 字数，
+# 越接近 1 越像原句被小幅改写；放宽到 1.9 覆盖常见抽词，再松易误锚到散字长句。
+_GOLDEN_SUBSEQ_MAX_SPAN_RATIO = 1.9
+
+
+def _ordered_subseq_span(needle: str, hay: str) -> int | None:
+    """needle 的字符是否按序（可不连续）出现在 hay 中；是则返回命中区间长度，否则 None。"""
+    first = last = None
+    ni = 0
+    for hi, ch in enumerate(hay):
+        if ni < len(needle) and ch == needle[ni]:
+            if first is None:
+                first = hi
+            last = hi
+            ni += 1
+    if ni == len(needle) and first is not None:
+        return last - first + 1
+    return None
+
+
 def _find_timeline_sentence_fuzzy(timeline: list[dict] | None, text: str) -> dict | None:
-    """全文包含匹配失败时，用 text 里的强特征 token（数字/「」引号词）二次锚定。
+    """全文包含匹配失败时，依次用 (1) 数字/「」引号词二次锚定 (2) 有序子序列紧凑匹配。
 
     LLM 的 emphasis 常是口播的转述（"有句话说"vs"有句话讲"一字之差，2026-07-16
     实锤 studio_0716_113911 金句因此早了 5.7s）：全文匹配整句失手，但数字与引号词
-    几乎不会被转述改写、全片唯一性也高。仅当 token 恰好命中一个句子才认，
-    多个命中即放弃（宁缺勿滥）。
+    几乎不会被转述改写、全片唯一性也高。仅当 token 恰好命中一个句子才认。
+
+    token 也不中时，退到有序子序列匹配（2026-07-22）：emphasis 字按序出现在某句里、
+    且命中区间足够紧凑（跨度比 <= 1.9）即认。多句命中取最紧凑的一句——金句卡渲染
+    的是锚点处的**口播整句**（非 emphasis 文本），锚点即便略偏也仍与当下语音同步，
+    误锚顶多"金句卡落在不那么金的句子"，不会 desync，故可比 token 档略放宽。
     """
     sentence = _find_timeline_sentence(timeline, text)
     if sentence is not None or not timeline:
@@ -395,6 +431,20 @@ def _find_timeline_sentence_fuzzy(timeline: list[dict] | None, text: str) -> dic
         ]
         if len(hits) == 1:
             return hits[0]
+    # 有序子序列紧凑匹配：取跨度比最小（最像原句）的一句，需通过紧凑度闸。
+    norm_text = _normalize_for_match(text)
+    if len(norm_text) >= 3:  # 太短的 emphasis 子序列易误命中，跳过
+        best: dict | None = None
+        best_ratio = _GOLDEN_SUBSEQ_MAX_SPAN_RATIO
+        for s in timeline:
+            span = _ordered_subseq_span(norm_text, _normalize_for_match(s.get("text")))
+            if span is None:
+                continue
+            ratio = span / len(norm_text)
+            if ratio < best_ratio:
+                best, best_ratio = s, ratio
+        if best is not None:
+            return best
     return None
 
 
@@ -877,6 +927,67 @@ def _apply_golden_density_control(
     return kept
 
 
+def _quote_card_spec(spoken: str, start: float, span: float, accent: str) -> EffectSpec:
+    """把一句口播原句做成金句卡：「出处：正文」形态走打字机逐字，否则居中引号卡。
+
+    时长口径与原单张金句卡一致：min(max(句时长+1.2, 4.5), 6.0)。
+    """
+    duration = min(max(span + 1.2, QUOTE_DURATION), TYPEWRITER_MAX_DURATION + 1.5)
+    tw_match = _TYPEWRITER_QUOTE_RE.match(spoken)
+    if tw_match is not None:
+        return EffectSpec(
+            type="typewriter_quote",
+            start=start,
+            duration=duration,
+            props={"source": tw_match.group(1).strip(),
+                   "text": tw_match.group(2).strip(), "accent": accent},
+        )
+    return EffectSpec(
+        type="quote_card",
+        start=start,
+        duration=duration,
+        props={"text": spoken, "accent": accent},
+    )
+
+
+def _select_quote_cards(
+    golden_events: list[tuple[float, str]],
+    timeline: list[dict],
+    opener_end: float,
+    total_duration: float,
+    fps: int,
+    accent: str,
+) -> list[EffectSpec]:
+    """在真金句处沿片长铺金句卡（2026-07-22 用户定案：不再全片仅 1 张）。
+
+    仅取 LLM 标记的金句（golden_events），按时间贪心铺开：相邻间隔 >=
+    QUOTE_CARD_MIN_GAP_S、封顶 QUOTE_CARD_MAX_COUNT。避让开场 hook，太靠尾（卡放
+    不下）跳过；口播原句过短没分量、过长两行放不下也跳过（过长交给 sync 层堆叠式）。
+    未被选中的金句仍会进 sync 层做成 golden_lines，形成"居中金句卡 + 堆叠式"的节奏变化。
+    """
+    specs: list[EffectSpec] = []
+    last_start = float("-inf")
+    for gstart, _text in sorted(golden_events, key=lambda e: e[0]):
+        if len(specs) >= QUOTE_CARD_MAX_COUNT:
+            break
+        if gstart < opener_end:                       # 别压在开场 hook 上
+            continue
+        if gstart > total_duration - QUOTE_DURATION:  # 太靠尾，卡放不下
+            continue
+        if gstart - last_start < QUOTE_CARD_MIN_GAP_S:  # 间隔不足，跳过（贪心保先出）
+            continue
+        idx = _sentence_index_near(timeline, gstart)
+        if idx is None:
+            continue
+        spoken = str(timeline[idx].get("text") or "").strip()
+        if not (QUOTE_CARD_MIN_CHARS <= len(spoken) <= QUOTE_CARD_MAX_CHARS):
+            continue
+        span = max(0.0, float(timeline[idx].get("end") or 0.0) - gstart)
+        specs.append(_frame_aligned(_quote_card_spec(spoken, gstart, span, accent), fps))
+        last_start = gstart
+    return specs
+
+
 def _build_rich_effects(
     sections: list[dict],
     rewrite: dict | None,
@@ -886,12 +997,16 @@ def _build_rich_effects(
     accent: str,
     timeline: list[dict] | None = None,
 ) -> list[EffectSpec]:
-    """"丰富化"特效派生（默认全开）：金句卡（55% 进度、避开章节卡窗口）、
-    数字强调（每节首个关键数字，全片最多 2 个）、关键词弹出（emphasis 均匀分布优先；
-    无 emphasis 回落节内 40% 规则；密度控制+三色轮换）。
+    """"丰富化"特效派生（默认全开）：
+    - 居中金句卡：有 timeline 时在 LLM 标记的真金句处沿片长铺多张（间隔 >= 35s、
+      封顶 5 张，2026-07-22 用户定案；旧版仅取 55% 处 1 张）；无 timeline 时回落
+      发布标题 + 估算位单张。
+    - 关键词弹出：emphasis 均匀分布优先；无 emphasis 回落节内 40% 规则；密度控制+三色轮换。
+    - 中段堆叠式（golden_lines）：未成金句卡的金句 + 关键词时刻由 sync 层派生，
+      与居中金句卡交替形成节奏变化。
 
-    开屏要点卡已退役（2026-07-15 用户定案）：它与钩子序列/章节大字功能重叠、
-    内容重复（要点行=各节标题=章节卡文字），还在开屏后与首张章节卡同屏糊成一团。
+    已退役：开屏要点卡（2026-07-15）、数字强调 number_pop（2026-07-21，画面弹数字
+    与口播重复且观感生硬）。
     """
     rich: list[EffectSpec] = []
     quote_windows: list[tuple[float, float]] = []
@@ -906,39 +1021,14 @@ def _build_rich_effects(
     #   出卡瞬间说的就是卡上那句话；没有命中金句就不出卡（宁缺勿滥）。
     # - 无 timeline（旧链路）：维持发布标题 + 55% 估算位的原行为。
     if timeline:
-        card_pick: tuple[float, str, float] | None = None  # (真句起点, 口播原句, 句时长)
-        best_dist = float("inf")
-        for gstart, _gtext in golden_events:
-            dist = abs(gstart - total_duration * QUOTE_POSITION_RATIO)
-            if dist < best_dist:
-                idx = _sentence_index_near(timeline, gstart)
-                if idx is not None:
-                    spoken = str(timeline[idx].get("text") or "").strip()
-                    if spoken:
-                        span = max(0.0, float(timeline[idx].get("end") or 0.0) - gstart)
-                        card_pick, best_dist = (gstart, spoken, span), dist
-        if card_pick is not None:
-            start, spoken, span = card_pick
-            duration = min(max(span + 1.2, QUOTE_DURATION), TYPEWRITER_MAX_DURATION + 1.5)
-            tw_match = _TYPEWRITER_QUOTE_RE.match(spoken)
-            if tw_match is not None:
-                spec = EffectSpec(
-                    type="typewriter_quote",
-                    start=start,
-                    duration=duration,
-                    props={"source": tw_match.group(1).strip(),
-                           "text": tw_match.group(2).strip(), "accent": accent},
-                )
-            else:
-                spec = EffectSpec(
-                    type="quote_card",
-                    start=start,
-                    duration=duration,
-                    props={"text": spoken, "accent": accent},
-                )
-            rich.append(_frame_aligned(spec, fps))
-            # 金句卡时间窗：中段时刻避让 + 防同句在 sync 层重复出场。
-            quote_windows.append((rich[-1].start, rich[-1].start + rich[-1].duration))
+        # 在真金句处沿片长铺多张居中金句卡（2026-07-22 用户定案，替代原"全片仅取
+        # 离中点最近的 1 张"）。每张的时间窗登记进 quote_windows：sync 层据此避让，
+        # 同一金句不会又在堆叠层重复出场。
+        for spec in _select_quote_cards(
+            golden_events, timeline, opener_end, total_duration, fps, accent
+        ):
+            rich.append(spec)
+            quote_windows.append((spec.start, spec.start + spec.duration))
     else:
         quote_text = ""
         if isinstance(rewrite, dict):

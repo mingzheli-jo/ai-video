@@ -1645,9 +1645,9 @@ def test_hook_opener_offsets_fallback_without_timeline_unchanged():
     assert opener["offsets"][1] == pytest.approx(4 / 9 * 6.0, abs=0.05)
 
 
-def test_golden_card_takes_midmost_and_other_golden_stays_sync_moment():
-    """两个命中金句：离中点近的升级金句卡（口播原句+真句起点），另一个保持
-    golden_lines 时刻（start=句 start、多行按标点拆、offsets 按字符占比分摊）。"""
+def test_close_golden_lines_only_one_becomes_card_rest_stay_sync():
+    """相邻金句间隔 < QUOTE_CARD_MIN_GAP_S(35s) 时只出一张卡（贪心取先出的），
+    另一个保持 golden_lines 堆叠式（2026-07-22 改：金句卡沿片长铺、间隔控制）。"""
     plan = {
         "sections": [
             {"index": 0, "title": "hook", "duration_seconds": 5.0},
@@ -1665,26 +1665,68 @@ def test_golden_card_takes_midmost_and_other_golden_stays_sync_moment():
     }
     timeline = [
         {"text": "先认清能力圈，再谈执行", "start": 8.0, "end": 11.0},
-        # 起 30.0（46% 处，离 55% 中点更近 → 成卡），止 34.0（时长 4.0s）
         {"text": "我始终相信持续做正确的事，时间会回报你。", "start": 30.0, "end": 34.0},
     ]
     manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
 
-    # 卡：口播原句、真句起点、时长盖住整句 min(max(4.0+1.2, 4.5), 6.0)=5.2
+    # 8.0 与 30.0 仅隔 22s < 35s → 贪心取先出的 8.0 成卡，口播原句、真句起点、
+    # 时长 min(max(3.0+1.2, 4.5), 6.0)=4.5
     cards = [e for e in manifest["effects"] if e["type"] == "quote_card"]
     assert len(cards) == 1
-    assert cards[0]["start"] == pytest.approx(30.0, abs=1 / 30)
-    assert cards[0]["text"] == "我始终相信持续做正确的事，时间会回报你。"
-    assert cards[0]["duration"] == pytest.approx(5.2, abs=1 / 30)
+    assert cards[0]["start"] == pytest.approx(8.0, abs=1 / 30)
+    assert cards[0]["text"] == "先认清能力圈，再谈执行"
+    assert cards[0]["duration"] == pytest.approx(4.5, abs=1 / 30)
 
-    # 时刻：另一金句保持 golden_lines，多行标点拆 + 字符占比 offsets（span=3.0）
+    # 30.0 那句间隔不足没成卡 → 保持 golden_lines 堆叠式
     golden = [e for e in manifest["effects"] if e["type"] == "golden_lines"]
     assert len(golden) == 1
-    g = golden[0]
-    assert g["start"] == pytest.approx(8.0, abs=1 / 30)
-    assert g["lines"] == ["先认清能力圈", "再谈执行"]
-    assert g["offsets"][0] == 0.0
-    assert g["offsets"][1] == pytest.approx(6 / 10 * 3.0, abs=0.05)
+    assert golden[0]["start"] == pytest.approx(30.0, abs=1 / 30)
+    assert golden[0]["lines"] == ["我始终相信持续做正确的事", "时间会回报你"]
+
+
+def test_spaced_golden_lines_each_become_quote_card():
+    """间隔 >= 35s 的多句金句各自成卡，沿片长铺开（2026-07-22 用户定案核心场景）。"""
+    plan = {
+        "sections": [
+            {"index": 0, "title": "hook", "duration_seconds": 5.0},
+            {"index": 1, "title": "节1", "duration_seconds": 180.0},
+        ]
+    }
+    # 三句金句，真句起点 40 / 90 / 150，两两间隔 50s >= 35s
+    golden = ["先认清能力圈再谈执行的节奏", "持续做正确的事时间会回报你", "把复利留给真正重要的选择"]
+    rewrite = {"sections": [{"narration": "口播",
+                             "emphasis": [{"text": g, "kind": "golden"} for g in golden]}]}
+    timeline = [
+        {"text": golden[0], "start": 40.0, "end": 44.0},
+        {"text": golden[1], "start": 90.0, "end": 94.0},
+        {"text": golden[2], "start": 150.0, "end": 154.0},
+    ]
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    cards = [e for e in manifest["effects"] if e["type"] == "quote_card"]
+    assert [round(c["start"], 1) for c in cards] == [40.0, 90.0, 150.0]
+    assert all(c["text"] in golden for c in cards)
+
+
+def test_quote_cards_capped_and_spaced():
+    """金句卡封顶 QUOTE_CARD_MAX_COUNT，且相邻间隔恒 >= 35s。"""
+    from video_factory.effects import QUOTE_CARD_MAX_COUNT, QUOTE_CARD_MIN_GAP_S
+
+    # 10 句金句、每 20s 一句（间隔 < 35s，考验贪心间隔控制）
+    n = 10
+    golden = [f"这是第{i}句足够长的金句内容表达" for i in range(n)]
+    rewrite = {"sections": [{"narration": "口播",
+                             "emphasis": [{"text": g, "kind": "golden"} for g in golden]}]}
+    timeline = [{"text": golden[i], "start": 20.0 + i * 20.0, "end": 24.0 + i * 20.0}
+                for i in range(n)]
+    plan = {"sections": [
+        {"index": 0, "title": "hook", "duration_seconds": 5.0},
+        {"index": 1, "title": "节1", "duration_seconds": 20.0 * n + 30},
+    ]}
+    manifest = build_effects_manifest(plan, rewrite, timeline=timeline)
+    cards = sorted((e["start"] for e in manifest["effects"] if e["type"] == "quote_card"))
+    assert len(cards) <= QUOTE_CARD_MAX_COUNT
+    for a, b in zip(cards, cards[1:]):
+        assert b - a >= QUOTE_CARD_MIN_GAP_S - 1e-6
 
 
 def test_golden_lines_single_impact_sfx_not_per_line(tmp_path):
@@ -2204,3 +2246,21 @@ def test_number_pop_is_retired_end_to_end():
 
 import re as _re
 _NUMBER_ONLY_RE = _re.compile(r"\d+(?:\.\d+)?%|\d+(?:\.\d+)?(?:步|倍|年|个|条|招|天|分钟|小时|万|亿)")
+
+
+def test_fuzzy_matches_condensed_golden_subsequence():
+    """金句 emphasis 是口播的压缩转述（抽词）时，有序子序列紧凑匹配仍能锚定
+    （2026-07-22 实测 studio_0722_095342：4 句金句 3 句因连续子串失配被丢）。"""
+    from video_factory.effects import _find_timeline_sentence_fuzzy
+
+    timeline = [
+        {"text": "一个停车场老板躺着就能收钱", "start": 10.0, "end": 13.0},
+        {"text": "资源比努力更值钱，信息差比苦力更赚钱", "start": 20.0, "end": 24.0},
+        {"text": "完全无关的另一句口播内容在这里", "start": 30.0, "end": 33.0},
+    ]
+    # "躺着收钱" ⊂子序列 "躺着(就能)收钱"
+    assert _find_timeline_sentence_fuzzy(timeline, "躺着收钱")["start"] == 10.0
+    # "资源比努力值钱" ⊂子序列 "资源比努力(更)值钱"
+    assert _find_timeline_sentence_fuzzy(timeline, "资源比努力值钱")["start"] == 20.0
+    # 散落跨度过大的不误锚：字都在但太分散 → 跨度比超阈值 → None
+    assert _find_timeline_sentence_fuzzy(timeline, "一钱") is None
