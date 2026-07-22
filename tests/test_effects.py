@@ -865,6 +865,54 @@ def test_manifest_hook_opener_splits_hook_verbatim_with_speech_offsets():
         assert all(e["type"] != gone for e in manifest["effects"])
 
 
+def test_hook_offsets_multiple_lines_within_one_timeline_sentence():
+    """2026-07-21 实测 studio_0721_213852：显示行按子句切、比 timeline 整句细，
+    两个显示行落在同一句里时旧版整体回落字符占比估算，逐行滞后越来越大。
+
+    修复后：句内按行首字符占比插值，offset 与烧录字幕逐毫秒对齐。
+    """
+    from video_factory.effects import _hook_offsets_from_timeline
+
+    # 真实数据：3 个显示行，但 timeline 只有 2 句（前两行同在句 0）
+    timeline = [
+        {"start": 0.0, "end": 3.84, "text": "月薪三千和月薪三万，本质没区别"},
+        {"start": 3.84, "end": 7.80, "text": "看完这条视频，三步搞懂赚钱的四种模式"},
+    ]
+    lines = ["月薪三千和月薪三万", "本质没区别", "看完这条视频"]
+
+    result = _hook_offsets_from_timeline(lines, timeline, 5.0)
+    assert result is not None, "两行同句不该再匹配失败回落估算"
+    offsets, speech_end = result
+
+    # 烧录字幕实际时间是 [0.00, 2.47, 3.84]（studio_0721_213852/subtitles.ass）
+    assert offsets[0] == pytest.approx(0.0)
+    assert offsets[1] == pytest.approx(2.47, abs=0.05)   # 句0内 9/14×3.84
+    assert offsets[2] == pytest.approx(3.84, abs=0.05)   # 句1起点
+    # 严格递增（逐行只会更晚，不会倒挂）
+    assert offsets[0] < offsets[1] < offsets[2]
+
+
+def test_hook_offsets_one_line_per_sentence_unchanged():
+    """1:1 场景（每行恰好一整句）行为不变：offset = 句起点。"""
+    from video_factory.effects import _hook_offsets_from_timeline
+
+    timeline = [
+        {"start": 0.0, "end": 2.0, "text": "第一句钩子"},
+        {"start": 2.0, "end": 4.5, "text": "第二句钩子"},
+    ]
+    offsets, speech_end = _hook_offsets_from_timeline(["第一句钩子", "第二句钩子"], timeline, 5.0)
+    assert offsets == pytest.approx([0.0, 2.0])
+    assert speech_end == pytest.approx(4.5)
+
+
+def test_hook_offsets_unmatched_line_returns_none():
+    """任一行在 timeline 里定位不到 → 返回 None（调用方回落字符占比）。"""
+    from video_factory.effects import _hook_offsets_from_timeline
+
+    timeline = [{"start": 0.0, "end": 2.0, "text": "完全不同的口播内容"}]
+    assert _hook_offsets_from_timeline(["屏幕上的钩子"], timeline, 5.0) is None
+
+
 def test_manifest_hook_opener_falls_back_to_intro_without_hook():
     # 无 hook（异常/旧 rewrite.json）→ 回落传统 intro，start=0；绝不出 opening_card。
     manifest = build_effects_manifest(PLAN, {"publish_titles": ["候选标题一"]})

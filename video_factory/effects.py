@@ -401,31 +401,52 @@ def _find_timeline_sentence_fuzzy(timeline: list[dict] | None, text: str) -> dic
 def _hook_offsets_from_timeline(
     lines: list[str], timeline: list[dict] | None, duration: float
 ) -> tuple[list[float], float] | None:
-    """逐行在 timeline 顺序匹配句子（从头消费防重复），命中取句 start 作 offset。
+    """逐行在 timeline 上定位起点作 offset，相对开屏（start=0）。
 
-    任一行找不到匹配返回 None（调用方整体回落字符占比估算）。offset 相对开屏（start=0），
-    钳位到 [0, duration - 末行最短停留]。返回 (offsets, hook 口播终点秒)——终点供
-    调用方把开屏时长拉到"盖住整段 hook 口播"（2026-07-16 修开屏一闪而过）。
+    显示行按子句切（_split_hook_lines），比 timeline 的整句更细——多个显示行常落在
+    同一句里。因此定位不是"一行配一句"，而是在句内按**行首字符位置**在该句
+    [start,end] 区间插值：offset = 句起点 + (行首字符位 / 句字符数) × 句时长。
+    这与字幕阶段（whisper / 比例）在句内定位的口径一致，大字与字幕天然对齐。
+
+    2026-07-21 修（实测 studio_0721_213852）：旧版一行配一句、游标只进不退，两个
+    显示行落在同一句时第二行在剩余句子里永远匹配不上 → 整体返回 None → 回落字符
+    占比估算，逐行滞后越来越大（第一句准、后面越来越慢）。
+
+    任一行定位失败返回 None（调用方整体回落字符占比估算）。钳位到
+    [0, duration - 末行最短停留]。返回 (offsets, hook 口播终点秒)——终点供调用方把
+    开屏时长拉到"盖住整段 hook 口播"（2026-07-16 修开屏一闪而过）。
     """
     if not timeline:
         return None
     offsets: list[float] = []
     speech_end = 0.0
-    cursor = 0
+    sent_idx = 0
+    char_cursor = 0  # 当前句已消费到的归一化字符位置（同句多行时逐行右移，防重复命中）
     for line in lines:
         norm_line = _normalize_for_match(line)
-        matched: dict | None = None
-        for j in range(cursor, len(timeline)):
-            norm_sent = _normalize_for_match(timeline[j].get("text"))
-            if norm_line and (norm_line in norm_sent or norm_sent in norm_line):
-                matched = timeline[j]
-                cursor = j + 1
-                break
-        if matched is None:
+        if not norm_line:
             return None
-        start = float(matched.get("start") or 0.0)
-        speech_end = max(speech_end, float(matched.get("end") or 0.0))
-        offsets.append(round(min(max(0.0, start), max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
+        located: tuple[int, int, str] | None = None
+        while sent_idx < len(timeline):
+            norm_sent = _normalize_for_match(timeline[sent_idx].get("text"))
+            pos = norm_sent.find(norm_line, char_cursor)
+            if pos != -1:
+                located = (sent_idx, pos, norm_sent)
+                break
+            sent_idx += 1  # 本行不在此句剩余部分 → 进入下一句从头找
+            char_cursor = 0
+        if located is None:
+            return None
+        idx, pos, norm_sent = located
+        sent = timeline[idx]
+        s_start = float(sent.get("start") or 0.0)
+        s_end = float(sent.get("end") or 0.0)
+        speech_end = max(speech_end, s_end)
+        # 句内按字符占比插值定位行首（与字幕阶段同口径）。
+        frac = pos / max(1, len(norm_sent))
+        raw = s_start + frac * max(0.0, s_end - s_start)
+        offsets.append(round(min(max(0.0, raw), max(0.0, duration - _HOOK_LAST_LINE_MIN_SHOW)), 3))
+        char_cursor = pos + len(norm_line)  # 下一行从本行之后找（同句继续 / 溢出则进下句）
     return offsets, speech_end
 
 
