@@ -1670,3 +1670,100 @@ def test_beat_match_no_credentials_says_so(tmp_path, monkeypatch):
     joined = " ".join(warn["warnings"])
     assert "凭据" in joined
     assert "BUG" not in joined
+
+
+# --- source 是链接：自动下载（2026-07-22 用户定案，省去另存本地的操作链路） ---
+
+def test_is_source_url_detects_links_and_share_text():
+    assert batch._is_source_url("https://v.douyin.com/abc/")
+    assert batch._is_source_url("http://x/y")
+    # 「复制打开抖音」口令（链接不在开头）也认
+    assert batch._is_source_url("7.53 复制打开抖音 https://v.douyin.com/abc/ 作品")
+    # 本机路径不认
+    assert not batch._is_source_url(r"D:\videos\x.mp4")
+    assert not batch._is_source_url("/home/u/a.txt")
+    assert not batch._is_source_url("")
+
+
+def test_validate_job_accepts_url_source_without_existence_check():
+    """URL source 不校验本地存在性（run_job 会先下载）。"""
+    job = resolve_job({"name": "u", "source": "https://v.douyin.com/abc/",
+                       "visual_source": "ai_image"}, 0)
+    errors = validate_job(job)
+    assert not any("source 不存在" in e for e in errors)
+    assert not any("缺少 source" in e for e in errors)
+
+
+def _url_job(tmp_path, url="https://v.douyin.com/abc/"):
+    out = tmp_path / "j"
+    return resolve_job({"name": "j", "source": url, "visual_source": "ai_image",
+                        "duration": 10, "output": str(out)}, 0)
+
+
+def test_run_job_downloads_url_source_then_replaces_with_local_path(tmp_path, monkeypatch):
+    """source 是抖音链接 → 先下载、把 job.source 换成本地文件，阶段读到的是本地路径。"""
+    from pathlib import Path
+
+    from video_factory import source_download
+
+    def fake_download(url, out_dir, **kw):
+        target = Path(out_dir) / "source" / "source.mp4"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"DL" * 1000)
+        return source_download.SourceDownloadResult(
+            video_path=target, report_path=Path(out_dir) / "source_download.json",
+            platform="douyin", title="下载的标题")
+    monkeypatch.setattr(source_download, "download_source_video", fake_download)
+
+    seen = []
+    monkeypatch.setattr(batch, "STAGE_RUNNERS",
+                        {s: (lambda job, jd, _seen=seen: (_seen.append(job.source) or 0))
+                         for s in batch.STAGE_RUNNERS})
+
+    stages = []
+    report = run_job(_url_job(tmp_path), on_stage=stages.append)
+
+    assert report.status == "ok"
+    assert stages[0] == "source_download"                 # 看板首个阶段是下载
+    assert seen and seen[0].endswith("source.mp4")        # 阶段读到本地文件而非 URL
+    assert not seen[0].startswith("http")
+
+
+def test_run_job_download_failure_reports_failed(tmp_path, monkeypatch):
+    """下载失败 → 记 failed（stage=source_download），不进后续阶段。"""
+    from video_factory import source_download
+
+    def boom(url, out_dir, **kw):
+        raise source_download.SourceDownloadError("链接已失效或私密")
+    monkeypatch.setattr(source_download, "download_source_video", boom)
+
+    ran = []
+    monkeypatch.setattr(batch, "STAGE_RUNNERS",
+                        {s: (lambda job, jd, _r=ran: (_r.append(s) or 0)) for s in batch.STAGE_RUNNERS})
+
+    report = run_job(_url_job(tmp_path))
+
+    assert report.status == "failed"
+    assert report.stage_failed == "source_download"
+    assert "链接已失效" in report.error
+    assert ran == []                                       # 下载失败，任何生产阶段都没跑
+
+
+def test_run_job_local_source_skips_download(tmp_path, monkeypatch):
+    """本地 source 不触发下载（download_source_video 绝不被调）。"""
+    from video_factory import source_download
+
+    def must_not_call(*a, **k):
+        raise AssertionError("本地 source 不该走下载")
+    monkeypatch.setattr(source_download, "download_source_video", must_not_call)
+
+    src = tmp_path / "local.mp4"
+    src.write_bytes(b"local video bytes")
+    job = resolve_job({"name": "j", "source": str(src), "visual_source": "ai_image",
+                       "duration": 10, "output": str(tmp_path / "j")}, 0)
+    stages = []
+    monkeypatch.setattr(batch, "STAGE_RUNNERS",
+                        {s: (lambda job, jd, _s=stages: (_s.append(s) or 0)) for s in batch.STAGE_RUNNERS})
+    report = run_job(job)
+    assert report.status == "ok"
+    assert "source_download" not in stages

@@ -62,6 +62,7 @@ def download_source_video(
     runner: Runner = subprocess.run,
     executable: Sequence[str] | None | object = ...,
     title_context: dict | None = None,
+    douyin_downloader: Callable[..., str] | object = ...,
 ) -> SourceDownloadResult:
     output_dir = Path(output_dir)
     report_path = output_dir / "source_download.json"
@@ -69,9 +70,28 @@ def download_source_video(
     source_dir.mkdir(parents=True, exist_ok=True)
     platform = supported_source_url(source_url)
     if not platform:
+        # 可能是"复制打开抖音…https://v.douyin.com/x"这类分享口令（链接不在开头，
+        # 整串 urlparse 拿不到域名）：抽出第一个链接再判平台（2026-07-22）。
+        from video_factory.douyin_native import extract_first_url
+
+        extracted = extract_first_url(source_url)
+        if extracted and extracted != source_url:
+            platform = supported_source_url(extracted)
+            if platform:
+                source_url = extracted
+    if not platform:
         message = "暂只支持抖音和 YouTube 的公开视频链接。"
         _write_download_report(report_path, source_url, "", "error", error=message)
         raise SourceDownloadError(message)
+
+    # 抖音优先走原生无水印解析（2026-07-22）：yt-dlp 通用抽取器对抖音不稳，且原生解析
+    # 拿的是无水印版本。解析失败（页面结构变/私密/网络）再回落 yt-dlp（下方通用路径）。
+    if platform == "douyin":
+        native = _download_douyin_native(
+            source_url, source_dir, report_path, progress, title_context, douyin_downloader
+        )
+        if native is not None:
+            return native
 
     command_prefix = _resolve_downloader_executable() if executable is ... else list(executable or [])
     if not command_prefix:
@@ -98,9 +118,54 @@ def download_source_video(
         video_path.replace(target_path)
     info_path = _find_info_json(source_dir)
     title = _title_from_info_json(info_path) or _title_from_stdout(completed.stdout) or target_path.stem
+    source_resolution = _resolution_from_info_json(info_path)
+    return _finalize_source_download(
+        report_path, source_url, platform, target_path, title, strategy,
+        source_resolution, title_context, progress,
+    )
+
+
+def _download_douyin_native(
+    source_url: str,
+    source_dir: Path,
+    report_path: Path,
+    progress: Callable[[str], None] | None,
+    title_context: dict | None,
+    douyin_downloader: Callable[..., str] | object,
+) -> SourceDownloadResult | None:
+    """抖音无水印原生下载；成功返回结果，解析失败返回 None（调用方回落 yt-dlp）。"""
+    from video_factory import douyin_native
+
+    downloader = (
+        douyin_native.download_no_watermark if douyin_downloader is ... else douyin_downloader
+    )
+    target_path = source_dir / "source.mp4"
+    try:
+        desc = downloader(source_url, target_path, progress=progress)
+    except douyin_native.DouyinError as exc:
+        _progress(progress, f"无水印解析失败，改用 yt-dlp 兜底：{exc}")
+        return None
+    title = (desc or "").strip() or target_path.stem
+    return _finalize_source_download(
+        report_path, source_url, "douyin", target_path, title, "douyin_native",
+        "", title_context, progress,
+    )
+
+
+def _finalize_source_download(
+    report_path: Path,
+    source_url: str,
+    platform: str,
+    target_path: Path,
+    title: str,
+    strategy: str,
+    source_resolution: str,
+    title_context: dict | None,
+    progress: Callable[[str], None] | None,
+) -> SourceDownloadResult:
+    """写下载报告 + 生成发布标题候选 + 构造结果（yt-dlp 与原生抖音两条路共用）。"""
     title_candidates = tuple(generate_publish_titles(title, platform=platform, context=title_context or {}))
     recommended_title = title_candidates[0] if title_candidates else ""
-    source_resolution = _resolution_from_info_json(info_path)
     _write_download_report(
         report_path,
         source_url,

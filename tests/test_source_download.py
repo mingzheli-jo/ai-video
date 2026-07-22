@@ -81,7 +81,10 @@ def test_download_source_video_uses_runner_and_writes_manifest(tmp_path):
     assert len(manifest["publish_title_candidates"]) >= 3
 
 
-def test_douyin_download_does_not_use_youtube_android_client(tmp_path):
+def test_douyin_falls_back_to_ytdlp_without_youtube_android_client(tmp_path):
+    """原生无水印解析失败 → 回落 yt-dlp；yt-dlp 抖音命令不带 youtube android client。"""
+    from video_factory.douyin_native import DouyinError
+
     commands = []
 
     def fake_runner(command, **kwargs):
@@ -92,14 +95,48 @@ def test_douyin_download_does_not_use_youtube_android_client(tmp_path):
         output_path.write_bytes(b"video")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
+    def failing_native(url, dest, progress=None):
+        raise DouyinError("测试：强制回落 yt-dlp")
+
     download_source_video(
         "https://v.douyin.com/abc",
         tmp_path,
         runner=fake_runner,
         executable=["yt-dlp"],
+        douyin_downloader=failing_native,
     )
 
-    assert "youtube:player_client=android" not in commands[0]
+    assert commands and "youtube:player_client=android" not in commands[0]
+
+
+def test_douyin_native_no_watermark_is_primary_path(tmp_path):
+    """抖音优先走原生无水印：成功时不调 yt-dlp，报告标注 douyin_native 策略。"""
+    def native_ok(url, dest, progress=None):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"NOWATERMARK" * 200)
+        if progress:
+            progress("下载无水印视频")
+        return "停车场老板躺着收钱"
+
+    def runner_must_not_run(command, **kwargs):  # yt-dlp 不该被调
+        raise AssertionError("原生成功时不应回落 yt-dlp")
+
+    result = download_source_video(
+        "7.53 复制打开抖音 https://v.douyin.com/abc/ 作品",
+        tmp_path,
+        runner=runner_must_not_run,
+        executable=["yt-dlp"],
+        douyin_downloader=native_ok,
+    )
+
+    assert result.platform == "douyin"
+    assert result.title == "停车场老板躺着收钱"
+    assert result.video_path == tmp_path / "source" / "source.mp4"
+    assert result.video_path.read_bytes().startswith(b"NOWATERMARK")
+    manifest = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "ready"
+    assert manifest["download_strategy"] == "douyin_native"
+    assert manifest["source_title"] == "停车场老板躺着收钱"
 
 
 def test_download_source_video_reports_real_error_after_warnings(tmp_path):

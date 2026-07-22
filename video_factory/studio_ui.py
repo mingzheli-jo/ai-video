@@ -731,7 +731,7 @@ function renderBatchJobs() {
       <label>视觉来源</label>
       <select data-idx="${i}" data-f="visual_source">${VISUAL_OPTS.map(([v, l]) => `<option value="${v}"${v === (j.visual_source || 'video') ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
       <label>原片 / 字幕 / 文本（source）</label>
-      <div class="bj-file"><input type="text" data-idx="${i}" data-f="source" value="${esc(j.source)}" placeholder="上传，或粘贴本机绝对路径"><label class="bj-up">上传<input type="file" data-idx="${i}" data-up="source"></label></div>
+      <div class="bj-file"><input type="text" data-idx="${i}" data-f="source" value="${esc(j.source)}" placeholder="上传 / 本机路径 / 抖音链接（自动下载无水印）"><label class="bj-up">上传<input type="file" data-idx="${i}" data-up="source"></label></div>
       <label>素材库（assets 目录，AI 生图时可留空）</label>
       <div class="bj-file"><input type="text" data-idx="${i}" data-f="assets" value="${esc(j.assets)}" placeholder="上传多个素材，或粘贴本机目录路径"><label class="bj-up">上传<input type="file" data-idx="${i}" data-up="assets" multiple></label></div>
       <label>创作简报（brief，可选）</label>
@@ -1106,7 +1106,8 @@ def _body() -> str:
           </div>
           <label>原片 / 字幕 / 文本（source）</label>
           <div class="drop" id="sourceDrop"><input type="file" id="sourceFile"><span id="sourceDropLabel">拖入文件或点击上传</span></div>
-          <input type="text" id="f_source" placeholder="或粘贴本机绝对路径" style="margin-top:8px">
+          <input type="text" id="f_source" placeholder="或粘贴本机绝对路径 / 抖音链接（自动下载无水印）" style="margin-top:8px">
+          <div class="hint" style="margin-top:4px;opacity:.7;font-size:12px">粘抖音链接或「复制打开抖音…」口令，提交后自动下载无水印视频再仿写，无需另存本地。</div>
           <div id="assetsBlock">
             <label>素材库（assets 目录）</label>
             <div class="drop" id="assetDrop"><input type="file" id="assetFile" multiple><span id="assetDropLabel">拖入多个素材或点击上传</span></div>

@@ -238,6 +238,16 @@ def resolve_job(raw: dict, index: int) -> ResolvedJob:
     )
 
 
+def _is_source_url(source: str) -> bool:
+    """source 是网络链接吗（含"复制打开抖音…https://v.douyin.com/x"这类分享口令）。
+
+    只认含 http(s):// 的文本：本机路径（D:\\videos\\x.mp4）绝不含它，抖音分享口令
+    含它但不以它开头，故用子串判断而非 startswith，口令与裸链接都能识别。
+    """
+    text = str(source or "")
+    return "http://" in text or "https://" in text
+
+
 def validate_job(job: ResolvedJob) -> list[str]:
     """校验一个展开后的 job，返回中文错误列表（空列表表示合法）。
 
@@ -253,7 +263,11 @@ def validate_job(job: ResolvedJob) -> list[str]:
     if job.audio and not Path(job.audio).exists():
         errors.append(f"audio 不存在：{job.audio}")
     if not job.source:
-        errors.append("缺少 source（原片/字幕/文本路径）。")
+        errors.append("缺少 source（原片/字幕/文本路径，或抖音/YouTube 链接）。")
+    elif _is_source_url(job.source):
+        # 抖音/YouTube 链接：run_job 会在跑 rewrite 前先下载成本地文件（2026-07-22），
+        # 此刻还没有本地文件，不校验存在性。非法域名的链接在 run_job 下载步骤里报错。
+        pass
     elif not Path(job.source).exists():
         errors.append(f"source 不存在：{job.source}")
     elif Path(job.source).is_file() and Path(job.source).stat().st_size == 0:
@@ -1051,6 +1065,46 @@ def _execute_stage(
     return None
 
 
+def _try_download_source(
+    job: ResolvedJob,
+    job_dir: Path,
+    on_stage: Callable[[str], None] | None,
+    started: float,
+) -> "ResolvedJob | JobReport":
+    """source 是链接时下载成本地文件并返回 source 换成本地路径的新 job；否则原样返回。
+
+    下载失败返回 failed JobReport（stage=source_download），run_job 据此提前收尾。
+    进度以 "source_download" 阶段名回调，任务卡看板可见这一步。
+    """
+    if not _is_source_url(job.source):
+        return job
+    from video_factory import source_download
+
+    if on_stage is not None:
+        try:
+            on_stage("source_download")
+        except Exception:
+            pass
+    try:
+        result = source_download.download_source_video(
+            job.source,
+            job_dir,
+            title_context={"topic": job.brief or "", "style": job.style or ""},
+        )
+    except source_download.SourceDownloadError as exc:
+        return JobReport(
+            name=job.name,
+            status="failed",
+            platform=job.platform,
+            stage_failed="source_download",
+            error=f"来源下载失败：{exc}",
+            outputs=_collect_outputs(job, job_dir),
+            warnings=_collect_job_warnings(job_dir),
+            elapsed_seconds=time.monotonic() - started,
+        )
+    return replace(job, source=str(result.video_path))
+
+
 def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> JobReport:
     """串行执行一个 job 的各阶段；任一阶段返回非 0 或抛异常即记 failed 并停止后续阶段。
 
@@ -1065,6 +1119,14 @@ def run_job(job: ResolvedJob, on_stage: Callable[[str], None] | None = None) -> 
     job_dir = Path(job.output)
     job_dir.mkdir(parents=True, exist_ok=True)
     _clear_stale_outputs(job_dir)  # 清上一轮遗留，防早期失败误报旧成片为本次 final
+
+    # source 是抖音/YouTube 链接 → 先下载成本地文件、把 job.source 换成本地路径
+    # （2026-07-22：省去"另一个项目下载再拖进来"的操作链路）。下载失败即记 failed。
+    downloaded = _try_download_source(job, job_dir, on_stage, started)
+    if isinstance(downloaded, JobReport):
+        return downloaded
+    job = downloaded
+
     stages = _stages_for(job)
 
     if not job.dual_aspect:
