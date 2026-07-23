@@ -111,7 +111,8 @@ def _reply_with_narration(narration: str) -> str:
 def test_rewrite_copy_expands_when_copy_too_short(monkeypatch):
     # 首轮欠写（远低于目标85%）→ 自动扩写回炉；扩写达标后停止并记录轮数。
     short = _reply_with_narration("太短了。")
-    long = _reply_with_narration("这一节写得足够充实，" * 40)  # 每节约400字，两节共约800字
+    # 每节约300字、两节共约600字 → ~125s，落在目标带内（≥85% 达标、≤115% 不触发精简）
+    long = _reply_with_narration("这一节写得足够充实，" * 30)
     calls = []
 
     def fake_chat(system, user, config):
@@ -121,10 +122,10 @@ def test_rewrite_copy_expands_when_copy_too_short(monkeypatch):
     monkeypatch.setattr("video_factory.rewrite.chat_completion", fake_chat)
     result = rewrite_copy("原始文案", LLMConfig(provider="deepseek"), target_duration_seconds=120)
 
-    assert len(calls) == 2  # 首轮 + 1 轮扩写
+    assert len(calls) == 2  # 首轮 + 1 轮扩写（未超标，不触发精简回炉）
     assert "扩写" in calls[1]  # 第二次调用是扩写提示词
     assert result.expand_rounds == 1
-    # 120s * 4.8 * 0.85 ≈ 490字 → 扩写后 ~800字 达标
+    # 120s * 4.8 * 0.85 ≈ 490字 → 扩写后 ~600字 达标，且未超 115% 上限
     assert result.estimated_duration_seconds >= 120 * 0.85
 
 
@@ -180,6 +181,43 @@ def test_rewrite_copy_expand_survives_llm_error(monkeypatch):
 
     assert "首轮内容短" in result.full_voiceover
     assert result.expand_rounds == 0
+
+
+def test_rewrite_copy_condenses_when_copy_too_long(monkeypatch):
+    # 首轮超写（远超目标115%，模拟5分钟原片诱导的超长稿）→ 自动精简回炉，落回目标附近。
+    long = _reply_with_narration("啰嗦冗长内容反复堆砌，" * 50)   # 两节共约1100字 → ~229s
+    ok = _reply_with_narration("凝练达标的内容，" * 36)          # 两节共约576字 → ~120s
+    calls = []
+
+    def fake_chat(system, user, config):
+        calls.append(system)
+        return long if len(calls) == 1 else ok
+
+    monkeypatch.setattr("video_factory.rewrite.chat_completion", fake_chat)
+    result = rewrite_copy("原始文案", LLMConfig(provider="deepseek"), target_duration_seconds=120)
+
+    assert len(calls) == 2  # 首轮 + 1 轮精简回炉
+    assert "精简" in calls[1]  # 第二次调用是精简提示词
+    # 精简后落回目标带内（不再是 ~229s 的超长稿）——150s 设不住的根治验证
+    assert result.estimated_duration_seconds <= 120 * 1.15
+    assert "凝练达标" in result.full_voiceover
+
+
+def test_rewrite_copy_condense_keeps_best_when_llm_writes_longer(monkeypatch):
+    # 精简越写越长（离目标更远）→ 止损：保留首轮结果、立即停止，不无谓烧轮次。
+    long = _reply_with_narration("啰嗦冗长内容反复堆砌，" * 50)   # ~229s
+    longer = _reply_with_narration("更加啰嗦冗长的废话内容，" * 60)  # 更长，离目标更远
+    calls = []
+
+    def fake_chat(system, user, config):
+        calls.append(system)
+        return long if len(calls) == 1 else longer
+
+    monkeypatch.setattr("video_factory.rewrite.chat_completion", fake_chat)
+    result = rewrite_copy("原始文案", LLMConfig(provider="deepseek"), target_duration_seconds=120)
+
+    assert len(calls) == 2  # 首轮 + 1 次失败的精简尝试，随即止损
+    assert "啰嗦冗长内容反复堆砌" in result.full_voiceover  # 保留的是首轮结果
 
 
 def test_rewrite_json_records_expand_rounds(monkeypatch, tmp_path):

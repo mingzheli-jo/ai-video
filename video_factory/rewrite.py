@@ -50,6 +50,13 @@ MIN_SECTIONS = 2
 MIN_LENGTH_RATIO = 0.85
 MAX_EXPAND_ROUNDS = 2
 
+# 时长闭环（对称的另一侧：超写裁剪）：预估口播时长高于目标的 115% 就让 LLM 精简回炉，
+# 最多 2 轮。2026-07-23 用户实测："设 150s 但传 5 分钟原片时，时长设置没用了"——根因是
+# 整段转写全文喂进 LLM 诱导超长稿，而此前字数闭环只补短不裁长，超长稿被原样放行；
+# 成片时长=配音时长=稿子字数，于是目标时长彻底失控。这一侧把稿子拉回目标附近。
+MAX_LENGTH_RATIO = 1.15
+MAX_CONDENSE_ROUNDS = 2
+
 # 用户自定义改写文风指令（仿照生图 IMAGE_STYLE_PROMPT 的同款机制）：
 # 优先级 环境变量 > settings.yaml > 空（空=只用内置七种内容类型模板）。
 # 非空时作为「全局创作指令」追加进 system prompt，压过模板的文风约定，
@@ -324,6 +331,33 @@ def build_expand_prompts(result: RewriteResult, style: RewriteStyle) -> tuple[st
     return system_prompt, user_prompt
 
 
+def build_condense_prompts(result: RewriteResult, style: RewriteStyle) -> tuple[str, str]:
+    """字数超标时的精简提示词：保结构保风格，只把每节口播压回目标字数（扩写的镜像）。"""
+    target_chars = round(result.target_duration_seconds * CHARS_PER_SECOND)
+    current_chars = len(re.sub(r"\s", "", result.full_voiceover))
+    system_prompt = (
+        f"{style.persona}你上一轮产出的口播稿总量约 {current_chars} 字，"
+        f"明显超过目标 {target_chars} 字（对应 {result.target_duration_seconds} 秒口播）。\n"
+        "请在【不改变 hook、不增删小节、不改小节标题、不改叙事顺序、保持口吻、"
+        "保留每节最核心的信息点】的前提下，把每个小节的 narration 精简得更凝练："
+        "删掉冗余描述、重复表达、次要细节和口水话，只留最有信息量和感染力的内容，"
+        f"使全部口播文字总量压到约 {target_chars} 字（允许上下 10%）。\n"
+        "只输出一个 JSON 对象，格式与输入完全相同，不要输出任何其他文字或代码块标记。"
+    )
+    payload = {
+        "hook": result.hook,
+        "opening_hooks": list(result.opening_hooks),
+        "sections": [
+            {"title": s.title, "narration": s.narration, "visual_hint": s.visual_hint}
+            for s in result.sections
+        ],
+        "publish_titles": list(result.publish_titles),
+        "notes": result.notes,
+    }
+    user_prompt = json.dumps(payload, ensure_ascii=False)
+    return system_prompt, user_prompt
+
+
 def rewrite_copy(
     source_text: str,
     config: LLMConfig | None = None,
@@ -359,6 +393,30 @@ def rewrite_copy(
         )
         if candidate.estimated_duration_seconds <= result.estimated_duration_seconds:
             break
+        result = candidate
+
+    # 时长闭环第一级的另一侧（超写裁剪）：预估口播高于目标 115% 就回炉精简，最多 2 轮。
+    # 采纳判据用"到目标的绝对距离缩小"：既收下"仍偏长但更接近目标"的结果（300→180 好过
+    # 300），也自动挡掉"精简过头反而离目标更远"的坏候选。精简失败/没更近则止损。
+    # 根治"5 分钟原片诱导超长稿、150s 设不住"。
+    target_seconds = float(target_duration_seconds)
+    for _round_no in range(1, MAX_CONDENSE_ROUNDS + 1):
+        if result.estimated_duration_seconds <= target_seconds * MAX_LENGTH_RATIO:
+            break
+        condense_system, condense_user = build_condense_prompts(result, resolved_style)
+        try:
+            raw = chat_completion(condense_system, condense_user, config)
+            condensed_body = parse_rewrite_response(raw)
+        except (LLMProviderError, RewriteError):
+            break
+        candidate = _result_from_body(
+            condensed_body, config, target_duration_seconds, resolved_style.key,
+            result.expand_rounds,  # 沿用扩写轮数元数据，精简不改写它的语义
+        )
+        if abs(candidate.estimated_duration_seconds - target_seconds) >= abs(
+            result.estimated_duration_seconds - target_seconds
+        ):
+            break  # 没有更接近目标（更长或精简过头），止损
         result = candidate
     return result
 
