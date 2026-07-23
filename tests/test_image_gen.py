@@ -63,6 +63,36 @@ def test_build_image_plan_count_mismatch_raises(monkeypatch):
         build_image_plan(REWRITE)
 
 
+def test_build_image_plan_retries_and_recovers_from_truncation(monkeypatch):
+    """LLM 首次返回被 max_tokens 截断的半截 JSON，重投一把拿到完整数组即成功
+    （2026-07-23 studio_0723_102116 整单判死的回归）。"""
+    truncated = '[{"prompt": "p1", "category": "场景", "tags": ["a"]},{"prompt": "p2'
+    calls = {"n": 0}
+
+    def flaky(_s, _u, _c):
+        calls["n"] += 1
+        return truncated if calls["n"] == 1 else _plan_reply()
+
+    monkeypatch.setattr("video_factory.llm.chat_completion", flaky)
+    plan = build_image_plan(REWRITE)
+    assert calls["n"] == 2 and len(plan) == 2  # 第一次截断、第二次成功
+
+
+def test_extract_json_object_array_salvages_and_tolerates():
+    from video_factory.image_gen import _extract_json_object_array
+
+    # 截断：救回完整的前 1 个对象，丢弃残缺尾对象
+    truncated = '[{"prompt": "含{括号}", "category": "场景", "tags": ["x"]},{"prompt": "半'
+    got = _extract_json_object_array(truncated)
+    assert len(got) == 1 and got[0]["prompt"] == "含{括号}"
+    # 尾逗号：宽容解析
+    assert _extract_json_object_array('[{"a":1,},]') == [{"a": 1}]
+    # 代码块围栏
+    assert len(_extract_json_object_array('```json\n[{"a":1}]\n```')) == 1
+    # 彻底无 JSON
+    assert _extract_json_object_array("抱歉我无法完成") == []
+
+
 # --- 方舟生图 ---
 
 

@@ -190,11 +190,90 @@ class ImagePlanItem:
 
 # --- LLM 派生每节的生图需求 -----------------------------------------------
 
+# LLM 结构化 JSON（配图规划 / 拍级匹配）的调用参数。
+# max_tokens 从 llm 默认 4096 提到 8192：9 节规划实测仅需 <1KB，但拍数一多、
+# 或 DeepSeek 偶发啰嗦时 4096 会把 JSON 数组截成半截。翻倍留足余量（各家上限≥8K）。
+_LLM_JSON_MAX_TOKENS = 8192
+# 解析失败/条数不符时最多重试的总次数。LLM 是随机的，重投一把几乎必然拿到完整
+# 合法 JSON——这是治「偶发返回半截/带尾逗号 JSON」最直接的一招（2026-07-23 实测
+# studio_0723_102116：section 路径 JSON 被截断，整单当场判死）。
+_LLM_JSON_MAX_ATTEMPTS = 3
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """去掉 } 或 ] 前的尾逗号——LLM 常见小错，Python json 严格模式不接受。"""
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def _salvage_json_objects(text: str) -> list[dict]:
+    """花括号平衡扫描，抢救文本里所有完整的顶层 JSON 对象。
+
+    专治被 max_tokens 截断的半截数组：完整的前 N 个对象照样能用，尾部残缺对象丢弃。
+    正确跳过字符串内部的花括号与转义，不会把 "prompt" 里的 { 误当成对象边界。
+    """
+    objects: list[dict] = []
+    depth = 0
+    in_str = False
+    escaped = False
+    start = -1
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    obj = json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    objects.append(obj)
+                start = -1
+    return objects
+
+
+def _extract_json_object_array(raw_text: str) -> list[dict]:
+    """从 LLM 回复里尽力抽出「对象数组」，返回 dict 列表（彻底救不回来返回 []）。
+
+    容错阶梯：去 ```json 围栏 → 定位最外层 [..] → json.loads → 去尾逗号再 loads →
+    逐对象花括号平衡抢救。最后一步能从被 max_tokens 截断的半截数组里救回完整对象。
+    """
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    start = text.find("[")
+    if start < 0:
+        return _salvage_json_objects(text)  # 连数组括号都没有也试着救对象
+    end = text.rfind("]")
+    candidate = text[start : end + 1] if end > start else text[start:]
+    for variant in (candidate, _strip_trailing_commas(candidate)):
+        try:
+            body = json.loads(variant)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(body, list):
+            return [x for x in body if isinstance(x, dict)]
+    return _salvage_json_objects(text[start:])
+
 
 def build_image_plan(rewrite: dict) -> list[ImagePlanItem]:
-    """一次 LLM 调用：为每个分节产出 {prompt, category, tags}。
+    """为每个分节产出 {prompt, category, tags}（一次 LLM 调用，失败重试至多数次）。
 
     惰性导入 llm/rewrite（与 subtitles 的翻译同款做法），无凭据抛 RewriteError 由调用方转译。
+    LLM 偶发返回半截/带尾逗号 JSON 时先重投（几乎必然拿到完整数组），多次仍不等长才抛
+    ImageGenError——由 batch 节级回落转译成任务卡可见告警，而非静默糊弄。
     """
     sections = rewrite.get("sections") or []
     if not sections:
@@ -222,10 +301,19 @@ def build_image_plan(rewrite: dict) -> list[ImagePlanItem]:
         }
         for s in sections
     ]
-    raw = chat_completion(system_prompt, json.dumps(payload, ensure_ascii=False), LLMConfig(provider=provider))
-    items = _parse_plan_response(raw)
+    user_content = json.dumps(payload, ensure_ascii=False)
+    config = LLMConfig(provider=provider, max_tokens=_LLM_JSON_MAX_TOKENS)
+    items: list[dict] = []
+    for _attempt in range(_LLM_JSON_MAX_ATTEMPTS):
+        raw = chat_completion(system_prompt, user_content, config)
+        items = _extract_json_object_array(raw)
+        if len(items) == len(sections):
+            break
     if len(items) != len(sections):
-        raise ImageGenError(f"生图需求条数不匹配：期望 {len(sections)}，LLM 返回 {len(items)}。")
+        raise ImageGenError(
+            f"生图需求条数不匹配：期望 {len(sections)}，LLM 返回 {len(items)}"
+            f"（已重试 {_LLM_JSON_MAX_ATTEMPTS} 次仍未拿到完整数组）。"
+        )
     return [
         ImagePlanItem(
             section_index=i,
@@ -238,19 +326,8 @@ def build_image_plan(rewrite: dict) -> list[ImagePlanItem]:
 
 
 def _parse_plan_response(raw_text: str) -> list[dict]:
-    text = raw_text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
-        raise ImageGenError(f"LLM 回复中找不到 JSON 数组：{raw_text[:200]}")
-    try:
-        body = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise ImageGenError(f"LLM 回复的 JSON 无法解析：{raw_text[:200]}") from exc
-    if not isinstance(body, list) or not all(isinstance(x, dict) for x in body):
-        raise ImageGenError("LLM 回复不是对象数组。")
-    return body
+    """解析配图规划回复为对象列表（尽力容错；救不回来返回 []，由调用方按条数判定）。"""
+    return _extract_json_object_array(raw_text)
 
 
 def _normalize_category(category: str) -> str:
@@ -902,10 +979,22 @@ def match_beats_to_library(
         {"beats": beats_payload, "library": lib_entries},
         ensure_ascii=False,
     )
-    try:
-        raw = chat_completion(system_prompt, user_content, LLMConfig(provider=provider))
-        results = _parse_beat_match_response(raw, beats, library_index)
-    except Exception:  # 网络/解析/条数不符 → 全部回落
+    # 重试 + 容错：拍数一多，4096 token 极易把 JSON 数组截断；DeepSeek 也偶发返回
+    # 半截/带尾逗号 JSON。先重投几次（几乎必然拿到完整合法数组）+ max_tokens 提到
+    # 8192，仍拿不到等长结果才回落节级路径（返回 None）。网络/无凭据直接回落。
+    config = LLMConfig(provider=provider, max_tokens=_LLM_JSON_MAX_TOKENS)
+    results = None
+    for _attempt in range(_LLM_JSON_MAX_ATTEMPTS):
+        try:
+            raw = chat_completion(system_prompt, user_content, config)
+            results = _parse_beat_match_response(raw, beats, library_index)
+            break
+        except ImageGenError:
+            results = None  # 条数/格式不符：重投一把
+            continue
+        except Exception:  # 网络/无凭据等：重试无益，直接回落节级
+            return None
+    if results is None:
         return None
 
     # 代码端去重：同一 file 第二次出现 → 改为 generate
@@ -959,27 +1048,18 @@ def _parse_beat_match_response(
     beats: list[Beat],
     library_index: list[dict],
 ) -> list[dict]:
-    """解析 LLM 对 match_beats_to_library 的回复；条数或格式不符时抛 ImageGenError。"""
-    text = raw_text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
-        raise ImageGenError(f"LLM 回复中找不到 JSON 数组：{raw_text[:200]}")
-    try:
-        body = json.loads(text[start: end + 1])
-    except json.JSONDecodeError as exc:
-        raise ImageGenError(f"LLM 回复 JSON 无法解析：{raw_text[:200]}") from exc
-    if not isinstance(body, list) or len(body) != len(beats):
+    """解析 LLM 对 match_beats_to_library 的回复；条数不符时抛 ImageGenError（触发重投）。
+
+    容错解析同 build_image_plan：去围栏 / 尾逗号、并能从被截断的半截数组里抢救完整对象。
+    """
+    body = _extract_json_object_array(raw_text)
+    if len(body) != len(beats):
         raise ImageGenError(
-            f"LLM 返回条数不匹配：期望 {len(beats)}，"
-            f"得到 {len(body) if isinstance(body, list) else '非数组'}。"
+            f"LLM 返回条数不匹配：期望 {len(beats)}，得到 {len(body)}。"
         )
     valid_files = {str(e.get("file") or "") for e in library_index if e.get("file")}
     results: list[dict] = []
     for item, beat in zip(body, beats):
-        if not isinstance(item, dict):
-            raise ImageGenError(f"拍 {beat.global_index} 返回不是对象。")
         action = str(item.get("action") or "generate").strip()
         file_val = str(item.get("file") or "").strip()
         prompt = str(item.get("prompt") or "").strip()
