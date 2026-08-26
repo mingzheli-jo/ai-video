@@ -4,9 +4,9 @@
 - 约束：只下载公开可访问且许可允许使用的视频，不绕过登录、DRM 或平台限制；素材入库后需验证文件可播放并保留来源信息。
 
 ## 当前状态
-- ✅ 已完成：完成 Pexels 以外国内视频素材站的官方授权初筛；核实用户所指平台为 Pexels；下载 20 条华夏文化竖屏素材；完成 `ffprobe` 全量验证、抽帧目视检查和来源许可清单。
-- ▶️ 进行中：在现有 20 条基础上，再下载并验证 100 条 Pexels 华夏文化视频，完成后素材总量为 120 条。
-- ⏸️ 待办：把新增素材的来源、作者、用途边界和实测规格同步到 `素材库/华夏文化/README.md`。
+- ✅ 已完成：完成 Pexels 以外国内视频素材站的官方授权初筛；核实用户所指平台为 Pexels；累计下载并入库 120 条华夏文化竖屏素材；新增 100 条已完成去重、`ffprobe` 全量验证、实际视频帧目视检查及来源许可清单同步。
+- ▶️ 进行中：无。
+- ⏸️ 待办：制作讲解视频时按 README 的历史人物、宗教、地点与年代边界选用画面。
 - ❓ 待确认：无。
 
 ## 决策记录（实时维护）
@@ -21,5 +21,8 @@
 ## 工作文件集
 - `素材库/`
 - `素材库/华夏文化/README.md`
+- `素材库/华夏文化/新增100条来源清单.md`
 - `video_factory/output/huaxia_asset_review/contact_sheet.jpg`
+- `video_factory/output/huaxia_asset_expand/video_review/contact_sheet_1.jpg` 至 `contact_sheet_4.jpg`
+- `video_factory/output/huaxia_asset_expand/final_replacement_video_review/contact_sheet.jpg`
 - `doc/项目纪要-Jo.md`
