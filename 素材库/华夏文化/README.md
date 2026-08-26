@@ -43,8 +43,8 @@
 ## 验证记录
 
 - 首批：`ffprobe` 20/20 可解析，总时长 324.62 秒，总大小 335,070,212 字节。
-- 第二批：`ffprobe` 100/100 可解析，总时长 1,504.44 秒，总大小 1,300,522,505 字节，其中 89 条达到 1080 像素宽或 1920 像素高。
-- 全库：120/120 均为 H.264 竖屏视频，总时长 1,829.06 秒，总大小 1,635,592,717 字节，无 `.part` 残留文件。
+- 第二批：`ffprobe` 100/100 可解析，总时长 1,504.45 秒，总大小 1,300,522,505 字节，其中 89 条达到 1080 像素宽或 1920 像素高。
+- 全库：120/120 均为 H.264 竖屏视频，总时长 1,829.07 秒，总大小 1,635,592,717 字节，无 `.part` 残留文件。
 - 首批抽帧总览：`video_factory/output/huaxia_asset_review/contact_sheet.jpg`（本地验证产物，不入库）。
 - 第二批抽帧总览：`video_factory/output/huaxia_asset_expand/video_review/contact_sheet_1.jpg` 至 `contact_sheet_4.jpg`（本地验证产物，不入库）。
 - 目视复核中排除的 3 条加拿大枫叶手工视频未计入 120 条有效素材，已移至 `video_factory/output/huaxia_asset_expand/rejected/` 保留，未删除。
